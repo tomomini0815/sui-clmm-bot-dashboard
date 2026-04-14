@@ -23,7 +23,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, p
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      const response = await fetch('http://localhost:3001/api/config', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+      const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

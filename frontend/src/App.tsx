@@ -18,7 +18,8 @@ function App() {
   const toggleBotState = async () => {
     try {
       const endpoint = isBotActive ? '/api/stop' : '/api/start';
-      const response = await fetch(`http://localhost:3001${endpoint}`, { method: 'POST' });
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+      const response = await fetch(`${apiUrl}${endpoint}`, { method: 'POST' });
       const data = await response.json();
       if (data.success) {
         setIsBotActive(!isBotActive);

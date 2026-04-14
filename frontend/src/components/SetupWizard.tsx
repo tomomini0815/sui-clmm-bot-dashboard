@@ -20,11 +20,12 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
 
   const handleNext = () => setStep(s => s + 1);
   const handlePrev = () => setStep(s => s - 1);
-
+  const handleFaucet = async () => {
     setFaucetStatus('loading');
     setFaucetError(null);
     try {
-      const response = await fetch('http://localhost:3001/api/faucet', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+      const response = await fetch(`${apiUrl}/api/faucet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ privateKey })
@@ -55,7 +56,8 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         : '0xc8d7a1503dc2f9f5b05449a87d8733593e2f0f3e7bffd90541252782e4d2ca20';
 
       // Send config to backend (Mock backend will save to .env)
-      await fetch('http://localhost:3001/api/config', {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+      await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
