@@ -144,7 +144,8 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // 起動開始
 bootstrap().then(() => {
-  app.listen(3001, () => {
-    Logger.success('API Server Running: http://localhost:3001');
+  const port = process.env.PORT || 3001;
+  app.listen(port, () => {
+    Logger.success(`API Server Running: port ${port}`);
   });
 });
