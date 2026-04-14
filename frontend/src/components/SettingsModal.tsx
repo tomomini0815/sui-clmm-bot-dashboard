@@ -6,9 +6,11 @@ interface SettingsModalProps {
   onClose: () => void;
   privateKey: string;
   setPrivateKey: (val: string) => void;
+  apiUrl: string;
+  setApiUrl: (val: string) => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, privateKey, setPrivateKey }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, privateKey, setPrivateKey, apiUrl, setApiUrl }) => {
   const [showPk, setShowPk] = useState(false);
   const [showTelegramToken, setShowTelegramToken] = useState(false);
   
@@ -23,7 +25,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, p
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -103,6 +104,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, p
         <div className="form-group">
           <label>Telegram Chat ID</label>
           <input type="text" className="input-glass" placeholder="Your Chat ID" value={telegramChatId} onChange={(e) => setTelegramChatId(e.target.value)} />
+        </div>
+
+        <div className="form-group" style={{ marginTop: '16px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '16px' }}>
+          <label style={{ color: 'var(--neon-cetus)' }}>Backend API URL (For Sharing/ngrok)</label>
+          <input 
+            type="text" 
+            className="input-glass" 
+            placeholder="http://localhost:3001" 
+            value={apiUrl} 
+            onChange={(e) => setApiUrl(e.target.value)} 
+          />
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+            Default: http://localhost:3001. Change this if using ngrok to share.
+          </p>
         </div>
 
         <div style={{ marginTop: '32px' }}>

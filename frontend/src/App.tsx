@@ -14,11 +14,11 @@ function App() {
 
   // グローバルなフォーム状態（ウィザードと設定間での同期用）
   const [privateKey, setPrivateKey] = useState('');
+  const [apiUrl, setApiUrl] = useState(localStorage.getItem('bot_api_url') || import.meta.env.VITE_API_URL || 'http://localhost:3001');
 
   const toggleBotState = async () => {
     try {
       const endpoint = isBotActive ? '/api/stop' : '/api/start';
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
       const response = await fetch(`${apiUrl}${endpoint}`, { method: 'POST' });
       const data = await response.json();
       if (data.success) {
@@ -26,6 +26,7 @@ function App() {
       }
     } catch (e) {
       console.error('Failed to communicate with bot backend', e);
+      alert('Network Error: Make sure your backend API is running at ' + apiUrl);
     }
   };
 
@@ -105,12 +106,18 @@ function App() {
         onClose={() => setIsSettingsOpen(false)} 
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
+        apiUrl={apiUrl}
+        setApiUrl={(val) => {
+          setApiUrl(val);
+          localStorage.setItem('bot_api_url', val);
+        }}
       />
       <SetupWizard 
         isOpen={isWizardOpen} 
         onComplete={() => setIsWizardOpen(false)} 
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
+        apiUrl={apiUrl}
       />
     </div>
   );

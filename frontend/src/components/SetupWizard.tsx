@@ -6,9 +6,10 @@ interface SetupWizardProps {
   onComplete: () => void;
   privateKey: string;
   setPrivateKey: (val: string) => void;
+  apiUrl: string;
 }
 
-export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, privateKey, setPrivateKey }) => {
+export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, privateKey, setPrivateKey, apiUrl }) => {
   const [step, setStep] = useState(1);
   const [network, setNetwork] = useState<'testnet' | 'mainnet'>('testnet');
   const [safetyUnlocked, setSafetyUnlocked] = useState(false);
@@ -24,7 +25,6 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
     setFaucetStatus('loading');
     setFaucetError(null);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
       const response = await fetch(`${apiUrl}/api/faucet`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -56,7 +56,6 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         : '0xc8d7a1503dc2f9f5b05449a87d8733593e2f0f3e7bffd90541252782e4d2ca20';
 
       // Send config to backend (Mock backend will save to .env)
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
       await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
