@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { Activity, DollarSign, Repeat, ShieldCheck, PowerOff } from 'lucide-react';
 import { StatCard } from './components/StatCard';
 import { PriceChart } from './components/PriceChart';
