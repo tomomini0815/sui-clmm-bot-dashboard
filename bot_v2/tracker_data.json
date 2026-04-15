@@ -1,9 +1,9 @@
 {
-  "rebalanceCount": 3,
+  "rebalanceCount": 4,
   "totalFeesEarned": 0,
   "pnlTotal": 0,
-  "entryPrice": 1.0721552609379565,
-  "currentPrice": 1.0721552609379565,
+  "entryPrice": 0.0008352210614352749,
+  "currentPrice": 0.0008352210614352749,
   "positionSize": 0.05,
   "successfulRebalances": 0,
   "history": [
@@ -30,6 +30,13 @@
       "fee": 0,
       "txDigest": "CrysYo51b488QfVs5BQLdc58o1C7n38DJBiM65jfm2FD",
       "details": "リバランス実行"
+    },
+    {
+      "timestamp": "2026-04-15T08:44:45.175Z",
+      "price": 0.0008352210614352749,
+      "pnl": 0,
+      "fee": 0,
+      "details": "失敗: The amount(0) is Insufficient balance for 0xfc96c51c973fad62a310f87dd71d2e612962093e3cd12c02f66ecf24"
     }
   ]
 }

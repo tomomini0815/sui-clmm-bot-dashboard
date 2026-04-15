@@ -294,6 +294,7 @@ export class Strategy {
     Logger.info(`🚀 ボット起動 (監視間隔: ${config.monitorIntervalMs / 1000}秒)`);
     this.isRunning = true;
     this.notify('🚀 ボットを起動しました');
+    await Tracker.recordEvent('Bot起動', `監視開始 (間隔: ${config.monitorIntervalMs / 1000}秒)　運用金額: ${config.lpAmountUsdc} USDC`);
 
     // Trackerに設定情報を記録
     Tracker.setConfig({ lpAmountUsdc: config.lpAmountUsdc });
@@ -389,6 +390,7 @@ export class Strategy {
       this.isRunning = false;
       Logger.info('⏹️ ボットを停止しました');
       this.notify('⏹️ ボットを停止しました');
+      Tracker.recordEvent('Bot停止', 'ユーザーまたはシステムにより停止').catch(() => {});
     }
   }
 }

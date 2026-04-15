@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, ArrowRightLeft, DollarSign, CheckCircle, Clock, TrendingUp, BarChart3 } from 'lucide-react';
+import { Activity, ArrowRightLeft, DollarSign, Clock, TrendingUp, BarChart3, Play, Square, AlertTriangle } from 'lucide-react';
 
 interface LogEntry {
   time: string;
@@ -137,15 +137,23 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
           </thead>
           <tbody>
             {(logs && logs.length > 0) ? logs.map((log, idx) => {
-              const actionIcon = log.action === 'Rebalance' ? (
-                <ArrowRightLeft size={14} color="var(--accent)" />
-              ) : log.action.includes('Fee') ? (
-                <DollarSign size={14} color="var(--success)" />
-              ) : (
-                <Activity size={14} color="var(--accent)" />
-              );
-
-              const isProfitable = log.status.includes('+') || log.status === 'Success';
+              // アクション別アイコンと色
+              const getActionStyle = (action: string) => {
+                if (action.includes('リバランス') && !action.includes('失敗')) {
+                  return { icon: <ArrowRightLeft size={14} color="var(--accent)" />, bg: 'rgba(88, 166, 255, 0.1)', color: 'var(--accent)' };
+                } else if (action.includes('失敗') || action.includes('エラー')) {
+                  return { icon: <AlertTriangle size={14} color="var(--danger)" />, bg: 'rgba(248, 81, 73, 0.1)', color: 'var(--danger)' };
+                } else if (action.includes('手数料')) {
+                  return { icon: <DollarSign size={14} color="var(--success)" />, bg: 'rgba(63, 185, 80, 0.1)', color: 'var(--success)' };
+                } else if (action.includes('起動') || action === 'Bot起動') {
+                  return { icon: <Play size={14} color="var(--success)" />, bg: 'rgba(63, 185, 80, 0.1)', color: 'var(--success)' };
+                } else if (action.includes('停止') || action === 'Bot停止') {
+                  return { icon: <Square size={14} color="var(--text-muted)" />, bg: 'rgba(139, 148, 158, 0.1)', color: 'var(--text-muted)' };
+                } else {
+                  return { icon: <Activity size={14} color="var(--accent)" />, bg: 'rgba(88, 166, 255, 0.1)', color: 'var(--accent)' };
+                }
+              };
+              const actionStyle = getActionStyle(log.action);
 
               return (
                 <tr key={idx} style={{
@@ -169,21 +177,16 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                     </div>
                   </td>
                   <td>
-                    <div style={{ 
-                      display: 'flex', 
-                      alignItems: 'center', 
-                      gap: '8px',
-                      fontWeight: 600
-                    }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
                       <div style={{
-                        background: 'rgba(88, 166, 255, 0.1)',
+                        background: actionStyle.bg,
                         padding: '5px',
                         borderRadius: '6px',
                         display: 'inline-flex'
                       }}>
-                        {actionIcon}
+                        {actionStyle.icon}
                       </div>
-                      <span>{log.action}</span>
+                      <span style={{ color: actionStyle.color }}>{log.action}</span>
                     </div>
                   </td>
                   <td>

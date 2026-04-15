@@ -12,20 +12,16 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
-  // グローバルなフォーム状態（ウィザードと設定間での同期用）
   const [privateKey, setPrivateKey] = useState('');
   const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('api_url_v2') || 'http://localhost:3002');
 
-  // リアルタイム統計情報
   const [stats, setStats] = useState({
     totalPnl: '0.00',
     totalFees: '0.0000',
     totalRebalances: 0,
-    priceHistory: [] as any[],
     activityLogs: [] as any[],
     currentRange: { lower: 0, upper: 0 },
     config: { lpAmountUsdc: 0, rangeWidth: 0, hedgeRatio: 0 },
-    // 追加のメトリクス
     currentPrice: 0,
     entryPrice: 0,
     positionSize: 0,
@@ -33,11 +29,13 @@ function App() {
     winRate: '0',
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
-    pythPrice: null as number | null // Pyth市場価格
+    pythPrice: null as number | null,
   });
-  
-  // Pyth価格履歴
-  const [pythPriceHistory, setPythPriceHistory] = useState<any[]>([]);
+
+  // pool価格とPyth価格をフロント側でポーリングごとに同時記録（時刻が必ず一致する）
+  const [combinedHistory, setCombinedHistory] = useState<
+    { time: string; poolPrice: number; pythPrice: number | null }[]
+  >([]);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -47,19 +45,30 @@ function App() {
         if (result.success) {
           setStats(result.data);
           setIsBotActive(result.data.isRunning);
-          
-          // Pyth価格履歴を更新
-          if (result.data.pythPrice && result.data.priceHistory) {
-            const now = new Date();
-            const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-            
-            setPythPriceHistory(prev => {
-              const newHistory = [...prev, { time: timeStr, price: result.data.pythPrice }];
-              // 最新60件を保持
-              if (newHistory.length > 60) {
-                return newHistory.slice(-60);
+
+          // 最新のpool価格を取得
+          const poolHistory: { time: string; price: number }[] = result.data.priceHistory || [];
+          const latestPool = poolHistory.length > 0 ? poolHistory[poolHistory.length - 1] : null;
+          const latestPyth: number | null = result.data.pythPrice ?? null;
+
+          if (latestPool) {
+            setCombinedHistory(prev => {
+              // 同じ時刻が既にある場合はpythPriceを上書き更新
+              const exists = prev.find(e => e.time === latestPool.time);
+              if (exists) {
+                return prev.map(e =>
+                  e.time === latestPool.time
+                    ? { ...e, poolPrice: latestPool.price, pythPrice: latestPyth ?? e.pythPrice }
+                    : e
+                );
               }
-              return newHistory;
+              const newEntry = {
+                time: latestPool.time,
+                poolPrice: latestPool.price,
+                pythPrice: latestPyth,
+              };
+              const updated = [...prev, newEntry];
+              return updated.length > 120 ? updated.slice(-120) : updated;
             });
           }
         }
@@ -69,7 +78,7 @@ function App() {
     };
 
     fetchStats();
-    const interval = setInterval(fetchStats, 3000); // 3秒ごとに更新
+    const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
   }, [apiUrl]);
 
@@ -87,16 +96,35 @@ function App() {
     }
   };
 
-  // 市場状況の日本語変換
+  const handleUpdateCapital = async (newAmount: number) => {
+    try {
+      const response = await fetch(`${apiUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lpAmountUsdc: newAmount,
+          rangeWidth: (stats.config.rangeWidth * 100).toString(),
+          hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStats(prev => ({ ...prev, config: { ...prev.config, lpAmountUsdc: newAmount } }));
+        alert(`✅ 運用資金を ${newAmount} USDC に更新しました`);
+      }
+    } catch (e) {
+      alert('更新に失敗しました。バックエンドが起動中か確認してください。');
+    }
+  };
+
   const getMarketConditionText = (condition: string) => {
-    switch(condition) {
+    switch (condition) {
       case 'uptrend': return '📈 上昇トレンド';
       case 'downtrend': return '📉 下落トレンド';
       default: return '➡️ レンジ相場';
     }
   };
 
-  // 現在の損益状況
   const currentPrice = stats.currentPrice || 0;
   const entryPrice = stats.entryPrice || 0;
   const priceChange = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice * 100) : 0;
@@ -106,9 +134,9 @@ function App() {
       <header className="header">
         <div>
           <h1>
-            <span style={{ 
-              background: 'linear-gradient(135deg, #58a6ff 0%, #3fb950 100%)', 
-              WebkitBackgroundClip: 'text', 
+            <span style={{
+              background: 'linear-gradient(135deg, #58a6ff 0%, #3fb950 100%)',
+              WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
               backgroundClip: 'text'
             }}>
@@ -119,9 +147,9 @@ function App() {
             Advanced Trailing Stop Strategy • V2.0
           </p>
         </div>
-        <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{ 
-          display: 'flex', 
-          alignItems: 'center', 
+        <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
+          display: 'flex',
+          alignItems: 'center',
           gap: '8px',
           borderColor: isBotActive ? 'rgba(63, 185, 80, 0.3)' : 'rgba(139, 148, 158, 0.25)',
           color: isBotActive ? 'var(--success)' : 'var(--text-muted)',
@@ -131,14 +159,10 @@ function App() {
         }}>
           {isBotActive ? (
             <>
-              <span style={{ 
-                width: '8px', 
-                height: '8px', 
-                borderRadius: '50%', 
-                background: 'var(--success)', 
-                display: 'inline-block',
-                boxShadow: '0 0 8px var(--success)',
-                animation: 'pulse-slow 2s infinite'
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%',
+                background: 'var(--success)', display: 'inline-block',
+                boxShadow: '0 0 8px var(--success)', animation: 'pulse-slow 2s infinite'
               }}></span>
               稼働中
             </>
@@ -153,103 +177,55 @@ function App() {
 
       <div className="dashboard-grid">
         <aside style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <ConfigPanel 
-            isBotActive={isBotActive} 
-            onToggleBot={toggleBotState} 
+          <ConfigPanel
+            isBotActive={isBotActive}
+            onToggleBot={toggleBotState}
             onOpenSettings={() => setIsSettingsOpen(true)}
             onOpenWizard={() => setIsWizardOpen(true)}
             config={stats.config}
+            onUpdateCapital={handleUpdateCapital}
           />
-          
+
           {/* 市場状況パネル */}
-          <div className="glass-panel" style={{
-            background: 'rgba(22, 27, 34, 0.9)',
-            borderColor: 'rgba(88, 166, 255, 0.2)'
-          }}>
-            <h3 style={{ 
-              fontSize: '0.95rem', 
-              marginBottom: '14px', 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: '8px',
-              fontWeight: 600
-            }}>
+          <div className="glass-panel" style={{ background: 'rgba(22, 27, 34, 0.9)', borderColor: 'rgba(88, 166, 255, 0.2)' }}>
+            <h3 style={{ fontSize: '0.95rem', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
               <BarChart3 size={16} color="var(--accent)" />
               市場分析
             </h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div style={{ 
-                padding: '10px',
-                background: 'rgba(255, 255, 255, 0.03)',
-                borderRadius: '8px',
-                border: '1px solid var(--border-panel)'
-              }}>
+              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>市場状況</div>
-                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                  {getMarketConditionText(stats.marketCondition)}
-                </div>
+                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{getMarketConditionText(stats.marketCondition)}</div>
               </div>
-              <div style={{ 
-                padding: '10px',
-                background: 'rgba(255, 255, 255, 0.03)',
-                borderRadius: '8px',
-                border: '1px solid var(--border-panel)'
-              }}>
+              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>現在価格 / エントリー価格</div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{currentPrice.toFixed(4)} USDC</span>
                   <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>→ {entryPrice.toFixed(4)} USDC</span>
                 </div>
                 {entryPrice > 0 && (
-                  <div style={{ 
-                    marginTop: '6px',
-                    fontSize: '0.85rem',
-                    fontWeight: 600,
-                    color: priceChange >= 0 ? 'var(--success)' : 'var(--danger)'
-                  }}>
+                  <div style={{ marginTop: '6px', fontSize: '0.85rem', fontWeight: 600, color: priceChange >= 0 ? 'var(--success)' : 'var(--danger)' }}>
                     {priceChange >= 0 ? '↑' : '↓'} {Math.abs(priceChange).toFixed(2)}%
                   </div>
                 )}
               </div>
-              
-              {/* Pyth市場価格 */}
+
               {stats.pythPrice && (
-                <div style={{ 
-                  padding: '10px',
-                  background: 'rgba(88, 166, 255, 0.08)',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(88, 166, 255, 0.3)'
-                }}>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>
-                    SUI 市場価格 (Pyth Oracle)
-                  </div>
-                  <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--accent)' }}>
-                    ${stats.pythPrice.toFixed(4)}
-                  </div>
-                  <div style={{ 
-                    marginTop: '4px',
-                    fontSize: '0.75rem',
-                    color: 'var(--text-muted)',
-                    display: 'flex',
-                    justifyContent: 'space-between'
-                  }}>
+                <div style={{ padding: '10px', background: 'rgba(88, 166, 255, 0.08)', borderRadius: '8px', border: '1px solid rgba(88, 166, 255, 0.3)' }}>
+                  <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>SUI 市場価格 (Pyth Oracle)</div>
+                  <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--accent)' }}>${stats.pythPrice.toFixed(4)}</div>
+                  <div style={{ marginTop: '4px', fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
                     <span>プール価格: ${currentPrice.toFixed(4)}</span>
                     {stats.pythPrice !== currentPrice && (
-                      <span style={{ 
-                        color: Math.abs(stats.pythPrice - currentPrice) / currentPrice > 0.02 ? '#f97316' : 'var(--success)'
-                      }}>
+                      <span style={{ color: Math.abs(stats.pythPrice - currentPrice) / currentPrice > 0.02 ? '#f97316' : 'var(--success)' }}>
                         乖離: {((Math.abs(stats.pythPrice - currentPrice) / currentPrice) * 100).toFixed(2)}%
                       </span>
                     )}
                   </div>
                 </div>
               )}
-              <div style={{ 
-                padding: '10px',
-                background: 'rgba(255, 255, 255, 0.03)',
-                borderRadius: '8px',
-                border: '1px solid var(--border-panel)'
-              }}>
+
+              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>現在のレンジ</div>
                 <div style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -267,67 +243,28 @@ function App() {
         </aside>
 
         <main>
-          {/* 統計カード - 6枚に拡張 */}
-          <div className="stats-grid" style={{ 
-            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-            marginBottom: '20px'
-          }}>
-            <StatCard 
-              title="累計利益 (P&L)" 
-              value={`$${stats.totalPnl}`} 
-              trend={parseFloat(stats.totalPnl) >= 0 ? "up" : "down"} 
-              icon={<DollarSign size={18} />} 
-              subtitle={`手数料: ${stats.totalFees} USDC`}
-              change={stats.dailyPnl !== '0.00' ? `${stats.dailyPnl}%` : undefined}
-            />
-            <StatCard 
-              title="リバランス回数" 
-              value={stats.totalRebalances.toString()} 
-              icon={<Repeat size={18} />} 
-              subtitle="自動再配置"
-              change={`${stats.avgHoldingTime}`}
-            />
-            <StatCard 
-              title="勝率" 
-              value={`${stats.winRate}%`} 
-              trend={parseFloat(stats.winRate) >= 50 ? "up" : "down"}
-              icon={<TrendingUp size={18} />} 
-              subtitle="利益確定確率"
-            />
-            <StatCard 
-              title="ポジション規模" 
-              value={`${stats.positionSize || stats.config.lpAmountUsdc} USDC`} 
-              icon={<Wallet size={18} />} 
-              subtitle="運用資金"
-            />
-            <StatCard 
-              title="現在の状態" 
-              value={isBotActive ? "運用中" : "停止中"} 
-              icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} 
-              subtitle={isBotActive ? "手数料収集中" : "Startボタンで開始"}
-            />
-            <StatCard 
-              title="市場状況" 
-              value={getMarketConditionText(stats.marketCondition).split(' ')[0]} 
-              icon={<BarChart3 size={18} />} 
-              subtitle={getMarketConditionText(stats.marketCondition).split(' ').slice(1).join(' ')}
-            />
+          <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: '20px' }}>
+            <StatCard title="累計利益 (P&L)" value={`$${stats.totalPnl}`} trend={parseFloat(stats.totalPnl) >= 0 ? "up" : "down"} icon={<DollarSign size={18} />} subtitle={`手数料: ${stats.totalFees} USDC`} change={stats.dailyPnl !== '0.00' ? `${stats.dailyPnl}%` : undefined} />
+            <StatCard title="リバランス回数" value={stats.totalRebalances.toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime}`} />
+            <StatCard title="勝率" value={`${stats.winRate}%`} trend={parseFloat(stats.winRate) >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
+            <StatCard title="ポジション規模" value={`${stats.positionSize || stats.config.lpAmountUsdc} USDC`} icon={<Wallet size={18} />} subtitle="運用資金" />
+            <StatCard title="現在の状態" value={isBotActive ? "運用中" : "停止中"} icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} subtitle={isBotActive ? "手数料収集中" : "Startボタンで開始"} />
+            <StatCard title="市場状況" value={getMarketConditionText(stats.marketCondition).split(' ')[0]} icon={<BarChart3 size={18} />} subtitle={getMarketConditionText(stats.marketCondition).split(' ').slice(1).join(' ')} />
           </div>
 
-          <PriceChart 
-            data={stats.priceHistory} 
-            pythData={pythPriceHistory}
-            lowerBound={stats.currentRange.lower} 
-            upperBound={stats.currentRange.upper} 
+          <PriceChart
+            data={combinedHistory}
+            lowerBound={stats.currentRange.lower}
+            upperBound={stats.currentRange.upper}
           />
-          
+
           <ActivityLog logs={stats.activityLogs} />
         </main>
       </div>
 
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
@@ -336,12 +273,12 @@ function App() {
           localStorage.setItem('api_url_v2', val);
         }}
       />
-      <SetupWizard 
-        isOpen={isWizardOpen} 
+      <SetupWizard
+        isOpen={isWizardOpen}
         onComplete={() => {
           localStorage.setItem('wizard_completed', 'true');
           setIsWizardOpen(false);
-        }} 
+        }}
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}

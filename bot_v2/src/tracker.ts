@@ -104,8 +104,40 @@ export class Tracker {
   static async recordFee(feeCollected: number) {
     if (feeCollected > 0) {
       this.data.totalFeesEarned += feeCollected;
+      // 手数料回収も履歴に記録
+      this.data.history.push({
+        timestamp: new Date().toISOString(),
+        price: this.data.currentPrice,
+        pnl: 0,
+        fee: feeCollected,
+        action: '手数料回収',
+        lowerBound: undefined,
+        upperBound: undefined,
+        details: `手数料回収: +${feeCollected.toFixed(4)} USDC`
+      });
+      if (this.data.history.length > 200) {
+        this.data.history.shift();
+      }
       await this.save();
     }
+  }
+
+  // Bot起動・停止などの一般イベントを履歴に記録
+  static async recordEvent(action: string, details: string, price?: number) {
+    this.data.history.push({
+      timestamp: new Date().toISOString(),
+      price: price ?? this.data.currentPrice,
+      pnl: 0,
+      fee: 0,
+      action,
+      lowerBound: undefined,
+      upperBound: undefined,
+      details
+    });
+    if (this.data.history.length > 200) {
+      this.data.history.shift();
+    }
+    await this.save();
   }
 
   static updateCurrentPrice(price: number) {
@@ -143,7 +175,9 @@ export class Tracker {
           ? `${h.lowerBound.toFixed(4)} 〜 ${h.upperBound.toFixed(4)}`
           : '-',
         fee: h.fee > 0 ? h.fee.toFixed(4) : undefined,
-        status: h.fee > 0 ? `+${h.fee.toFixed(2)}` : '完了',
+        status: (h.action?.includes('失敗') || h.details?.includes('失敗')) 
+          ? '失敗' 
+          : (h.fee > 0 ? `+${h.fee.toFixed(2)}` : '完了'),
         details: h.details,
         txDigest: h.txDigest
       }))
