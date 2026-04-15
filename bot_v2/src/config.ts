@@ -1,11 +1,17 @@
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Logger } from './logger.js';
 
-// 環境変数の読み込み
-dotenv.config();
+// ES Module dir resolution
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// .envファイルのパスを明示的に指定（bot_v2の親ディレクトリ）
+const envPath = path.resolve(__dirname, '../../.env');
+dotenv.config({ path: envPath });
 
 export interface BotConfig {
-  privateKey: string;
+  privateKey?: string;
   rpcUrl: string;
   telegramToken?: string;
   telegramChatId?: string;
@@ -30,9 +36,11 @@ function loadConfig(): BotConfig {
     COOLDOWN_PERIOD_MS,
   } = process.env;
 
-  if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here' || PRIVATE_KEY.length < 10) {
+  if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here') {
     Logger.warn('PRIVATE_KEY is not configured yet. Bot logic will wait for configuration.');
     // 不要なプロセス終了を避け、APIサーバーが起動できるようにします
+  } else {
+    Logger.info(`PRIVATE_KEY loaded (${PRIVATE_KEY.length} characters)`);
   }
 
   return {

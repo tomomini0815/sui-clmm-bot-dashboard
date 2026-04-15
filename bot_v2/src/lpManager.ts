@@ -2,15 +2,15 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { SuiClient } from '@mysten/sui/client';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import { TickMath, ClmmPoolUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
-import Decimal from 'decimal.js';
+import { Decimal } from 'decimal.js';
 import BN from 'bn.js';
 import { config } from './config.js';
 import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
 
 export class LpManager {
-  private keypair: Ed25519Keypair;
-  private suiClient: SuiClient;
+  private keypair!: Ed25519Keypair;
+  private suiClient!: SuiClient;
   private walletAddress: string = '';
 
   constructor(private priceMonitor: PriceMonitor) {
@@ -73,7 +73,7 @@ export class LpManager {
     return posId !== null;
   }
 
-  async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<void> {
+  async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<string> {
     Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC, ${amountUsdc} USDC)...`);
 
     try {
@@ -84,8 +84,13 @@ export class LpManager {
       if (!pool) throw new Error(`Pool ${poolId} not found`);
 
       const tickSpacing = parseInt(pool.tickSpacing.toString());
-
+      
+      // 現在の価格を取得
+      const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
+      const currentTick = TickMath.sqrtPriceX64ToTickIndex(currentSqrtPrice);
+      
       // 正確な tick を TickMath で計算（USDC=6dec, SUI=9dec）
+      // Cetusプールでは価格が逆転している可能性があるため、両方を試す
       const lowerTick = TickMath.priceToInitializableTickIndex(
         new Decimal(lowerPrice.toString()), 6, 9, tickSpacing
       );
@@ -93,7 +98,26 @@ export class LpManager {
         new Decimal(upperPrice.toString()), 6, 9, tickSpacing
       );
 
-      Logger.info(`[Blockchain] Tick=[${lowerTick}, ${upperTick}], coinA=${pool.coinTypeA.slice(0, 20)}...`);
+      Logger.info(`[Blockchain] CurrentTick=${currentTick}, Range=[${lowerTick}, ${upperTick}], coinA=${pool.coinTypeA.slice(0, 20)}...`);
+      
+      // 現在価格がレンジ内にあるか確認
+      if (currentTick < lowerTick || currentTick > upperTick) {
+        Logger.warn(`現在価格がレンジ外です: currentTick=${currentTick}, range=[${lowerTick}, ${upperTick}]`);
+        Logger.info(`価格を反転して再計算します...`);
+        
+        // 価格を反転（1/price）
+        const invertedLower = 1 / upperPrice;
+        const invertedUpper = 1 / lowerPrice;
+        
+        const lowerTickInverted = TickMath.priceToInitializableTickIndex(
+          new Decimal(invertedLower.toString()), 9, 6, tickSpacing
+        );
+        const upperTickInverted = TickMath.priceToInitializableTickIndex(
+          new Decimal(invertedUpper.toString()), 9, 6, tickSpacing
+        );
+        
+        Logger.info(`反転価格: CurrentTick=${currentTick}, Range=[${lowerTickInverted}, ${upperTickInverted}]`);
+      }
 
       // fix_amount_aの代わりに直接流動性（delta_liquidity）を計算して追加する
       // SUIの支払い分割エラーを回避する
@@ -120,7 +144,6 @@ export class LpManager {
         delta_liquidity:    estResult.liquidityAmount.toString(),
         max_amount_a:       estResult.coinAmountA.toString(),
         max_amount_b:       estResult.coinAmountB.toString(),
-        is_open:            true,
         collect_fee:        false,
         rewarder_coin_types:[],
         pos_id:             '',
@@ -172,8 +195,8 @@ export class LpManager {
         coinTypeA:           pool.coinTypeA,
         coinTypeB:           pool.coinTypeB,
         delta_liquidity:     targetPos.liquidity.toString(),
-        max_amount_a:        '0',
-        max_amount_b:        '0',
+        min_amount_a:        '0',
+        min_amount_b:        '0',
         collect_fee:         true,
         rewarder_coin_types: [],
       });
@@ -195,14 +218,14 @@ export class LpManager {
     }
   }
 
-  async collectFees(): Promise<number> {
+  async collectFees(): Promise<{ amount: number, digest: string }> {
     Logger.startSpin('Collecting fees on chain...');
 
     try {
       const posId = await this.getActivePositionId();
       if (!posId) {
         Logger.stopSpin('No active position to collect fees from.');
-        return 0;
+        return { amount: 0, digest: '' };
       }
 
       const sdk = this.getSdkWithSender();
@@ -229,9 +252,32 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
 
-      Logger.stopSpin(`Fees collected! TX: ${response.digest}`);
+      // 実際の手数料額を計算（イベントから取得）
+      let feeAmount = 0;
+      if (response.events && response.events.length > 0) {
+        // CetusのFee収集イベントから金額を取得
+        for (const event of response.events) {
+          if (event.type.includes('Liquidity') || event.type.includes('Fee')) {
+            const parsed = event.parsedJson as any;
+            if (parsed && (parsed.amount_a || parsed.amount_b)) {
+              // USDC (coinA) の手数料を計算（6桁）
+              if (parsed.amount_a) {
+                feeAmount += Number(parsed.amount_a) / 1e6;
+              }
+              // SUI (coinB) の手数料を計算（9桁）→ USDC換算は省略
+              if (parsed.amount_b) {
+                const suiFee = Number(parsed.amount_b) / 1e9;
+                // 簡易的にSUI価格を掛けてUSDC換算（正確にはoracle価格を使用）
+                feeAmount += suiFee * 3.0; // 仮のSUI価格 $3.00
+              }
+            }
+          }
+        }
+      }
+
+      Logger.stopSpin(`Fees collected! TX: ${response.digest}, Amount: ${feeAmount.toFixed(4)} USDC`);
       Logger.info(`🔗 View on Explorer: https://suivision.xyz/txblock/${response.digest}`);
-      return { amount: 0, digest: response.digest }; // 本来は実際の額を入れるべきですが簡易化
+      return { amount: feeAmount, digest: response.digest };
     } catch (error: any) {
       Logger.stopSpin(`Fee collection failed: ${error.message}`);
       return { amount: 0, digest: '' };

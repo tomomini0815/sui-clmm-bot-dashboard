@@ -9,63 +9,173 @@ interface ConfigPanelProps {
   config?: { lpAmountUsdc: number, rangeWidth: number, hedgeRatio: number };
 }
 
-export const ConfigPanel: React.FC<ConfigPanelProps> = ({ isBotActive, onToggleBot, onOpenSettings, onOpenWizard, config }) => {
+export const ConfigPanel: React.FC<ConfigPanelProps> = ({ 
+  isBotActive, 
+  onToggleBot, 
+  onOpenSettings, 
+  onOpenWizard, 
+  config 
+}) => {
   return (
-    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+    <div className="glass-panel" style={{ 
+      display: 'flex', 
+      flexDirection: 'column', 
+      gap: '24px',
+    }}>
+      {/* ヘッダー */}
+      <div style={{ 
+        display: 'flex', 
+        alignItems: 'center', 
+        justifyContent: 'space-between',
+        paddingBottom: '16px',
+        borderBottom: '1px solid var(--border-panel)'
+      }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <Settings size={24} color="var(--neon-cetus)" />
-          <h2 style={{ fontSize: '1.2rem', fontWeight: 600 }}>現在のBot設定</h2>
+          <div style={{
+            background: 'rgba(88, 166, 255, 0.15)',
+            padding: '8px',
+            borderRadius: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}>
+            <Settings size={20} color="var(--accent)" />
+          </div>
+          <h2 style={{ fontSize: '1.1rem', fontWeight: 600 }}>Bot設定</h2>
         </div>
         <button 
           onClick={onOpenSettings} 
-          style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}
+          style={{ 
+            background: 'rgba(88, 166, 255, 0.1)', 
+            border: '1px solid rgba(88, 166, 255, 0.25)', 
+            borderRadius: '8px',
+            padding: '6px 12px', 
+            color: 'var(--text-main)', 
+            cursor: 'pointer', 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '6px', 
+            fontSize: '0.85rem',
+            fontWeight: 500,
+            transition: 'all 0.2s'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.2)';
+            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.4)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.1)';
+            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.25)';
+          }}
         >
-          <Edit3 size={16} /> 変更
+          <Edit3 size={14} /> 編集
         </button>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ color: 'var(--text-muted)' }}>1. 対象プール</span>
-          <span style={{ fontWeight: 500 }}>SUI / USDC</span>
+      {/* 設定項目 */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between',
+          padding: '12px 14px',
+          background: 'rgba(255, 255, 255, 0.03)',
+          borderRadius: '10px',
+          border: '1px solid var(--border-panel)'
+        }}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>対象プール</span>
+          <span style={{ fontWeight: 600, color: 'var(--accent)' }}>SUI / USDC</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ color: 'var(--text-muted)' }}>2. 運用金額</span>
-          <span style={{ fontWeight: 500 }}>{config?.lpAmountUsdc || 0} USDC</span>
+        
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between',
+          padding: '12px 14px',
+          background: 'rgba(255, 255, 255, 0.03)',
+          borderRadius: '10px',
+          border: '1px solid var(--border-panel)'
+        }}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>運用金額</span>
+          <span style={{ fontWeight: 600 }}>{config?.lpAmountUsdc || 0} <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>USDC</span></span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ color: 'var(--text-muted)' }}>3. リバランス幅 (利益確定ライン)</span>
-          <span style={{ fontWeight: 500 }}>±{(config?.rangeWidth || 0) * 100}%</span>
+        
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between',
+          padding: '12px 14px',
+          background: 'rgba(255, 255, 255, 0.03)',
+          borderRadius: '10px',
+          border: '1px solid var(--border-panel)'
+        }}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>リバランス幅</span>
+          <span style={{ fontWeight: 600, color: 'var(--success)' }}>±{(config?.rangeWidth || 0) * 100}%</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-          <span style={{ color: 'var(--text-muted)' }}>4. 価格下落の保護 (ヘッジ)</span>
-          <span style={{ fontWeight: 500 }}>{(config?.hedgeRatio || 0) * 100}% (空売り)</span>
+        
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between',
+          padding: '12px 14px',
+          background: 'rgba(255, 255, 255, 0.03)',
+          borderRadius: '10px',
+          border: '1px solid var(--border-panel)'
+        }}>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>ヘッジ比率</span>
+          <span style={{ fontWeight: 600, color: 'var(--accent)' }}>{(config?.hedgeRatio || 0) * 100}%</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <button style={{ background: 'transparent', border: '1px solid var(--border-panel)', borderRadius: '8px', padding: '6px 12px', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }} onClick={onOpenWizard}>
-            <Compass size={14} /> 初回セットアップを開く
-          </button>
-        </div>
+        
+        <button 
+          style={{ 
+            background: 'transparent', 
+            border: '1px dashed rgba(88, 166, 255, 0.25)', 
+            borderRadius: '10px', 
+            padding: '10px 14px', 
+            color: 'var(--text-muted)', 
+            cursor: 'pointer', 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'center',
+            gap: '8px', 
+            fontSize: '0.85rem',
+            fontWeight: 500,
+            transition: 'all 0.2s'
+          }} 
+          onClick={onOpenWizard}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.08)';
+            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.4)';
+            e.currentTarget.style.color = 'var(--text-main)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'transparent';
+            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.25)';
+            e.currentTarget.style.color = 'var(--text-muted)';
+          }}
+        >
+          <Compass size={14} /> 初回セットアップを開く
+        </button>
       </div>
 
-      <div style={{ marginTop: 'auto', paddingTop: '24px', borderTop: '1px solid var(--border-panel)' }}>
+      {/* 操作ボタン */}
+      <div style={{ 
+        marginTop: 'auto', 
+        paddingTop: '20px', 
+        borderTop: '1px solid var(--border-panel)' 
+      }}>
         <button 
           className="primary-btn" 
           onClick={onToggleBot}
           style={{ 
             background: isBotActive 
-              ? 'linear-gradient(135deg, rgba(255, 61, 0, 0.2), rgba(255, 61, 0, 0.1))' 
-              : undefined,
-            borderColor: isBotActive ? 'rgba(255, 61, 0, 0.5)' : undefined,
-            color: isBotActive ? '#ffb3a7' : undefined,
-            boxShadow: isBotActive ? '0 0 15px rgba(255, 61, 0, 0.2)' : undefined
+              ? 'var(--danger)' 
+              : 'var(--success)',
+            boxShadow: isBotActive 
+              ? '0 2px 8px rgba(248, 81, 73, 0.3)' 
+              : '0 2px 8px rgba(63, 185, 80, 0.3)'
           }}
         >
           {isBotActive ? (
-            <><Square size={18} /> Stop Bot</>
+            <><Square size={16} fill="currentColor" /> ボットを停止</>
           ) : (
-            <><Play size={18} /> Resume Bot</>
+            <><Play size={16} fill="currentColor" /> ボットを起動</>
           )}
         </button>
       </div>

@@ -3,9 +3,13 @@ import BN from 'bn.js';
 import { config } from './config.js';
 import { Logger } from './logger.js';
 
+// Pyth Oracle 価格フィード
+const PYTH_SUI_USD_FEED_ID = '23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744';
+const PYTH_HERMES_URL = 'https://hermes.pyth.network';
+
 export class PriceMonitor {
-  private sdk: ReturnType<typeof initCetusSDK>;
-  private poolObjectId: string;
+  private sdk!: ReturnType<typeof initCetusSDK>;
+  private poolObjectId!: string;
   private priceHistory: { time: string, price: number }[] = [];
 
   // コインのDecimal（poolから取得後にセット）
@@ -48,8 +52,31 @@ export class PriceMonitor {
     return this.priceHistory;
   }
 
+  /**
+   * Pyth OracleからSUI/USD価格を取得
+   */
+  async getPythPrice(): Promise<number> {
+    try {
+      const url = `${PYTH_HERMES_URL}/v2/updates/price/latest?ids[]=${PYTH_SUI_USD_FEED_ID}`;
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (data.parsed && data.parsed.length > 0) {
+        const priceData = data.parsed[0].price;
+        const price = priceData.price * Math.pow(10, priceData.expo);
+        Logger.info(`Pyth Oracle: SUI = $${price.toFixed(4)} USD`);
+        return price;
+      }
+      throw new Error('No price data from Pyth');
+    } catch (error: any) {
+      Logger.error(`Failed to fetch Pyth price: ${error.message}`);
+      return 0;
+    }
+  }
+
   async getCurrentPrice(): Promise<number> {
     try {
+      // 常にプール価格を使用（Pythは使用しない）
       const pool = await this.sdk.Pool.getPool(this.poolObjectId);
 
       if (!pool || !pool.current_sqrt_price) {
@@ -57,14 +84,16 @@ export class PriceMonitor {
       }
 
       // Cetus SDK 公式メソッドで正確な価格変換
-      // sqrtPriceX64ToPrice(sqrtPrice, decimalsA, decimalsB) → coinA per 1 coinB の人間可読価格
-      // USDC-SUI プール: decimalsA=6(USDC), decimalsB=9(SUI)
-      // → USDC per SUI = SUIの価格
       const sqrtPriceBN = new BN(pool.current_sqrt_price.toString());
       const priceDecimal = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB);
-      const price = priceDecimal.toNumber();
+      let price = priceDecimal.toNumber();
 
-      Logger.info(`Pool tick=${pool.current_tick_index}, SUI price=${price.toFixed(4)} USDC`);
+      // 価格が異常に大きい場合は逆に計算
+      if (price > 10000) {
+        price = 1 / price;
+      }
+
+      Logger.info(`Pool tick=${pool.current_tick_index}, SUI price=$${price.toFixed(4)} USDC`);
 
       const now = new Date();
       const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
@@ -76,7 +105,7 @@ export class PriceMonitor {
 
       return price;
     } catch (error) {
-      Logger.error('Failed to fetch current price from Cetus', error);
+      Logger.error('Failed to fetch current price', error);
       const lastEntry = this.priceHistory[this.priceHistory.length - 1];
       return lastEntry ? lastEntry.price : 0;
     }

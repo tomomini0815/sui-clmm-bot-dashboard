@@ -1,19 +1,35 @@
 {
-  "rebalanceCount": 2,
-  "totalFeesEarned": 0.6992999999999999,
-  "pnlTotal": -0.5882806874620433,
+  "rebalanceCount": 3,
+  "totalFeesEarned": 0,
+  "pnlTotal": 0,
+  "entryPrice": 1.0721552609379565,
+  "currentPrice": 1.0721552609379565,
+  "positionSize": 0.05,
+  "successfulRebalances": 0,
   "history": [
     {
-      "timestamp": "2026-04-13T13:33:04.409Z",
-      "price": 1.2591822224123297,
-      "pnl": -0.5882806874620433,
-      "fee": 0.0784
+      "timestamp": "2026-04-15T06:26:31.544Z",
+      "price": 1.0720651247974118,
+      "pnl": 0,
+      "fee": 0,
+      "txDigest": "5drm8dvvBKtHsVu8eLCgb3GMPisJZysGdFEhJGrVrMYA",
+      "details": "リバランス実行"
     },
     {
-      "timestamp": "2026-04-14T11:22:56.986Z",
-      "price": 1.0506954339656975,
+      "timestamp": "2026-04-15T06:30:44.977Z",
+      "price": 1.0720651259191074,
       "pnl": 0,
-      "fee": 0
+      "fee": 0,
+      "txDigest": "FJE3DJURfPq6TKao5AbT3UMj33g8CWPsm9jhfeMKEKBK",
+      "details": "リバランス実行"
+    },
+    {
+      "timestamp": "2026-04-15T06:39:33.367Z",
+      "price": 1.0721552609379565,
+      "pnl": 0,
+      "fee": 0,
+      "txDigest": "CrysYo51b488QfVs5BQLdc58o1C7n38DJBiM65jfm2FD",
+      "details": "リバランス実行"
     }
   ]
 }

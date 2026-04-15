@@ -10,12 +10,17 @@ export interface TrackerData {
   rebalanceCount: number;
   totalFeesEarned: number;
   pnlTotal: number;
+  entryPrice: number; // エントリー価格
+  currentPrice: number; // 現在価格
+  positionSize: number; // ポジションサイズ
+  successfulRebalances: number; // 成功したリバランス数
   history: Array<{
     timestamp: string;
     price: number;
     pnl: number;
     fee: number;
     txDigest?: string;
+    details?: string;
   }>;
 }
 
@@ -24,6 +29,10 @@ export class Tracker {
     rebalanceCount: 0,
     totalFeesEarned: 0,
     pnlTotal: 0,
+    entryPrice: 0,
+    currentPrice: 0,
+    positionSize: 0,
+    successfulRebalances: 0,
     history: [],
   };
 
@@ -50,16 +59,25 @@ export class Tracker {
     }
   }
 
-  static async recordRebalance(price: number, pnl: number, feeCollected: number, txDigest?: string) {
+  static async recordRebalance(price: number, pnl: number, feeCollected: number, txDigest?: string, details?: string) {
     this.data.rebalanceCount++;
     this.data.totalFeesEarned += feeCollected;
     this.data.pnlTotal += pnl;
+    this.data.entryPrice = price; // エントリー価格を更新
+    this.data.currentPrice = price;
+    
+    // 手数料が取得できていたら成功としてカウント
+    if (feeCollected > 0) {
+      this.data.successfulRebalances++;
+    }
+    
     this.data.history.push({
       timestamp: new Date().toISOString(),
       price,
       pnl,
       fee: feeCollected,
-      txDigest
+      txDigest,
+      details: details || (feeCollected > 0 ? `手数料 +${feeCollected.toFixed(4)} USDC` : 'リバランス実行')
     });
     
     if (this.data.history.length > 100) {
@@ -76,12 +94,42 @@ export class Tracker {
     }
   }
 
+  static updateCurrentPrice(price: number) {
+    this.data.currentPrice = price;
+  }
+
+  static setConfig(config: { lpAmountUsdc: number }) {
+    this.data.positionSize = config.lpAmountUsdc;
+  }
+
   static getStats() {
+    const priceChange = this.data.entryPrice > 0 
+      ? ((this.data.currentPrice - this.data.entryPrice) / this.data.entryPrice * 100) 
+      : 0;
+    
+    const winRate = this.data.rebalanceCount > 0 
+      ? (this.data.successfulRebalances / this.data.rebalanceCount * 100) 
+      : 0;
+
     return {
-      totalPnl: this.data.pnlTotal,
-      totalFees: this.data.totalFeesEarned,
+      totalPnl: this.data.pnlTotal.toFixed(2),
+      totalFees: this.data.totalFeesEarned.toFixed(4),
       totalRebalances: this.data.rebalanceCount,
-      history: this.data.history
+      currentPrice: this.data.currentPrice,
+      entryPrice: this.data.entryPrice,
+      positionSize: this.data.positionSize,
+      priceChangePercent: priceChange.toFixed(2),
+      winRate: winRate.toFixed(1),
+      history: this.data.history.map(h => ({
+        time: new Date(h.timestamp).toLocaleTimeString('ja-JP', { hour12: false }),
+        action: 'Rebalance',
+        price: h.price,
+        range: '-',
+        fee: h.fee > 0 ? h.fee.toFixed(4) : undefined,
+        status: h.fee > 0 ? `+${h.fee.toFixed(2)}` : 'Success',
+        details: h.details,
+        txDigest: h.txDigest
+      }))
     };
   }
 
@@ -92,14 +140,20 @@ export class Tracker {
         chalk.cyan('Rebalance Count'),
         chalk.cyan('Total Fees (USDC)'),
         chalk.cyan('Total P&L (USDC)'),
+        chalk.cyan('Win Rate'),
       ],
       style: { head: [], border: [] }
     });
+
+    const winRate = this.data.rebalanceCount > 0 
+      ? (this.data.successfulRebalances / this.data.rebalanceCount * 100).toFixed(1)
+      : '0.0';
 
     table.push([
       this.data.rebalanceCount.toString(),
       this.data.totalFeesEarned.toFixed(4),
       chalk[this.data.pnlTotal >= 0 ? 'green' : 'redBright'](this.data.pnlTotal.toFixed(4)),
+      `${winRate}%`
     ]);
 
     console.log('\n' + table.toString() + '\n');
