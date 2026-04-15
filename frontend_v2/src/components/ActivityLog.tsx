@@ -265,13 +265,19 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                       fontWeight: 600,
                       background: log.status.includes('+')
                         ? 'rgba(63, 185, 80, 0.12)'
-                        : 'rgba(88, 166, 255, 0.12)',
+                        : log.status === '失敗'
+                          ? 'rgba(248, 81, 73, 0.12)'
+                          : 'rgba(88, 166, 255, 0.12)',
                       color: log.status.includes('+')
                         ? 'var(--success)'
-                        : 'var(--accent)',
+                        : log.status === '失敗'
+                          ? 'var(--danger)'
+                          : 'var(--accent)',
                       border: log.status.includes('+')
                         ? '1px solid rgba(63, 185, 80, 0.25)'
-                        : '1px solid rgba(88, 166, 255, 0.25)'
+                        : log.status === '失敗'
+                          ? '1px solid rgba(248, 81, 73, 0.25)'
+                          : '1px solid rgba(88, 166, 255, 0.25)'
                     }}>
                       {log.status}
                     </span>

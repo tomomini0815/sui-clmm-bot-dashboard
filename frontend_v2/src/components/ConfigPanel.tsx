@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Settings, Play, Square, Edit3, Compass, Check, X, PlusCircle } from 'lucide-react';
+import { Settings, Play, Square, Edit3, Compass, Check, X, PlusCircle, Droplets } from 'lucide-react';
 
 interface ConfigPanelProps {
   isBotActive: boolean;
@@ -8,6 +8,7 @@ interface ConfigPanelProps {
   onOpenWizard: () => void;
   config?: { lpAmountUsdc: number; rangeWidth: number; hedgeRatio: number };
   onUpdateCapital: (amount: number) => void;
+  onOpenHelp: () => void;
 }
 
 export const ConfigPanel: React.FC<ConfigPanelProps> = ({
@@ -17,6 +18,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   onOpenWizard,
   config,
   onUpdateCapital,
+  onOpenHelp,
 }) => {
   const [isEditingCapital, setIsEditingCapital] = useState(false);
   const [capitalInput, setCapitalInput] = useState('');
@@ -220,6 +222,26 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
           }}
         >
           <Compass size={14} /> 初回セットアップを開く
+        </button>
+
+        <button
+          style={{
+            background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.25)',
+            borderRadius: '10px', padding: '10px 14px', color: '#f97316',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            gap: '8px', fontSize: '0.85rem', fontWeight: 600, transition: 'all 0.2s'
+          }}
+          onClick={onOpenHelp}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(249, 115, 22, 0.15)';
+            e.currentTarget.style.borderColor = 'rgba(249, 115, 22, 0.4)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'rgba(249, 115, 22, 0.1)';
+            e.currentTarget.style.borderColor = 'rgba(249, 115, 22, 0.25)';
+          }}
+        >
+          <Droplets size={14} /> Faucet / 資金追加
         </button>
       </div>
 

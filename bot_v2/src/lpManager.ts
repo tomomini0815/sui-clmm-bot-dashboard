@@ -13,12 +13,22 @@ export class LpManager {
   private suiClient!: SuiClient;
   private walletAddress: string = '';
 
+  // 動的プール情報
+  private isInitialized: boolean = false;
+  private decimalsA: number = 6;
+  private decimalsB: number = 9;
+  private coinTypeA: string = '';
+  private coinTypeB: string = '';
+  private usdcDecimals: number = 6;
+  private usdcIsA: boolean = true;
+
   constructor(private priceMonitor: PriceMonitor) {
     this.refreshConfig();
   }
 
   refreshConfig() {
     this.suiClient = new SuiClient({ url: config.rpcUrl });
+    this.isInitialized = false;
 
     try {
       if (config.privateKey && config.privateKey.startsWith('suiprivkey')) {
@@ -38,6 +48,47 @@ export class LpManager {
       Logger.warn(`Invalid or missing private key (${e.message}). Running in read-only mode.`);
       this.keypair = new Ed25519Keypair();
       this.walletAddress = this.keypair.getPublicKey().toSuiAddress();
+    }
+  }
+
+  private async initializePoolData() {
+    if (this.isInitialized) return;
+    try {
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const pool = await sdk.Pool.getPool(poolId);
+      
+      if (pool) {
+        this.coinTypeA = pool.coinTypeA;
+        this.coinTypeB = pool.coinTypeB;
+        
+        const coinAMeta = await this.suiClient.getCoinMetadata({ coinType: this.coinTypeA });
+        const coinBMeta = await this.suiClient.getCoinMetadata({ coinType: this.coinTypeB });
+        
+        this.decimalsA = coinAMeta?.decimals ?? 9;
+        this.decimalsB = coinBMeta?.decimals ?? 9;
+        
+        // USDC判定 (MainnetのUSDCまたはTestnetのCOIN_A)
+        const isAUsdc = this.coinTypeA.toLowerCase().includes('usdc') || this.coinTypeA.toLowerCase().includes('coin_a');
+        const isBUsdc = this.coinTypeB.toLowerCase().includes('usdc') || this.coinTypeB.toLowerCase().includes('coin_a');
+        
+        if (isAUsdc) {
+          this.usdcIsA = true;
+          this.usdcDecimals = this.decimalsA;
+        } else if (isBUsdc) {
+          this.usdcIsA = false;
+          this.usdcDecimals = this.decimalsB;
+        } else {
+          // デフォルトはAをUSDCとみなす
+          this.usdcIsA = true;
+          this.usdcDecimals = this.decimalsA;
+        }
+        
+        Logger.info(`LpManager Initialized: CoinA=${coinAMeta?.symbol}(${this.decimalsA}), CoinB=${coinBMeta?.symbol}(${this.decimalsB}), USDC_Is_A=${this.usdcIsA}`);
+        this.isInitialized = true;
+      }
+    } catch (e) {
+      Logger.error('LpManager: Failed to initialize pool data', e);
     }
   }
 
@@ -74,65 +125,52 @@ export class LpManager {
   }
 
   async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<string> {
-    Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC, ${amountUsdc} USDC)...`);
+    if (!this.isInitialized) await this.initializePoolData();
+    
+    Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC/SUI, ${amountUsdc} USDC)...`);
 
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-
       const pool = await sdk.Pool.getPool(poolId);
       if (!pool) throw new Error(`Pool ${poolId} not found`);
 
       const tickSpacing = parseInt(pool.tickSpacing.toString());
-      
-      // 現在の価格を取得
       const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
-      const currentTick = TickMath.sqrtPriceX64ToTickIndex(currentSqrtPrice);
       
-      // 正確な tick を TickMath で計算（USDC=6dec, SUI=9dec）
-      // Cetusプールでは価格が逆転している可能性があるため、両方を試す
-      const lowerTick = TickMath.priceToInitializableTickIndex(
-        new Decimal(lowerPrice.toString()), 6, 9, tickSpacing
-      );
-      const upperTick = TickMath.priceToInitializableTickIndex(
-        new Decimal(upperPrice.toString()), 6, 9, tickSpacing
-      );
-
-      Logger.info(`[Blockchain] CurrentTick=${currentTick}, Range=[${lowerTick}, ${upperTick}], coinA=${pool.coinTypeA.slice(0, 20)}...`);
+      // 正確な tick を計算（動的な Decimal を使用）
+      // lowerTick / upperTick の計算において、SDK の priceTo... は「1単位のAに対するBの量」を引数に取る。
+      // 私たちの "price" は「1 SUI = X USDC」なので、coinA/coinBの順序に応じて調整が必要。
       
-      // 現在価格がレンジ内にあるか確認
-      if (currentTick < lowerTick || currentTick > upperTick) {
-        Logger.warn(`現在価格がレンジ外です: currentTick=${currentTick}, range=[${lowerTick}, ${upperTick}]`);
-        Logger.info(`価格を反転して再計算します...`);
-        
-        // 価格を反転（1/price）
-        const invertedLower = 1 / upperPrice;
-        const invertedUpper = 1 / lowerPrice;
-        
-        const lowerTickInverted = TickMath.priceToInitializableTickIndex(
-          new Decimal(invertedLower.toString()), 9, 6, tickSpacing
-        );
-        const upperTickInverted = TickMath.priceToInitializableTickIndex(
-          new Decimal(invertedUpper.toString()), 9, 6, tickSpacing
-        );
-        
-        Logger.info(`反転価格: CurrentTick=${currentTick}, Range=[${lowerTickInverted}, ${upperTickInverted}]`);
+      let lowerTick: number;
+      let upperTick: number;
+      
+      if (this.usdcIsA) {
+        // A=USDC, B=SUI。price=B/A なので、SDKの引数にそのまま使える。
+        // ただし、私たちのUIのpriceは通常「1 SUI = X USDC」(A/B) なので、逆数にする必要がある。
+        const invLower = 1 / upperPrice;
+        const invUpper = 1 / lowerPrice;
+        lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(invLower.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+        upperTick = TickMath.priceToInitializableTickIndex(new Decimal(invUpper.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+      } else {
+        // B=USDC, A=SUI。price=B/A なので、そのまま使える。
+        lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(lowerPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+        upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       }
 
-      // fix_amount_aの代わりに直接流動性（delta_liquidity）を計算して追加する
-      // SUIの支払い分割エラーを回避する
-      const usdcAmountBN = new BN(Math.floor(amountUsdc * 1e6).toString());
-      const curSqrtPriceBN = new BN(pool.current_sqrt_price.toString());
-      Logger.info(`[Blockchain] USDC amount: ${amountUsdc} USDC (${usdcAmountBN.toString()} raw)`);
+      Logger.info(`[Blockchain] Range: [${lowerTick}, ${upperTick}], USDC_Is_A=${this.usdcIsA}, Decimals=[${this.decimalsA}, ${this.decimalsB}]`);
 
+      // USDCの資金額をBNに変換（動的な Decimal を使用）
+      const usdcAmountBN = new BN(Math.floor(amountUsdc * Math.pow(10, this.usdcDecimals)).toString());
+      
       const estResult = ClmmPoolUtil.estLiquidityAndcoinAmountFromOneAmounts(
         lowerTick,
         upperTick,
         usdcAmountBN,
-        true,          // isA (USDC is coinA)
-        true,          // roundUp
-        0.05,          // slippage
-        curSqrtPriceBN
+        this.usdcIsA,   // isA
+        true,           // roundUp
+        0.05,           // slippage
+        currentSqrtPrice
       );
 
       const txPayload = await sdk.Position.createAddLiquidityPayload({
@@ -159,7 +197,6 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
       Logger.stopSpin(`Liquidity added! TX: ${response.digest}`);
-      Logger.info(`🔗 View on Explorer: https://suivision.xyz/txblock/${response.digest}`);
       return response.digest;
     } catch (error: any) {
       Logger.stopSpin(`Failed to add liquidity: ${error.message}`);
@@ -186,9 +223,6 @@ export class LpManager {
 
       const pool = await sdk.Pool.getPool(poolId);
 
-      Logger.info(`[Blockchain] Removing LP position: ${posId}`);
-
-      // removeLiquidityTransactionPayload + 正しいフィールド名
       const txPayload = await sdk.Position.removeLiquidityTransactionPayload({
         pool_id:             poolId,
         pos_id:              posId,
@@ -211,7 +245,6 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
       Logger.stopSpin(`Liquidity removed! TX: ${response.digest}`);
-      Logger.info(`🔗 View on Explorer: https://suivision.xyz/txblock/${response.digest}`);
     } catch (error: any) {
       Logger.stopSpin(`Failed to remove liquidity: ${error.message}`);
       throw error;
@@ -219,6 +252,7 @@ export class LpManager {
   }
 
   async collectFees(): Promise<{ amount: number, digest: string }> {
+    if (!this.isInitialized) await this.initializePoolData();
     Logger.startSpin('Collecting fees on chain...');
 
     try {
@@ -232,9 +266,6 @@ export class LpManager {
       const poolId = this.priceMonitor.getPoolId();
       const pool = await sdk.Pool.getPool(poolId);
 
-      Logger.info(`[Blockchain] Collecting fees for position: ${posId}`);
-
-      // collectFeeTransactionPayload + 正しいフィールド名
       const txPayload = await sdk.Position.collectFeeTransactionPayload({
         pool_id:    poolId,
         pos_id:     posId,
@@ -252,23 +283,16 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
 
-      // 実際の手数料額を計算（イベントから取得）
       let feeAmount = 0;
       if (response.events && response.events.length > 0) {
-        // CetusのFee収集イベントから金額を取得
         for (const event of response.events) {
           if (event.type.includes('Liquidity') || event.type.includes('Fee')) {
             const parsed = event.parsedJson as any;
             if (parsed && (parsed.amount_a || parsed.amount_b)) {
-              // USDC (coinA) の手数料を計算（6桁）
-              if (parsed.amount_a) {
-                feeAmount += Number(parsed.amount_a) / 1e6;
-              }
-              // SUI (coinB) の手数料を計算（9桁）→ USDC換算は省略
-              if (parsed.amount_b) {
-                const suiFee = Number(parsed.amount_b) / 1e9;
-                // 簡易的にSUI価格を掛けてUSDC換算（正確にはoracle価格を使用）
-                feeAmount += suiFee * 3.0; // 仮のSUI価格 $3.00
+              if (this.usdcIsA && parsed.amount_a) {
+                feeAmount += Number(parsed.amount_a) / Math.pow(10, this.decimalsA);
+              } else if (!this.usdcIsA && parsed.amount_b) {
+                feeAmount += Number(parsed.amount_b) / Math.pow(10, this.decimalsB);
               }
             }
           }
@@ -276,7 +300,6 @@ export class LpManager {
       }
 
       Logger.stopSpin(`Fees collected! TX: ${response.digest}, Amount: ${feeAmount.toFixed(4)} USDC`);
-      Logger.info(`🔗 View on Explorer: https://suivision.xyz/txblock/${response.digest}`);
       return { amount: feeAmount, digest: response.digest };
     } catch (error: any) {
       Logger.stopSpin(`Fee collection failed: ${error.message}`);

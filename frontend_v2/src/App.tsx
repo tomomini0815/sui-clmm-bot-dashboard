@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react';
-import { Activity, DollarSign, Repeat, ShieldCheck, PowerOff, TrendingUp, BarChart3, Wallet } from 'lucide-react';
+import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet } from 'lucide-react';
 import { StatCard } from './components/StatCard';
 import { PriceChart } from './components/PriceChart';
 import { ConfigPanel } from './components/ConfigPanel';
 import { SettingsModal } from './components/SettingsModal';
 import { ActivityLog } from './components/ActivityLog';
 import { SetupWizard } from './components/SetupWizard';
+import { HelpModal } from './components/HelpModal';
 
 function App() {
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
   const [privateKey, setPrivateKey] = useState('');
@@ -182,6 +184,7 @@ function App() {
             onToggleBot={toggleBotState}
             onOpenSettings={() => setIsSettingsOpen(true)}
             onOpenWizard={() => setIsWizardOpen(true)}
+            onOpenHelp={() => setIsHelpOpen(true)}
             config={stats.config}
             onUpdateCapital={handleUpdateCapital}
           />
@@ -282,6 +285,10 @@ function App() {
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
+      />
+      <HelpModal
+        isOpen={isHelpOpen}
+        onClose={() => setIsHelpOpen(false)}
       />
     </div>
   );

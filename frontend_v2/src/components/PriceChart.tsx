@@ -5,8 +5,8 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload || payload.length === 0) return null;
 
-  // Area の重複エントリを除外。name が指定されていないエントリ（Area など）は表示しないようにする
-  const items = payload.filter((p: any) => p.name && p.value != null);
+  // 明示的に名前がついているラインのみを表示（Areaの重複などを除外）
+  const items = payload.filter((p: any) => p.name === 'プール価格' || p.name === '市場価格 (Pyth)');
 
   return (
     <div style={{

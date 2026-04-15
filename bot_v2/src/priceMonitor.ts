@@ -115,9 +115,9 @@ export class PriceMonitor {
       // 1. SDKの計算結果(B in A)をそのまま使う場合 -> B=SUI, A=USDC なら SUI価格。
       // 2. 逆にする必要がある場合もある。
       
-      // USDCがどちらのコインか判定
-      const isAUsdc = this.coinTypeA.toLowerCase().includes('usdc');
-      const isBUsdc = this.coinTypeB.toLowerCase().includes('usdc');
+      // USDCがどちらのコインか判定（mainnetのUSDC、またはtestnetのCOIN_Aなど）
+      const isAUsdc = this.coinTypeA.toLowerCase().includes('usdc') || this.coinTypeA.toLowerCase().includes('coin_a');
+      const isBUsdc = this.coinTypeB.toLowerCase().includes('usdc') || this.coinTypeB.toLowerCase().includes('coin_a');
       
       let price: number;
       
