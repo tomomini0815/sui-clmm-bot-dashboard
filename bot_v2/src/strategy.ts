@@ -13,6 +13,13 @@ export class Strategy {
   public currentUpperBound: number = 0;
   public intervalId: NodeJS.Timeout | null = null;
   public isRunning: boolean = false;
+  
+  // トレイリングストップ用状態
+  private highestPriceSurge: number = 0;
+  private dipStartTime: number = 0; 
+  private TRAILING_STOP_PERCENT: number = 0.05; // 5%の下落で警告
+  private TIME_FILTER_MS: number = 5 * 60 * 1000; // 5分間戻らなければ損切り
+  public isEmergencyStopped: boolean = false;
 
   constructor(
     private priceMonitor: PriceMonitor,
@@ -40,9 +47,29 @@ export class Strategy {
   }
 
   private calculateNewRange(currentPrice: number) {
+    // 上昇トレンド追従のため、上方幅を広く取る（非対称：下は指定幅、上は2倍）
     this.currentLowerBound = currentPrice * (1 - config.rangeWidth);
-    this.currentUpperBound = currentPrice * (1 + config.rangeWidth);
-    Logger.info(`New range set: [${this.currentLowerBound.toFixed(4)}, ${this.currentUpperBound.toFixed(4)}]`);
+    this.currentUpperBound = currentPrice * (1 + (config.rangeWidth * 2));
+    Logger.info(`New range set (Asymmetric): [${this.currentLowerBound.toFixed(4)}, ${this.currentUpperBound.toFixed(4)}]`);
+  }
+
+  async executeEmergencyStop() {
+    try {
+      this.notify(`🚨 強制撤退（ストップロス）開始！\n下落トレンドを確認したため、資金を保護します。`);
+      Logger.error(`EXECUTING EMERGENCY STOP`);
+      
+      await this.lpManager.removeLiquidity();
+      await this.hedgeManager.closeHedge();
+      
+      // 本来ここでSUIをUSDCにスワップする
+      
+      this.isEmergencyStopped = true;
+      this.dipStartTime = 0;
+      this.notify(`🛑 強制撤退完了\nシステムは現在待機状態（Emergency Stop）です。`);
+    } catch (e: any) {
+      Logger.error('Emergency stop failed', e);
+      this.notify(`❌ 強制撤退中にエラー発生\n手動で確認してください: ${e.message}`);
+    }
   }
 
   async runRebalance(currentPrice: number) {
@@ -112,10 +139,48 @@ export class Strategy {
           return;
         }
 
-        Logger.info(`TICK - SUI: ${currentPrice.toFixed(4)} USDC | Range: [${this.currentLowerBound.toFixed(4)} - ${this.currentUpperBound.toFixed(4)}]`);
+        if (this.isEmergencyStopped) {
+          // 緊急停止中は監視のみ行い、リバランス等は控える
+          Logger.info(`TICK - System in Emergency Stop. Manual restart required. Current SUI: ${currentPrice.toFixed(4)} USDC`);
+          return;
+        }
+
+        // --- トレイリングストップとダマシ回避（時間フィルター）のロジック ---
+        if (currentPrice > this.highestPriceSurge) {
+          this.highestPriceSurge = currentPrice;
+          if (this.dipStartTime > 0) {
+            Logger.info(`💚 SUI価格が下落ラインから回復し、新高値を更新。ダマシフィルターをリセットしました。`);
+            this.dipStartTime = 0;
+          }
+        }
+
+        const trailingStopLine = this.highestPriceSurge * (1 - this.TRAILING_STOP_PERCENT);
+
+        if (currentPrice < trailingStopLine) {
+          if (this.dipStartTime === 0) {
+            this.dipStartTime = Date.now();
+            Logger.warn(`⚠ 警告: 価格(${currentPrice.toFixed(4)}) がトレイリング撤退ライン(${trailingStopLine.toFixed(4)}) を割りました。5分フィルター開始。`);
+          } else {
+            const elapsed = Date.now() - this.dipStartTime;
+            if (elapsed > this.TIME_FILTER_MS) {
+              await this.executeEmergencyStop();
+              return;
+            } else {
+              Logger.warn(`⚠ タイムフィルター待機中... 下落から ${(elapsed / 1000).toFixed(0)} 秒経過`);
+            }
+          }
+        } else {
+          if (this.dipStartTime > 0) {
+            Logger.info(`💚 価格が撤退ライン以上に回復。フィルターをキャンセリングしました。`);
+            this.dipStartTime = 0;
+          }
+        }
+
+        Logger.info(`TICK - SUI: ${currentPrice.toFixed(4)} USDC | Range: [${this.currentLowerBound.toFixed(4)} - ${this.currentUpperBound.toFixed(4)}] | Trailing Stop: ${trailingStopLine.toFixed(4)}`);
 
         if (this.currentLowerBound === 0 || this.currentUpperBound === 0) {
           // 初回: 即リバランス実行
+          this.highestPriceSurge = currentPrice; // トレイリング基準のリセット
           Logger.info('First run: Starting initial rebalance...');
           await this.runRebalance(currentPrice);
         } else if (this.priceMonitor.isOutOfRange(currentPrice, this.currentLowerBound, this.currentUpperBound)) {

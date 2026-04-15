@@ -45,7 +45,7 @@ function loadConfig(): BotConfig {
     rangeWidth: parseFloat(RANGE_WIDTH || '0.05'),
     monitorIntervalMs: parseInt(MONITOR_INTERVAL_MS || '60000', 10),
     cooldownPeriodMs: parseInt(COOLDOWN_PERIOD_MS || '600000', 10),
-    apiPort: parseInt(process.env.PORT || '3001', 10),
+    apiPort: parseInt(process.env.PORT || '3002', 10),
   };
 }
 

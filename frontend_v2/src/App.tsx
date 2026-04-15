@@ -14,7 +14,7 @@ function App() {
 
   // グローバルなフォーム状態（ウィザードと設定間での同期用）
   const [privateKey, setPrivateKey] = useState('');
-  const [apiUrl, setApiUrl] = useState(localStorage.getItem('bot_api_url') || import.meta.env.VITE_API_URL || 'http://localhost:3001');
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('api_url_v2') || 'http://localhost:3002');
 
   // リアルタイム統計情報
   const [stats, setStats] = useState({
@@ -64,8 +64,10 @@ function App() {
     <div className="dashboard-container">
       <header className="header">
         <div>
-          <h1><span className="text-gradient">Cetus</span> Bot UI Max</h1>
-          <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>Automated Rebalance & Hedge Manager on Sui</p>
+          <h1 style={{ fontSize: '1.4rem', fontWeight: 700, margin: 0, background: 'linear-gradient(90deg, #ff007a, #7928ca)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+            Sui Liquidity Bot (V2 Trailing)
+          </h1>
+          <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>Advanced Time-Filtered Trailing Stop Strategy</p>
         </div>
         <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{ 
           display: 'flex', alignItems: 'center', gap: '6px',
@@ -94,13 +96,12 @@ function App() {
           
           <div className="glass-panel">
             <h3 style={{ fontSize: '1rem', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <ShieldCheck size={18} color="var(--neon-cetus)" /> 💡 このBotの仕組み
+              <ShieldCheck size={18} color="#ff007a" /> 💡 稼働中アルゴリズム (V2)
             </h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.6 }}>
-              初心者向け解説：<br/><br/>
-              このBot（自動システム）は、24時間自動でSUIとUSDCの価格を監視し、決められた価格帯に資金を入れて取引所の「手数料」を継続的に稼ぎます。
-              <br/><br/>
-              もし価格が基準を外れそうになったときは、自動で資金を再配置（リバランス）して損失リスクを抑えます。
+              V2 トレイリング・ストップ仕様：<br/><br/>
+              この高度なBotは、SUIの価格上昇に合わせて防衛ラインを自動でせり上げる「トレイリングストップ」機能を搭載しています。<br/><br/>
+              価格が5分間連続で撤退ラインを割った場合のみシステムが全資金を退避させ、一瞬の「ダマシ下落（損切り貧乏）」を回避します。
             </p>
           </div>
         </aside>
@@ -146,7 +147,7 @@ function App() {
         apiUrl={apiUrl}
         setApiUrl={(val) => {
           setApiUrl(val);
-          localStorage.setItem('bot_api_url', val);
+          localStorage.setItem('api_url_v2', val);
         }}
       />
       <SetupWizard 
