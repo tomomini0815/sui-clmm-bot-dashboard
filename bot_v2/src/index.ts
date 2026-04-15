@@ -155,7 +155,7 @@ app.get('/api/stats', async (req, res) => {
         isRunning: strategyInstance ? strategyInstance.isRunning : false,
         walletAddress,
         priceHistory: prices,
-        activityLogs: stats.history.slice(-20).reverse(), // 直近20件を新しい順で
+        activityLogs: stats.history, // 全件（新しい順）
         currentRange: {
           lower: Number(lowerBound.toFixed(4)),
           upper: Number(upperBound.toFixed(4))

@@ -19,8 +19,11 @@ export interface TrackerData {
     price: number;
     pnl: number;
     fee: number;
+    lowerBound?: number;
+    upperBound?: number;
     txDigest?: string;
     details?: string;
+    action?: string; // アクション種別（リバランス・ストップ・スタート等）
   }>;
 }
 
@@ -59,28 +62,39 @@ export class Tracker {
     }
   }
 
-  static async recordRebalance(price: number, pnl: number, feeCollected: number, txDigest?: string, details?: string) {
+  static async recordRebalance(
+    price: number,
+    pnl: number,
+    feeCollected: number,
+    txDigest?: string,
+    details?: string,
+    lowerBound?: number,
+    upperBound?: number,
+    action?: string
+  ) {
     this.data.rebalanceCount++;
     this.data.totalFeesEarned += feeCollected;
     this.data.pnlTotal += pnl;
-    this.data.entryPrice = price; // エントリー価格を更新
+    this.data.entryPrice = price;
     this.data.currentPrice = price;
-    
-    // 手数料が取得できていたら成功としてカウント
+
     if (feeCollected > 0) {
       this.data.successfulRebalances++;
     }
-    
+
     this.data.history.push({
       timestamp: new Date().toISOString(),
       price,
       pnl,
       fee: feeCollected,
+      lowerBound,
+      upperBound,
       txDigest,
+      action: action || 'リバランス',
       details: details || (feeCollected > 0 ? `手数料 +${feeCollected.toFixed(4)} USDC` : 'リバランス実行')
     });
-    
-    if (this.data.history.length > 100) {
+
+    if (this.data.history.length > 200) {
       this.data.history.shift();
     }
 
@@ -120,13 +134,16 @@ export class Tracker {
       positionSize: this.data.positionSize,
       priceChangePercent: priceChange.toFixed(2),
       winRate: winRate.toFixed(1),
-      history: this.data.history.map(h => ({
+      history: [...this.data.history].reverse().map(h => ({
         time: new Date(h.timestamp).toLocaleTimeString('ja-JP', { hour12: false }),
-        action: 'Rebalance',
+        date: new Date(h.timestamp).toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' }),
+        action: h.action || 'リバランス',
         price: h.price,
-        range: '-',
+        range: (h.lowerBound && h.upperBound)
+          ? `${h.lowerBound.toFixed(4)} 〜 ${h.upperBound.toFixed(4)}`
+          : '-',
         fee: h.fee > 0 ? h.fee.toFixed(4) : undefined,
-        status: h.fee > 0 ? `+${h.fee.toFixed(2)}` : 'Success',
+        status: h.fee > 0 ? `+${h.fee.toFixed(2)}` : '完了',
         details: h.details,
         txDigest: h.txDigest
       }))

@@ -18,13 +18,13 @@ interface ActivityLogProps {
 
 export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
   // 統計情報の計算
-  const totalRebalances = logs.filter(log => log.action === 'Rebalance').length;
+  const totalRebalances = logs.filter(log => log.action === 'リバランス' || log.action === 'Rebalance').length;
   const totalFeesCollected = logs.reduce((sum, log) => {
     const fee = log.fee ? parseFloat(log.fee) : 0;
     return sum + (isNaN(fee) ? 0 : fee);
   }, 0);
-  const successfulRebalances = logs.filter(log => 
-    log.action === 'Rebalance' && (log.status === 'Success' || log.status.includes('+'))
+  const successfulRebalances = logs.filter(log =>
+    log.status.includes('+')
   ).length;
   const successRate = totalRebalances > 0 ? (successfulRebalances / totalRebalances * 100).toFixed(1) : '0';
 
@@ -50,6 +50,17 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
           gap: '8px'
         }}>
           実行履歴
+          {logs.length > 0 && (
+            <span style={{
+              fontSize: '0.75rem',
+              fontWeight: 500,
+              color: 'var(--text-muted)',
+              background: 'rgba(88, 166, 255, 0.1)',
+              padding: '2px 8px',
+              borderRadius: '20px',
+              border: '1px solid rgba(88, 166, 255, 0.2)',
+            }}>{logs.length}件</span>
+          )}
         </h2>
         
         {/* 統計情報バッジ */}
@@ -140,17 +151,20 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                 <tr key={idx} style={{
                   transition: 'background 0.2s'
                 }}>
-                  <td style={{ 
+                  <td style={{
                     color: 'var(--text-muted)',
                     fontFamily: 'monospace',
                     fontSize: '0.85rem'
                   }}>
-                    <div style={{ 
+                    <div style={{
                       background: 'rgba(88, 166, 255, 0.1)',
                       padding: '4px 8px',
                       borderRadius: '6px',
                       display: 'inline-block',
                     }}>
+                      {(log as any).date && (
+                        <span style={{ fontSize: '0.75rem', opacity: 0.7, marginRight: '4px' }}>{(log as any).date}</span>
+                      )}
                       {log.time}
                     </div>
                   </td>
@@ -246,13 +260,13 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                       borderRadius: '6px',
                       fontSize: '0.825rem',
                       fontWeight: 600,
-                      background: isProfitable 
-                        ? 'rgba(63, 185, 80, 0.12)' 
+                      background: log.status.includes('+')
+                        ? 'rgba(63, 185, 80, 0.12)'
                         : 'rgba(88, 166, 255, 0.12)',
-                      color: isProfitable
+                      color: log.status.includes('+')
                         ? 'var(--success)'
                         : 'var(--accent)',
-                      border: isProfitable
+                      border: log.status.includes('+')
                         ? '1px solid rgba(63, 185, 80, 0.25)'
                         : '1px solid rgba(88, 166, 255, 0.25)'
                     }}>

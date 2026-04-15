@@ -240,7 +240,16 @@ export class Strategy {
         const feeRes = await this.lpManager.collectFees();
         this.lastCollectedFee = feeRes.amount;
 
-        await Tracker.recordRebalance(currentPrice, 0, feeRes.amount, txDigest);
+        await Tracker.recordRebalance(
+          currentPrice,
+          0,
+          feeRes.amount,
+          txDigest,
+          undefined,
+          this.currentLowerBound,
+          this.currentUpperBound,
+          'リバランス'
+        );
         Tracker.showStats();
 
         const msg = `✅ リバランス完了\n新レンジ: ${this.currentLowerBound.toFixed(4)} - ${this.currentUpperBound.toFixed(4)}\n実行価格: ${currentPrice.toFixed(4)} USDC`;
@@ -257,11 +266,14 @@ export class Strategy {
       // 失敗も履歴に記録
       const errorMsg = e.message.substring(0, 100);
       await Tracker.recordRebalance(
-        currentPrice, 
-        0, 
-        0, 
-        undefined, 
-        `失敗: ${errorMsg}`
+        currentPrice,
+        0,
+        0,
+        undefined,
+        `失敗: ${errorMsg}`,
+        this.currentLowerBound,
+        this.currentUpperBound,
+        'リバランス(失敗)'
       );
       
       this.notify(`❌ リバランス失敗\n${errorMsg}`);

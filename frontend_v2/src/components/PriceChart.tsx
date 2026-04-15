@@ -1,6 +1,32 @@
 import React from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Area } from 'recharts';
 
+// ホバー時のカスタムツールチップ
+const CustomTooltip = ({ active, payload, label }: any) => {
+  if (!active || !payload || payload.length === 0) return null;
+
+  // Area コンポーネントの重複エントリを除外（type が 'area' のもの）
+  const items = payload.filter((p: any) => p.type !== 'area');
+
+  return (
+    <div style={{
+      background: 'rgba(22, 27, 34, 0.95)',
+      border: '1px solid rgba(88, 166, 255, 0.25)',
+      borderRadius: '10px',
+      boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)',
+      padding: '10px 14px',
+      fontSize: '0.85rem',
+    }}>
+      <div style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>{label}</div>
+      {items.map((p: any) => (
+        <div key={p.name} style={{ color: p.color, fontWeight: 600, marginTop: '4px' }}>
+          {p.name}：{Number(p.value).toFixed(4)} USDC
+        </div>
+      ))}
+    </div>
+  );
+};
+
 interface PriceChartProps {
   data: any[];
   pythData: any[];
@@ -157,17 +183,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, pythData, lowerBou
                 tickFormatter={(value) => value.toFixed(2)}
                 width={60}
               />
-              <Tooltip 
-                contentStyle={{ 
-                  background: 'rgba(22, 27, 34, 0.95)', 
-                  border: '1px solid rgba(88, 166, 255, 0.25)', 
-                  borderRadius: '10px',
-                  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.3)'
-                }}
-                itemStyle={{ color: 'var(--accent)', fontWeight: 600 }}
-                labelStyle={{ color: 'var(--text-muted)', marginBottom: '8px' }}
-                formatter={(value: number) => [`${value.toFixed(4)} USDC`, 'SUI価格']}
-              />
+              <Tooltip content={<CustomTooltip />} />
               
               {/* 上限レンジ */}
               {upperBound > 0 && (
