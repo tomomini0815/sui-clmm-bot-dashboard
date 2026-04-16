@@ -1,4 +1,26 @@
-# デプロイ手順
+# 🚀 デプロイガイド
+
+## ワンクリックデプロイ（最速・簡単！）
+
+[![Deploy to Fly.io](https://fly.io/docs/images/deploy-to-fly.svg)](https://fly.io/launch?repo=https://github.com/tomomini0815/sui-clmm-bot-dashboard)
+
+上記のボタンをクリックするだけで、Fly.ioに自動デプロイされます！
+
+### 手順（約3分）
+1. 上の「Deploy to Fly.io」ボタンをクリック
+2. GitHubアカウントで認証
+3. Fly.ioアカウントに接続（初回のみ）
+4. アプリ名を入力（例: `my-sui-bot`）
+5. 環境変数を設定:
+   - `PRIVATE_KEY`: あなたのSui秘密鍵（`suiprivkey...`）
+   - `SUI_RPC_URL`: `https://fullnode.mainnet.sui.io:443`
+6. 「Launch App」をクリック
+7. 完了！URLが発行されます
+
+### デプロイ後
+発行されたURL（例: `https://my-sui-bot.fly.dev`）をフロントエンドのSetupWizardで入力してください。
+
+---
 
 ## バックエンドの選択肢（無料枠あり）
 
