@@ -9,20 +9,56 @@ import { SetupWizard } from './components/SetupWizard';
 import { HelpModal } from './components/HelpModal';
 import { PnLCard } from './components/PnLCard';
 import { DeltaGauge } from './components/DeltaGauge';
+import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 
 function App() {
+  const currentAccount = useCurrentAccount();
+  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
+  
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
-  const [privateKey, setPrivateKey] = useState('');
   const [sessionId, setSessionId] = useState(() => 
     localStorage.getItem('session_id') || ''
   );
   const [apiUrl] = useState(() => 
     import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
   );
+
+  // ウォレット接続時にセッション作成
+  useEffect(() => {
+    if (currentAccount && !sessionId) {
+      createSessionFromWallet();
+    }
+  }, [currentAccount]);
+
+  const createSessionFromWallet = async () => {
+    if (!currentAccount) return;
+    
+    try {
+      // ウォレットアドレスでセッションを作成
+      const response = await fetch(`${apiUrl}/api/session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          walletAddress: currentAccount.address,
+          isWalletConnect: true 
+        })
+      });
+      const data = await response.json();
+      
+      if (data.success) {
+        setSessionId(data.sessionId);
+        localStorage.setItem('session_id', data.sessionId);
+        localStorage.setItem('wizard_completed', 'true');
+        setIsWizardOpen(false);
+      }
+    } catch (e) {
+      console.error('Failed to create session:', e);
+    }
+  };
 
   const [stats, setStats] = useState({
     totalPnl: '0.00',
@@ -289,38 +325,15 @@ function App() {
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
-        privateKey={privateKey}
-        setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
         sessionId={sessionId}
       />
       <SetupWizard
         isOpen={isWizardOpen}
-        onComplete={async () => {
-          // セッション作成
-          try {
-            const response = await fetch(`${apiUrl}/api/session`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ privateKey })
-            });
-            const data = await response.json();
-            
-            if (data.success) {
-              setSessionId(data.sessionId);
-              localStorage.setItem('session_id', data.sessionId);
-              localStorage.setItem('wizard_completed', 'true');
-              setIsWizardOpen(false);
-            } else {
-              alert('セッション作成に失敗しました: ' + data.error);
-            }
-          } catch (e) {
-            alert('ネットワークエラー: ' + e);
-          }
+        onComplete={() => {
+          // ウォレット接続を促す
         }}
         onClose={() => setIsWizardOpen(false)}
-        privateKey={privateKey}
-        setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
       />
       <HelpModal

@@ -4,14 +4,11 @@ import { Eye, EyeOff, Save, X } from 'lucide-react';
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  privateKey: string;
-  setPrivateKey: (val: string) => void;
   apiUrl: string;
   sessionId?: string;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, privateKey, setPrivateKey, apiUrl, sessionId }) => {
-  const [showPk, setShowPk] = useState(false);
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, apiUrl, sessionId }) => {
   const [showTelegramToken, setShowTelegramToken] = useState(false);
   
   const [rangeWidth, setRangeWidth] = useState('5.0');
@@ -29,7 +26,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, p
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          privateKey,
+          sessionId,
           rangeWidth,
           hedgeRatio,
           telegramToken,
@@ -56,22 +53,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, p
           <button style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }} onClick={onClose}>
             <X size={24} />
           </button>
-        </div>
-
-        <div className="form-group">
-          <label>Wallet Private Key (suiprivkey...)</label>
-          <div className="input-wrapper">
-            <input 
-              type={showPk ? "text" : "password"} 
-              className="input-glass" 
-              placeholder="suiprivkey..." 
-              value={privateKey}
-              onChange={(e) => setPrivateKey(e.target.value)}
-            />
-            <div className="input-icon-right" onClick={() => setShowPk(!showPk)}>
-              {showPk ? <EyeOff size={18} /> : <Eye size={18} />}
-            </div>
-          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '16px' }}>
