@@ -30,8 +30,10 @@ export class SessionManager {
 
   /**
    * 新しいセッションを作成
+   * @param privateKey 秘密鍵（オプション - ウォレット接続モードでは不要）
+   * @param walletAddress ウォレットアドレス（オプション - 秘密鍵モードでは自動取得）
    */
-  static async createSession(sessionId: string, privateKey: string): Promise<UserSession> {
+  static async createSession(sessionId: string, privateKey: string | null = null, walletAddress: string | null = null): Promise<UserSession> {
     Logger.success(`Creating new session: ${sessionId}`);
 
     // 各コンポーネントをインスタンス化
@@ -49,12 +51,23 @@ export class SessionManager {
       pnlEngine
     );
 
-    // 秘密鍵を設定（メモリのみ）
-    strategy.setPrivateKey(privateKey);
+    // 秘密鍵モード
+    if (privateKey) {
+      strategy.setPrivateKey(privateKey);
+    }
+    
+    // ウォレット接続モード（デモ/読み取り専用）
+    let sessionWalletAddress = walletAddress;
+    if (!sessionWalletAddress && privateKey) {
+      sessionWalletAddress = strategy.getWalletAddress();
+    }
+    if (!sessionWalletAddress) {
+      sessionWalletAddress = '0x' + sessionId.replace(/-/g, '').slice(0, 40); // フォールバック
+    }
 
     const session: UserSession = {
       sessionId,
-      walletAddress: strategy.getWalletAddress(),
+      walletAddress: sessionWalletAddress,
       strategy,
       priceMonitor,
       lpManager,

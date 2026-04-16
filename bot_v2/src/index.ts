@@ -103,21 +103,41 @@ async function bootstrap() {
 // セッション作成・ログイン
 app.post('/api/session', async (req, res) => {
   try {
-    const { privateKey } = req.body;
+    const { privateKey, walletAddress, isWalletConnect } = req.body;
     
+    // ウォレット接続モード（Sui Walletから接続）
+    if (isWalletConnect && walletAddress) {
+      let session = SessionManager.getSessionByWallet(walletAddress);
+
+      // 既存セッションがなければ新規作成
+      if (!session) {
+        const sessionId = crypto.randomUUID();
+        session = await SessionManager.createSession(sessionId, null, walletAddress);
+      }
+
+      Logger.success(`Session started for wallet (WalletConnect): ${walletAddress}`);
+      
+      return res.json({ 
+        success: true, 
+        sessionId: session.sessionId,
+        walletAddress: session.walletAddress
+      });
+    }
+    
+    // 従来の秘密鍵モード
     if (!privateKey || !privateKey.startsWith('suiprivkey')) {
       return res.status(400).json({ 
         success: false, 
-        error: 'Invalid private key format' 
+        error: 'Invalid private key format or wallet address required' 
       });
     }
 
     // ウォレットアドレスで既存セッションを検索
     const decoded = decodeSuiPrivateKey(privateKey);
     const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
-    const walletAddress = keypair.getPublicKey().toSuiAddress();
+    const addr = keypair.getPublicKey().toSuiAddress();
 
-    let session = SessionManager.getSessionByWallet(walletAddress);
+    let session = SessionManager.getSessionByWallet(addr);
 
     // 既存セッションがなければ新規作成
     if (!session) {
@@ -125,7 +145,7 @@ app.post('/api/session', async (req, res) => {
       session = await SessionManager.createSession(sessionId, privateKey);
     }
 
-    Logger.success(`Session started for wallet: ${walletAddress}`);
+    Logger.success(`Session started for wallet: ${addr}`);
     
     res.json({ 
       success: true, 
