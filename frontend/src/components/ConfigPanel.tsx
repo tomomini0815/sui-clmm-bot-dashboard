@@ -42,7 +42,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   };
 
   return (
-    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div className="glass-panel config-panel" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
       {/* ヘッダー */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',

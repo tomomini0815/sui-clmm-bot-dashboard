@@ -41,8 +41,8 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperB
   const hasPythData = data.some(d => d.pythPrice != null);
 
   return (
-    <div className="glass-panel" style={{ height: '420px', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
+    <div className="glass-panel price-chart-panel" style={{ minHeight: '380px', maxHeight: '420px', display: 'flex', flexDirection: 'column' }}>
+      <div className="price-chart-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '12px' }}>
         <div>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
             SUI / USDC 価格チャート
@@ -105,7 +105,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperB
         </div>
       </div>
 
-      <div style={{ flex: 1, width: '100%' }}>
+      <div className="price-chart-container" style={{ flex: 1, width: '100%' }}>
         {data.length === 0 ? (
           <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.95rem' }}>
             <div style={{ textAlign: 'center' }}>

@@ -36,3 +36,12 @@ Thumbs.db
 bot/tracker_data.json
 bot/dist/
 frontend/dist/
+
+# Fly.io
+.fly/
+*.toml.local
+
+# Bot v2 data
+bot_v2/pnl_data.json
+bot_v2/tracker_data.json
+bot_v2/dist/

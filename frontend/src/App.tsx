@@ -19,7 +19,7 @@ function App() {
   const [privateKey, setPrivateKey] = useState('');
   const [apiUrl, setApiUrl] = useState(() => 
     localStorage.getItem('api_url_v2') || 
-    (import.meta.env.PROD ? 'https://sui-clmm-bot-backend.onrender.com' : 'http://localhost:3002')
+    (import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002')
   );
 
   const [stats, setStats] = useState({
@@ -147,18 +147,13 @@ function App() {
   return (
     <div className="dashboard-container">
       <header className="header">
-        <div>
+        <div className="header-title-section">
           <h1>
-            <span style={{
-              background: 'linear-gradient(135deg, #58a6ff 0%, #3fb950 100%)',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent',
-              backgroundClip: 'text'
-            }}>
+            <span className="gradient-text">
               SUI Liquidity Bot
             </span>
           </h1>
-          <p style={{ color: 'var(--text-muted)', marginTop: '6px', fontSize: '0.95rem' }}>
+          <p className="header-subtitle">
             Delta-Neutral Profit Engine • V3.0
           </p>
         </div>
@@ -191,7 +186,7 @@ function App() {
       </header>
 
       <div className="dashboard-grid">
-        <aside style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <aside className="sidebar-aside">
           <ConfigPanel
             isBotActive={isBotActive}
             onToggleBot={toggleBotState}
@@ -209,8 +204,8 @@ function App() {
           <DeltaGauge delta={stats.delta} hedge={stats.hedge} indicators={stats.indicators} />
         </aside>
 
-        <main>
-          <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: '20px' }}>
+        <main className="main-content">
+          <div className="stats-grid stats-grid-main">
             <StatCard
               title="純利益 (Net P&L)"
               value={`$${netPnl.toFixed(4)}`}
@@ -227,7 +222,7 @@ function App() {
           </div>
 
           {/* 市場分析パネル（メインエリアに移動） */}
-          <div className="glass-panel market-analysis-panel" style={{ marginBottom: '20px' }}>
+          <div className="glass-panel market-analysis-panel market-panel-main">
             <h3 style={{ fontSize: '0.95rem', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
               <BarChart3 size={16} color="var(--accent)" />
               市場分析
@@ -302,6 +297,10 @@ function App() {
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
+        setApiUrl={(val) => {
+          setApiUrl(val);
+          localStorage.setItem('api_url_v2', val);
+        }}
       />
       <HelpModal
         isOpen={isHelpOpen}

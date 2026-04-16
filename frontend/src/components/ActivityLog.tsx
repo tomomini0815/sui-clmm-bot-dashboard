@@ -29,7 +29,7 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
   const successRate = totalRebalances > 0 ? (successfulRebalances / totalRebalances * 100).toFixed(1) : '0';
 
   return (
-    <div className="glass-panel" style={{ 
+    <div className="glass-panel activity-log-panel" style={{ 
       marginTop: '24px',
       display: 'flex',
       flexDirection: 'column',
@@ -112,7 +112,7 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
         </div>
       </div>
       
-      <div style={{ overflowX: 'auto' }}>
+      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto' }}>
         <table className="log-table">
           <thead>
             <tr>

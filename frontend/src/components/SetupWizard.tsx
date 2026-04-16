@@ -9,7 +9,8 @@ import {
   AlertTriangle, 
   Info, 
   X,
-  ArrowRight
+  ArrowRight,
+  Server
 } from 'lucide-react';
 
 interface SetupWizardProps {
@@ -19,6 +20,7 @@ interface SetupWizardProps {
   privateKey: string;
   setPrivateKey: (val: string) => void;
   apiUrl: string;
+  setApiUrl?: (val: string) => void;
 }
 
 export const SetupWizard: React.FC<SetupWizardProps> = ({ 
@@ -27,10 +29,12 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
   onClose,
   privateKey, 
   setPrivateKey, 
-  apiUrl 
+  apiUrl,
+  setApiUrl 
 }) => {
   const [step, setStep] = useState(1);
   const [network, setNetwork] = useState<'testnet' | 'mainnet'>('testnet');
+  const [customApiUrl, setCustomApiUrl] = useState(apiUrl || '');
   const [safetyUnlocked, setSafetyUnlocked] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [faucetStatus, setFaucetStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -131,6 +135,26 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
                 onChange={e => setPrivateKey(e.target.value)}
                 autoFocus
               />
+            </div>
+
+            <div className="form-group">
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Server size={14} />
+                Backend API URL
+              </label>
+              <input 
+                type="text" 
+                className="input-glass" 
+                placeholder="https://sui-clmm-bot-backend.fly.dev" 
+                value={customApiUrl}
+                onChange={e => {
+                  setCustomApiUrl(e.target.value);
+                  if (setApiUrl) setApiUrl(e.target.value);
+                }}
+              />
+              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                💡 各自でFly.ioにデプロイしたバックエンドのURLを入力してください
+              </p>
             </div>
             
             <div style={{ padding: '12px', background: 'rgba(78, 242, 194, 0.05)', borderRadius: '12px', border: '1px solid rgba(78, 242, 194, 0.15)', display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '8px' }}>
