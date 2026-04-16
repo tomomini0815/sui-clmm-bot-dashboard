@@ -17,9 +17,11 @@ function App() {
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
   const [privateKey, setPrivateKey] = useState('');
-  const [apiUrl, setApiUrl] = useState(() => 
-    localStorage.getItem('api_url_v2') || 
-    (import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002')
+  const [sessionId, setSessionId] = useState(() => 
+    localStorage.getItem('session_id') || ''
+  );
+  const [apiUrl] = useState(() => 
+    import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
   );
 
   const [stats, setStats] = useState({
@@ -52,8 +54,10 @@ function App() {
 
   useEffect(() => {
     const fetchStats = async () => {
+      if (!sessionId) return;
+      
       try {
-        const response = await fetch(`${apiUrl}/api/stats`);
+        const response = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
         const result = await response.json();
         if (result.success) {
           setStats(result.data);
@@ -94,9 +98,15 @@ function App() {
   }, [apiUrl]);
 
   const toggleBotState = async () => {
+    if (!sessionId) return;
+    
     try {
       const endpoint = isBotActive ? '/api/stop' : '/api/start';
-      const response = await fetch(`${apiUrl}${endpoint}`, { method: 'POST' });
+      const response = await fetch(`${apiUrl}${endpoint}`, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      });
       const data = await response.json();
       if (data.success) {
         setIsBotActive(!isBotActive);
@@ -282,25 +292,36 @@ function App() {
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
-        setApiUrl={(val) => {
-          setApiUrl(val);
-          localStorage.setItem('api_url_v2', val);
-        }}
+        sessionId={sessionId}
       />
       <SetupWizard
         isOpen={isWizardOpen}
-        onComplete={() => {
-          localStorage.setItem('wizard_completed', 'true');
-          setIsWizardOpen(false);
+        onComplete={async () => {
+          // セッション作成
+          try {
+            const response = await fetch(`${apiUrl}/api/session`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ privateKey })
+            });
+            const data = await response.json();
+            
+            if (data.success) {
+              setSessionId(data.sessionId);
+              localStorage.setItem('session_id', data.sessionId);
+              localStorage.setItem('wizard_completed', 'true');
+              setIsWizardOpen(false);
+            } else {
+              alert('セッション作成に失敗しました: ' + data.error);
+            }
+          } catch (e) {
+            alert('ネットワークエラー: ' + e);
+          }
         }}
         onClose={() => setIsWizardOpen(false)}
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
-        setApiUrl={(val) => {
-          setApiUrl(val);
-          localStorage.setItem('api_url_v2', val);
-        }}
       />
       <HelpModal
         isOpen={isHelpOpen}

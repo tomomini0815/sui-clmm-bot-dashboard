@@ -21,7 +21,6 @@ interface SetupWizardProps {
   privateKey: string;
   setPrivateKey: (val: string) => void;
   apiUrl: string;
-  setApiUrl?: (val: string) => void;
 }
 
 export const SetupWizard: React.FC<SetupWizardProps> = ({ 
@@ -30,8 +29,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
   onClose,
   privateKey, 
   setPrivateKey, 
-  apiUrl,
-  setApiUrl 
+  apiUrl
 }) => {
   const [step, setStep] = useState(1);
   const [network, setNetwork] = useState<'testnet' | 'mainnet'>('testnet');
