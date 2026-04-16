@@ -137,59 +137,6 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
                 autoFocus
               />
             </div>
-
-            <div className="form-group">
-              <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Server size={14} />
-                Backend API URL
-              </label>
-              <input 
-                type="text" 
-                className="input-glass" 
-                placeholder="https://sui-clmm-bot-backend.fly.dev" 
-                value={customApiUrl}
-                onChange={e => {
-                  setCustomApiUrl(e.target.value);
-                  if (setApiUrl) setApiUrl(e.target.value);
-                }}
-              />
-              <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                💡 各自でFly.ioにデプロイしたバックエンドのURLを入力してください
-              </p>
-            </div>
-
-            <a 
-              href="https://fly.io/launch?repo=https://github.com/tomomini0815/sui-clmm-bot-dashboard" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                padding: '14px 24px',
-                background: 'linear-gradient(135deg, #7b61ff 0%, #5a3fd9 100%)',
-                borderRadius: '12px',
-                color: 'white',
-                textDecoration: 'none',
-                fontWeight: 600,
-                fontSize: '0.95rem',
-                transition: 'all 0.2s ease',
-                boxShadow: '0 4px 12px rgba(123, 97, 255, 0.3)'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-2px)';
-                e.currentTarget.style.boxShadow = '0 6px 16px rgba(123, 97, 255, 0.4)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = '0 4px 12px rgba(123, 97, 255, 0.3)';
-              }}
-            >
-              <Rocket size={20} />
-              <span>バックエンドをデプロイ（無料）</span>
-              <ExternalLink size={16} />
-            </a>
             
             <div style={{ padding: '12px', background: 'rgba(78, 242, 194, 0.05)', borderRadius: '12px', border: '1px solid rgba(78, 242, 194, 0.15)', display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '8px' }}>
               <Info size={20} color="var(--neon-cetus)" style={{ flexShrink: 0, marginTop: '2px' }} />
@@ -200,7 +147,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
 
             <div style={{ marginTop: 'auto', paddingTop: '32px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <button className="primary-btn" onClick={handleNext} disabled={!privateKey.startsWith('suiprivkey')}>
-                設定して次へ <ChevronRight size={18} />
+                開始する <ChevronRight size={18} />
               </button>
               <button 
                 onClick={onClose}
