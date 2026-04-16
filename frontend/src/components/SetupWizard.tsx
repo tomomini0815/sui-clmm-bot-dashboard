@@ -1,15 +1,34 @@
 import React, { useState } from 'react';
-import { Wallet, Globe, Unlock, Rocket, ChevronRight, CheckCircle2, AlertTriangle, Info } from 'lucide-react';
+import { 
+  ShieldCheck, 
+  Compass, 
+  Key, 
+  Rocket, 
+  ChevronRight, 
+  CheckCircle2, 
+  AlertTriangle, 
+  Info, 
+  X,
+  ArrowRight
+} from 'lucide-react';
 
 interface SetupWizardProps {
   isOpen: boolean;
   onComplete: () => void;
+  onClose: () => void;
   privateKey: string;
   setPrivateKey: (val: string) => void;
   apiUrl: string;
 }
 
-export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, privateKey, setPrivateKey, apiUrl }) => {
+export const SetupWizard: React.FC<SetupWizardProps> = ({ 
+  isOpen, 
+  onComplete, 
+  onClose,
+  privateKey, 
+  setPrivateKey, 
+  apiUrl 
+}) => {
   const [step, setStep] = useState(1);
   const [network, setNetwork] = useState<'testnet' | 'mainnet'>('testnet');
   const [safetyUnlocked, setSafetyUnlocked] = useState(false);
@@ -21,6 +40,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
 
   const handleNext = () => setStep(s => s + 1);
   const handlePrev = () => setStep(s => s - 1);
+  
   const handleFaucet = async () => {
     setFaucetStatus('loading');
     setFaucetError(null);
@@ -51,12 +71,10 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         ? 'https://fullnode.mainnet.sui.io:443' 
         : 'https://fullnode.testnet.sui.io:443';
         
-      // Mainnet: USDC-SUI プール (TVL $4.5M, fee 0.25%) | Testnet: デモプール
       const poolId = network === 'mainnet'
         ? '0xb8d7d9e66a60c239e7a60110efcf8de6c705580ed924d0dde141f4a0e2c90105'
         : '0xf4f9663f288049ede73a9f19e3a655c74be8a9a84dd3e2c7f04c190c5c9f1fba';
 
-      // Send config to backend (Mock backend will save to .env)
       await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -68,9 +86,9 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
           hedgeRatio: 50
         })
       });
-      // Delay for dramatic effect
+      
       await new Promise(r => setTimeout(r, 1500));
-      onComplete(); // Closes wizard & returns to dashboard
+      onComplete(); 
     } catch (e) {
       console.error(e);
       alert('Network Error: Make sure your backend API is running.');
@@ -81,7 +99,11 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
 
   return (
     <div className="wizard-overlay">
-      <div className="wizard-card">
+      <div className="wizard-card" style={{ position: 'relative' }}>
+        {/* Close Button */}
+        <button className="wizard-close-btn" onClick={onClose} title="閉じる">
+          <X size={20} />
+        </button>
         
         <div className="step-indicator">
           {[1,2,3,4].map(num => (
@@ -92,7 +114,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         {step === 1 && (
           <div className="wizard-content">
             <div className="wizard-header">
-              <Wallet size={48} color="var(--neon-cetus)" style={{ marginBottom: '16px' }} />
+              <ShieldCheck size={56} color="var(--neon-cetus)" style={{ marginBottom: '16px', filter: 'drop-shadow(0 0 12px rgba(78, 242, 194, 0.4))' }} />
               <h2>ボットへ秘密鍵を紐付けましょう</h2>
               <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>
                 Cetusで自動取引を行うための専用のSui Walletを紐付けます。
@@ -111,16 +133,33 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
               />
             </div>
             
-            <div style={{ padding: '12px', background: 'rgba(78, 242, 194, 0.05)', borderRadius: '8px', border: '1px solid rgba(78, 242, 194, 0.15)', display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '8px' }}>
+            <div style={{ padding: '12px', background: 'rgba(78, 242, 194, 0.05)', borderRadius: '12px', border: '1px solid rgba(78, 242, 194, 0.15)', display: 'flex', gap: '12px', alignItems: 'flex-start', marginTop: '8px' }}>
               <Info size={20} color="var(--neon-cetus)" style={{ flexShrink: 0, marginTop: '2px' }} />
               <div style={{ fontSize: '0.85rem', color: 'var(--text-main)', lineHeight: 1.5 }}>
                 <strong>取得方法: </strong> Sui Walletを開き、右上のメニュー ＞ Accounts ＞ 使用するアカウント ＞ Export Private Key（鍵アイコン）から取得した文字列を入力してください。
               </div>
             </div>
 
-            <div style={{ marginTop: 'auto', paddingTop: '32px', display: 'flex', justifyContent: 'flex-end' }}>
-              <button className="primary-btn" onClick={handleNext} disabled={!privateKey.startsWith('suiprivkey')} style={{ width: 'auto' }}>
-                Next <ChevronRight size={18} />
+            <div style={{ marginTop: 'auto', paddingTop: '32px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <button className="primary-btn" onClick={handleNext} disabled={!privateKey.startsWith('suiprivkey')}>
+                設定して次へ <ChevronRight size={18} />
+              </button>
+              <button 
+                onClick={onClose}
+                style={{ 
+                  background: 'transparent', 
+                  border: 'none', 
+                  color: 'var(--text-muted)', 
+                  fontSize: '0.88rem', 
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                  padding: '8px'
+                }}
+              >
+                スキップして後で設定する <ArrowRight size={14} />
               </button>
             </div>
           </div>
@@ -129,10 +168,10 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         {step === 2 && (
           <div className="wizard-content">
             <div className="wizard-header">
-              <Globe size={48} color="var(--neon-cyan)" style={{ marginBottom: '16px' }} />
+              <Compass size={56} color="var(--neon-cyan)" style={{ marginBottom: '16px', filter: 'drop-shadow(0 0 12px rgba(0, 229, 255, 0.4))' }} />
               <h2>プールとネットワークの選択</h2>
               <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>
-                運用する市場環境を選択してください。専門的なURL設定は裏側で自動構築されます。
+                運用する市場環境を選択してください。
               </p>
             </div>
             
@@ -140,20 +179,20 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
               <div className={`radio-card ${network === 'testnet' ? 'selected' : ''}`} onClick={() => setNetwork('testnet')}>
                 <div style={{ flex: 1 }}>
                   <h4 style={{ fontSize: '1.05rem', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    Sui Testnet (テスト用安全環境)
+                    Sui Testnet (テスト用)
                     {network === 'testnet' && <CheckCircle2 size={16} color="var(--neon-cetus)" />}
                   </h4>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>無料のおもちゃのSUIを使って、バグがないか安全にテスト運用します。</p>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>無料のSUIを使って安全にテスト運用します。</p>
                 </div>
               </div>
               
               <div className={`radio-card ${network === 'mainnet' ? 'selected' : ''}`} onClick={() => setNetwork('mainnet')}>
                 <div style={{ flex: 1 }}>
                   <h4 style={{ fontSize: '1.05rem', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    Sui Mainnet (本番・収益化環境)
+                    Sui Mainnet (本番稼働)
                     {network === 'mainnet' && <CheckCircle2 size={16} color="var(--neon-cyan)" />}
                   </h4>
-                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>本当のお客様の資産(USDC/SUI)を使って、実際にCetusから手数料を獲得します。</p>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>実際の資産(USDC/SUI)を使って手数料を獲得します。</p>
                 </div>
               </div>
             </div>
@@ -164,9 +203,9 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
             </div>
 
             <div style={{ marginTop: 'auto', paddingTop: '16px', display: 'flex', justifyContent: 'space-between' }}>
-              <button style={{ background: 'transparent', color: 'var(--text-muted)', border: 'none', cursor: 'pointer' }} onClick={handlePrev}>Back</button>
-              <button className="primary-btn" onClick={handleNext} style={{ width: 'auto' }}>
-                Next <ChevronRight size={18} />
+              <button style={{ background: 'transparent', color: 'var(--text-muted)', border: 'none', cursor: 'pointer' }} onClick={handlePrev}>戻る</button>
+              <button className="primary-btn" onClick={handleNext} style={{ width: 'auto', padding: '12px 32px' }}>
+                次へ <ChevronRight size={18} />
               </button>
             </div>
           </div>
@@ -175,72 +214,46 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
         {step === 3 && (
           <div className="wizard-content">
             <div className="wizard-header">
-              <Unlock size={48} color={network === 'mainnet' ? '#ff3d00' : 'var(--neon-cetus)'} style={{ marginBottom: '16px' }} />
-              <h2>安全装置（ロック）の解除</h2>
+              <Key size={56} color={network === 'mainnet' ? 'var(--danger)' : 'var(--neon-cetus)'} style={{ marginBottom: '16px', filter: `drop-shadow(0 0 12px ${network === 'mainnet' ? 'rgba(248, 81, 73, 0.4)' : 'rgba(78, 242, 194, 0.4)'})` }} />
+              <h2>安全装置の解除</h2>
               <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>
-                実際に資金をデプロイするための確認事項です。
+                運用を開始する前の確認事項です。
               </p>
             </div>
             
-            <div style={{ background: 'rgba(0,0,0,0.3)', padding: '20px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '24px' }}>
+            <div style={{ background: 'rgba(0,0,0,0.3)', padding: '20px', borderRadius: '16px', border: '1px solid var(--border-panel)', marginBottom: '24px' }}>
               <ul style={{ listStyle: 'none', padding: 0, display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <li style={{ display: 'flex', gap: '12px' }}>
-                  <AlertTriangle size={20} color={network === 'mainnet' ? '#ff3d00' : 'var(--neon-cetus)'} style={{ flexShrink: 0 }} />
+                  <AlertTriangle size={20} color={network === 'mainnet' ? 'var(--danger)' : 'var(--neon-cetus)'} style={{ flexShrink: 0 }} />
                   <span style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>
-                    <strong>{network === 'mainnet' ? '本物の資金が必要です' : 'テスト用資金が必要です'}：</strong>
-                    紐付けたウォレット（アドレス）に、ガス代用のSUIが数枚入っていることを確認してください。
+                    <strong>資金の確認：</strong>
+                    ウォレットにガス代用のSUIが少量入っていることを確認してください。
                   </span>
                 </li>
                 <li style={{ display: 'flex', gap: '12px' }}>
                   <Info size={20} color="var(--neon-cyan)" style={{ flexShrink: 0 }} />
                   <span style={{ fontSize: '0.9rem', lineHeight: 1.5 }}>
-                    <strong>自動契約の承諾：</strong>
-                    Botは指定されたレンジ(±5%)を自動維持するため、急反発時にインパーマネントロスが発生する場合があります。
+                    <strong>リスクの承諾：</strong>
+                    急激な価格変動によりインパーマネントロスが発生する場合があります。
                   </span>
                 </li>
               </ul>
             </div>
 
-            {network === 'testnet' && (
-              <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                <button 
-                  className="primary-btn" 
-                  onClick={handleFaucet}
-                  disabled={faucetStatus !== 'idle'}
-                  style={{ width: '100%', background: faucetStatus === 'success' ? '#2ecc71' : faucetStatus === 'error' ? '#e74c3c' : 'rgba(78, 242, 194, 0.2)', color: faucetStatus === 'idle' ? 'var(--neon-cetus)' : '#fff', border: '1px solid var(--neon-cetus)', boxShadow: 'none' }}
-                >
-                  {faucetStatus === 'idle' && '💧 Get Free Testnet SUI (Tap once)'}
-                  {faucetStatus === 'loading' && '⏳ Requesting... (Takes ~10s)'}
-                  {faucetStatus === 'success' && '✅ Successfully Funded!'}
-                  {faucetStatus === 'error' && `❌ Error: ${faucetError || 'Check Console'}`}
-                </button>
-                {faucetStatus === 'success' && (
-                  <span style={{ fontSize: '0.85rem', color: 'var(--neon-cetus)', marginTop: '8px' }}>
-                    SUI received! You can now check the safety box and proceed.
-                  </span>
-                )}
-                {faucetStatus === 'error' && faucetError?.includes('429') && (
-                  <span style={{ fontSize: '0.85rem', color: '#e74c3c', marginTop: '8px' }}>
-                    Too many requests. Please wait a few minutes and try again.
-                  </span>
-                )}
-              </div>
-            )}
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', padding: '12px', border: '1px solid var(--border-panel)', borderRadius: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', padding: '16px', border: '1px solid var(--border-panel)', borderRadius: '12px', background: safetyUnlocked ? 'rgba(88, 166, 255, 0.05)' : 'transparent', transition: 'all 0.2s' }}>
               <input 
                 type="checkbox" 
                 checked={safetyUnlocked} 
                 onChange={(e) => setSafetyUnlocked(e.target.checked)} 
-                style={{ width: '20px', height: '20px', accentColor: 'var(--neon-cetus)' }}
+                style={{ width: '22px', height: '22px', accentColor: 'var(--accent)' }}
               />
-              <span style={{ fontWeight: 500 }}>免責事項に同意し、安全ロックを解除して取引システムを本番稼働させます。</span>
+              <span style={{ fontWeight: 500, fontSize: '0.9rem' }}>免責事項に同意し、安全ロックを解除して本番稼働させます。</span>
             </label>
 
             <div style={{ marginTop: 'auto', paddingTop: '32px', display: 'flex', justifyContent: 'space-between' }}>
-              <button style={{ background: 'transparent', color: 'var(--text-muted)', border: 'none', cursor: 'pointer' }} onClick={handlePrev}>Back</button>
-              <button className="primary-btn" onClick={handleNext} disabled={!safetyUnlocked} style={{ width: 'auto' }}>
-                Configure <ChevronRight size={18} />
+              <button style={{ background: 'transparent', color: 'var(--text-muted)', border: 'none', cursor: 'pointer' }} onClick={handlePrev}>戻る</button>
+              <button className="primary-btn" onClick={handleNext} disabled={!safetyUnlocked} style={{ width: 'auto', padding: '12px 32px' }}>
+                最終確認へ <ChevronRight size={18} />
               </button>
             </div>
           </div>
@@ -248,14 +261,17 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ isOpen, onComplete, pr
 
         {step === 4 && (
           <div className="wizard-content" style={{ alignItems: 'center', textAlign: 'center' }}>
-            <Rocket size={64} className="animate-pulse-slow" color="var(--neon-cetus)" style={{ marginBottom: '24px' }} />
-            <h2 style={{ fontSize: '2rem', marginBottom: '16px' }}>All Systems Ready</h2>
+            <div style={{ position: 'relative', marginBottom: '32px' }}>
+              <div style={{ position: 'absolute', inset: -20, background: 'var(--neon-cetus)', filter: 'blur(40px)', opacity: 0.15 }}></div>
+              <Rocket size={80} className="animate-pulse-slow" color="var(--neon-cetus)" style={{ filter: 'drop-shadow(0 0 20px rgba(78, 242, 194, 0.6))' }} />
+            </div>
+            <h2 style={{ fontSize: '2.2rem', marginBottom: '16px', fontWeight: 800 }}>All Systems Ready</h2>
             <p style={{ color: 'var(--text-muted)', maxWidth: '400px', lineHeight: 1.6, marginBottom: '40px' }}>
-              Botの初期設定が完了しました。裏側のシステムに秘密鍵と対象プールの設定を送信し、ダッシュボードを接続します。
+              Botの初期設定が完了しました。市場監視エンジンを起動し、資産の運用を開始します。
             </p>
             
-            <button className="primary-btn" onClick={handleLaunch} disabled={isSaving} style={{ fontSize: '1.1rem', padding: '16px 40px', borderRadius: '30px' }}>
-              {isSaving ? 'Starting Engine...' : 'Launch Dashboard'}
+            <button className="primary-btn" onClick={handleLaunch} disabled={isSaving} style={{ fontSize: '1.1rem', padding: '16px 60px', borderRadius: '40px' }}>
+              {isSaving ? '起動中...' : '運用を開始する'}
             </button>
           </div>
         )}

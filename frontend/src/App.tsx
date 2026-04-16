@@ -298,6 +298,7 @@ function App() {
           localStorage.setItem('wizard_completed', 'true');
           setIsWizardOpen(false);
         }}
+        onClose={() => setIsWizardOpen(false)}
         privateKey={privateKey}
         setPrivateKey={setPrivateKey}
         apiUrl={apiUrl}
