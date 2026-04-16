@@ -12,6 +12,8 @@ import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
 import { LpManager } from './lpManager.js';
 import { HedgeManager } from './hedgeManager.js';
+import { GasTracker } from './gasTracker.js';
+import { PnlEngine } from './pnlEngine.js';
 import { Strategy } from './strategy.js';
 import { Tracker } from './tracker.js';
 import { config, reloadConfig, updateConfigReference } from './config.js';
@@ -27,6 +29,8 @@ let strategyInstance: Strategy | null = null;
 let priceMonitorInstance: PriceMonitor | null = null;
 let lpManagerInstance: LpManager | null = null;
 let hedgeManagerInstance: HedgeManager | null = null;
+let gasTrackerInstance: GasTracker | null = null;
+let pnlEngineInstance: PnlEngine | null = null;
 
 function refreshAllComponents() {
   // .envファイルを再読み込み
@@ -43,16 +47,50 @@ function refreshAllComponents() {
 }
 
 async function bootstrap() {
-  Logger.box('Bot Starting', 'Sui CLMM LP Auto Rebalance Bot Initialization');
+  Logger.box('Bot Starting', 'Sui CLMM LP Auto Rebalance Bot V3 — Profit Optimized');
 
   try {
     await Tracker.init();
 
+    // PnLデータの復元
+    const pnlDataPath = path.resolve(process.cwd(), 'pnl_data.json');
+    
     priceMonitorInstance = new PriceMonitor();
-    lpManagerInstance = new LpManager(priceMonitorInstance);
-    hedgeManagerInstance = new HedgeManager();
+    gasTrackerInstance = new GasTracker();
+    pnlEngineInstance = new PnlEngine();
 
-    strategyInstance = new Strategy(priceMonitorInstance, lpManagerInstance, hedgeManagerInstance);
+    // PnL状態復元
+    try {
+      if (fs.existsSync(pnlDataPath)) {
+        const pnlData = JSON.parse(fs.readFileSync(pnlDataPath, 'utf-8'));
+        pnlEngineInstance.restore(pnlData);
+      }
+    } catch (e) {
+      Logger.warn('PnLデータの復元に失敗');
+    }
+
+    lpManagerInstance = new LpManager(priceMonitorInstance, gasTrackerInstance);
+    hedgeManagerInstance = new HedgeManager(config.hedgeMode);
+
+    strategyInstance = new Strategy(
+      priceMonitorInstance,
+      lpManagerInstance,
+      hedgeManagerInstance,
+      gasTrackerInstance,
+      pnlEngineInstance
+    );
+
+    // 定期的にPnLデータを保存 (30秒ごと)
+    setInterval(() => {
+      if (pnlEngineInstance) {
+        try {
+          fs.writeFileSync(pnlDataPath, JSON.stringify(pnlEngineInstance.serialize(), null, 2));
+        } catch (e) {
+          // 静かに無視
+        }
+      }
+    }, 30000);
+
   } catch (error) {
     Logger.error('Bot logic initialization failed.', error);
   }
@@ -69,13 +107,16 @@ app.post('/api/config', (req, res) => {
     let envContent = `PRIVATE_KEY=${privateKey || ''}\n`;
     envContent += `SUI_RPC_URL=${rpcUrl || 'https://fullnode.mainnet.sui.io'}\n`;
     envContent += `POOL_OBJECT_ID=${poolObjectId || ''}\n`;
-    envContent += `LP_AMOUNT_USDC=${parseFloat(lpAmountUsdc) || 0.05}\n`;
+    envContent += `LP_AMOUNT_USDC=${parseFloat(lpAmountUsdc) || 0.10}\n`;
     envContent += `RANGE_WIDTH=${(parseFloat(rangeWidth) / 100) || 0.05}\n`;
     envContent += `HEDGE_RATIO=${(parseFloat(hedgeRatio) / 100) || 0.5}\n`;
     envContent += `TELEGRAM_BOT_TOKEN=${telegramToken || ''}\n`;
     envContent += `TELEGRAM_CHAT_ID=${telegramChatId || ''}\n`;
-    envContent += `MONITOR_INTERVAL_MS=10000\n`;
-    envContent += `COOLDOWN_PERIOD_MS=60000\n`;
+    envContent += `MONITOR_INTERVAL_MS=30000\n`;
+    envContent += `COOLDOWN_PERIOD_MS=300000\n`;
+    envContent += `FEE_COLLECT_INTERVAL_MS=300000\n`;
+    envContent += `MIN_PROFIT_FOR_REBALANCE=0.005\n`;
+    envContent += `HEDGE_MODE=simulate\n`;
 
     fs.writeFileSync(envPath, envContent);
     Logger.success('Success: Configuration saved to .env from UI.');
@@ -93,7 +134,6 @@ app.post('/api/config', (req, res) => {
 app.post('/api/start', async (req, res) => {
   if (strategyInstance) {
     Logger.info('Start command received from UI.');
-    // 設定リロードは不要（起動時に正しく読み込み済み）
     await strategyInstance.start();
     res.json({ success: true, status: 'running' });
   } else {
@@ -132,20 +172,21 @@ app.get('/api/stats', async (req, res) => {
       }
     }
 
-    // 平均保有時間を計算
-    const avgHoldingTime = stats.totalRebalances > 0 ? '15分' : '0分';
-
-    // Pyth OracleからSUI市場価格を取得
+    // Pyth Oracle価格
     let pythPrice = 0;
     try {
       if (priceMonitorInstance) {
         pythPrice = await priceMonitorInstance.getPythPrice();
-        if (pythPrice > 0) {
-          console.log(`API: Pyth price = $${pythPrice.toFixed(4)}`);
-        }
       }
     } catch (e: any) {
-      console.log(`API: Pyth price fetch failed: ${e.message}`);
+      // silent
+    }
+
+    // === 新機能: PnL/Delta/Gas データ ===
+    const currentPrice = prices.length > 0 ? prices[prices.length - 1].price : 0;
+    let pnlData = null;
+    if (strategyInstance && currentPrice > 0) {
+      pnlData = strategyInstance.getPnlData(currentPrice);
     }
 
     res.json({
@@ -155,7 +196,7 @@ app.get('/api/stats', async (req, res) => {
         isRunning: strategyInstance ? strategyInstance.isRunning : false,
         walletAddress,
         priceHistory: prices,
-        activityLogs: stats.history, // 全件（新しい順）
+        activityLogs: stats.history,
         currentRange: {
           lower: Number(lowerBound.toFixed(4)),
           upper: Number(upperBound.toFixed(4))
@@ -166,9 +207,21 @@ app.get('/api/stats', async (req, res) => {
           hedgeRatio: config.hedgeRatio
         },
         marketCondition,
-        avgHoldingTime,
-        dailyPnl: '0.00', // 将来的に日次計算を実装
-        pythPrice: pythPrice > 0 ? Number(pythPrice.toFixed(4)) : null // Pyth市場価格
+        avgHoldingTime: stats.totalRebalances > 0 ? '15分' : '0分',
+        dailyPnl: pnlData?.pnl?.dailyPnl?.toFixed(4) || '0.00',
+        pythPrice: pythPrice > 0 ? Number(pythPrice.toFixed(4)) : null,
+
+        // === 新データ ===
+        pnl: pnlData?.pnl || null,
+        delta: pnlData?.delta || null,
+        gasStats: pnlData?.gasStats || null,
+        hedge: pnlData?.hedge || null,
+        indicators: pnlData ? {
+          rsi: pnlData.rsi,
+          volatility: pnlData.volatility,
+          trend: pnlData.trend,
+        } : null,
+        dailySnapshots: pnlData?.dailySnapshots || [],
       }
     });
   } catch (e: any) {
@@ -217,7 +270,6 @@ app.post('/api/faucet', async (req, res) => {
       res.json({ success: true, message: 'Testnet SUI requested successfully' });
     } catch (faucetErr: any) {
       Logger.error(`Faucet Service Error: ${faucetErr.message}`);
-      // レート制限などの場合はエラーメッセージを詳細に返す
       res.status(500).json({ success: false, error: faucetErr.message || 'Faucet service is currently unavailable' });
     }
   } catch (error: any) {

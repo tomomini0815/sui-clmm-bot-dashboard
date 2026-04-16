@@ -21,6 +21,16 @@ export interface BotConfig {
   monitorIntervalMs: number;
   cooldownPeriodMs: number;
   apiPort: number;
+  
+  // === 新設定: 利益最適化 ===
+  feeCollectIntervalMs: number;     // 手数料回収間隔 (ms)
+  minProfitForRebalance: number;    // リバランス最小利益閾値 (USDC)
+  gasBudgetSui: number;             // TX当たりのガス予算 (SUI)
+  rsiEntryLow: number;              // RSIエントリー下限
+  rsiEntryHigh: number;             // RSIエントリー上限
+  hedgeMode: 'simulate' | 'bluefin'; // ヘッジモード
+  maxSlippage: number;              // 最大スリッページ (%)
+  balanceCheckEnabled: boolean;     // 残高チェック有効化
 }
 
 function loadConfig(): BotConfig {
@@ -34,6 +44,15 @@ function loadConfig(): BotConfig {
     RANGE_WIDTH,
     MONITOR_INTERVAL_MS,
     COOLDOWN_PERIOD_MS,
+    // 新設定
+    FEE_COLLECT_INTERVAL_MS,
+    MIN_PROFIT_FOR_REBALANCE,
+    GAS_BUDGET_SUI,
+    RSI_ENTRY_LOW,
+    RSI_ENTRY_HIGH,
+    HEDGE_MODE,
+    MAX_SLIPPAGE,
+    BALANCE_CHECK_ENABLED,
   } = process.env;
 
   if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here') {
@@ -45,15 +64,25 @@ function loadConfig(): BotConfig {
 
   return {
     privateKey: PRIVATE_KEY,
-    rpcUrl: SUI_RPC_URL || 'https://fullnode.testnet.sui.io',
+    rpcUrl: SUI_RPC_URL || 'https://fullnode.mainnet.sui.io',
     telegramToken: TELEGRAM_BOT_TOKEN,
     telegramChatId: TELEGRAM_CHAT_ID,
-    lpAmountUsdc: parseFloat(LP_AMOUNT_USDC || '0.05'),
+    lpAmountUsdc: parseFloat(LP_AMOUNT_USDC || '0.10'),
     hedgeRatio: parseFloat(HEDGE_RATIO || '0.5'),
     rangeWidth: parseFloat(RANGE_WIDTH || '0.05'),
-    monitorIntervalMs: parseInt(MONITOR_INTERVAL_MS || '60000', 10),
-    cooldownPeriodMs: parseInt(COOLDOWN_PERIOD_MS || '600000', 10),
+    monitorIntervalMs: parseInt(MONITOR_INTERVAL_MS || '30000', 10),
+    cooldownPeriodMs: parseInt(COOLDOWN_PERIOD_MS || '300000', 10),
     apiPort: parseInt(process.env.PORT || '3002', 10),
+    
+    // 新設定のデフォルト値
+    feeCollectIntervalMs: parseInt(FEE_COLLECT_INTERVAL_MS || '300000', 10), // 5分
+    minProfitForRebalance: parseFloat(MIN_PROFIT_FOR_REBALANCE || '0.005'),  // $0.005
+    gasBudgetSui: parseFloat(GAS_BUDGET_SUI || '0.05'),
+    rsiEntryLow: parseInt(RSI_ENTRY_LOW || '35', 10),
+    rsiEntryHigh: parseInt(RSI_ENTRY_HIGH || '65', 10),
+    hedgeMode: (HEDGE_MODE as 'simulate' | 'bluefin') || 'simulate',
+    maxSlippage: parseFloat(MAX_SLIPPAGE || '0.05'),   // 5%
+    balanceCheckEnabled: BALANCE_CHECK_ENABLED !== 'false',
   };
 }
 
@@ -73,4 +102,3 @@ export let config = loadConfig();
 export function updateConfigReference(newConfig: BotConfig) {
   config = newConfig;
 }
-

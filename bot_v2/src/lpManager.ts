@@ -7,6 +7,7 @@ import BN from 'bn.js';
 import { config } from './config.js';
 import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
+import { GasTracker } from './gasTracker.js';
 
 export class LpManager {
   private keypair!: Ed25519Keypair;
@@ -22,7 +23,10 @@ export class LpManager {
   private usdcDecimals: number = 6;
   private usdcIsA: boolean = true;
 
-  constructor(private priceMonitor: PriceMonitor) {
+  constructor(
+    private priceMonitor: PriceMonitor,
+    private gasTracker: GasTracker
+  ) {
     this.refreshConfig();
   }
 
@@ -124,8 +128,55 @@ export class LpManager {
     return posId !== null;
   }
 
-  async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<string> {
+  /**
+   * ウォレット残高チェック
+   * Insufficient balance エラーを防止
+   */
+  async checkBalance(): Promise<{ suiBalance: number; usdcBalance: number; sufficient: boolean }> {
+    try {
+      // SUI残高
+      const suiBalance = await this.suiClient.getBalance({
+        owner: this.walletAddress,
+      });
+      const suiAmount = Number(suiBalance.totalBalance) / 1e9;
+
+      // USDC残高
+      let usdcAmount = 0;
+      if (this.isInitialized) {
+        const usdcCoinType = this.usdcIsA ? this.coinTypeA : this.coinTypeB;
+        try {
+          const usdcBalance = await this.suiClient.getBalance({
+            owner: this.walletAddress,
+            coinType: usdcCoinType,
+          });
+          usdcAmount = Number(usdcBalance.totalBalance) / Math.pow(10, this.usdcDecimals);
+        } catch {
+          Logger.warn('USDC残高の取得に失敗');
+        }
+      }
+
+      // ガス用SUI (最低0.01 SUI) + LP用USDC がウォレットにあるか
+      const sufficient = suiAmount >= 0.01 && usdcAmount >= config.lpAmountUsdc * 0.5;
+
+      Logger.info(`💰 残高: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)} → ${sufficient ? '✅ 十分' : '❌ 不足'}`);
+
+      return { suiBalance: suiAmount, usdcBalance: usdcAmount, sufficient };
+    } catch (e: any) {
+      Logger.error('残高チェック失敗', e);
+      return { suiBalance: 0, usdcBalance: 0, sufficient: false };
+    }
+  }
+
+  async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<{ digest: string; gasCostUsdc: number }> {
     if (!this.isInitialized) await this.initializePoolData();
+
+    // 残高チェック
+    if (config.balanceCheckEnabled) {
+      const balance = await this.checkBalance();
+      if (!balance.sufficient) {
+        throw new Error(`Insufficient balance: SUI=${balance.suiBalance.toFixed(4)}, USDC=${balance.usdcBalance.toFixed(4)}. 必要: USDC ≥ ${(amountUsdc * 0.5).toFixed(4)} + SUI ≥ 0.01`);
+      }
+    }
     
     Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC/SUI, ${amountUsdc} USDC)...`);
 
@@ -138,38 +189,30 @@ export class LpManager {
       const tickSpacing = parseInt(pool.tickSpacing.toString());
       const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
       
-      // 正確な tick を計算（動的な Decimal を使用）
-      // lowerTick / upperTick の計算において、SDK の priceTo... は「1単位のAに対するBの量」を引数に取る。
-      // 私たちの "price" は「1 SUI = X USDC」なので、coinA/coinBの順序に応じて調整が必要。
-      
       let lowerTick: number;
       let upperTick: number;
       
       if (this.usdcIsA) {
-        // A=USDC, B=SUI。price=B/A なので、SDKの引数にそのまま使える。
-        // ただし、私たちのUIのpriceは通常「1 SUI = X USDC」(A/B) なので、逆数にする必要がある。
         const invLower = 1 / upperPrice;
         const invUpper = 1 / lowerPrice;
         lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(invLower.toString()), this.decimalsA, this.decimalsB, tickSpacing);
         upperTick = TickMath.priceToInitializableTickIndex(new Decimal(invUpper.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       } else {
-        // B=USDC, A=SUI。price=B/A なので、そのまま使える。
         lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(lowerPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
         upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       }
 
       Logger.info(`[Blockchain] Range: [${lowerTick}, ${upperTick}], USDC_Is_A=${this.usdcIsA}, Decimals=[${this.decimalsA}, ${this.decimalsB}]`);
 
-      // USDCの資金額をBNに変換（動的な Decimal を使用）
       const usdcAmountBN = new BN(Math.floor(amountUsdc * Math.pow(10, this.usdcDecimals)).toString());
       
       const estResult = ClmmPoolUtil.estLiquidityAndcoinAmountFromOneAmounts(
         lowerTick,
         upperTick,
         usdcAmountBN,
-        this.usdcIsA,   // isA
-        true,           // roundUp
-        0.05,           // slippage
+        this.usdcIsA,
+        true,
+        config.maxSlippage,
         currentSqrtPrice
       );
 
@@ -196,22 +239,27 @@ export class LpManager {
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
+
+      // ガス代を記録
+      const currentPrice = await this.priceMonitor.getCurrentPrice();
+      const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'addLiquidity');
+
       Logger.stopSpin(`Liquidity added! TX: ${response.digest}`);
-      return response.digest;
+      return { digest: response.digest, gasCostUsdc };
     } catch (error: any) {
       Logger.stopSpin(`Failed to add liquidity: ${error.message}`);
       throw error;
     }
   }
 
-  async removeLiquidity(): Promise<void> {
+  async removeLiquidity(): Promise<{ gasCostUsdc: number }> {
     Logger.startSpin('Removing existing Liquidity...');
 
     try {
       const posId = await this.getActivePositionId();
       if (!posId) {
         Logger.stopSpin('No active position found to remove.');
-        return;
+        return { gasCostUsdc: 0 };
       }
 
       const sdk = this.getSdkWithSender();
@@ -244,14 +292,20 @@ export class LpManager {
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
+
+      // ガス代を記録
+      const currentPrice = await this.priceMonitor.getCurrentPrice();
+      const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'removeLiquidity');
+
       Logger.stopSpin(`Liquidity removed! TX: ${response.digest}`);
+      return { gasCostUsdc };
     } catch (error: any) {
       Logger.stopSpin(`Failed to remove liquidity: ${error.message}`);
       throw error;
     }
   }
 
-  async collectFees(): Promise<{ amount: number, digest: string }> {
+  async collectFees(): Promise<{ amount: number, digest: string, gasCostUsdc: number }> {
     if (!this.isInitialized) await this.initializePoolData();
     Logger.startSpin('Collecting fees on chain...');
 
@@ -259,7 +313,7 @@ export class LpManager {
       const posId = await this.getActivePositionId();
       if (!posId) {
         Logger.stopSpin('No active position to collect fees from.');
-        return { amount: 0, digest: '' };
+        return { amount: 0, digest: '', gasCostUsdc: 0 };
       }
 
       const sdk = this.getSdkWithSender();
@@ -283,6 +337,10 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
 
+      // ガス代を記録
+      const currentPrice = await this.priceMonitor.getCurrentPrice();
+      const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'collectFees');
+
       let feeAmount = 0;
       if (response.events && response.events.length > 0) {
         for (const event of response.events) {
@@ -299,11 +357,11 @@ export class LpManager {
         }
       }
 
-      Logger.stopSpin(`Fees collected! TX: ${response.digest}, Amount: ${feeAmount.toFixed(4)} USDC`);
-      return { amount: feeAmount, digest: response.digest };
+      Logger.stopSpin(`Fees collected! TX: ${response.digest}, Amount: ${feeAmount.toFixed(4)} USDC, Gas: $${gasCostUsdc.toFixed(4)}`);
+      return { amount: feeAmount, digest: response.digest, gasCostUsdc };
     } catch (error: any) {
       Logger.stopSpin(`Fee collection failed: ${error.message}`);
-      return { amount: 0, digest: '' };
+      return { amount: 0, digest: '', gasCostUsdc: 0 };
     }
   }
 }

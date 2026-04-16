@@ -7,6 +7,8 @@ import { SettingsModal } from './components/SettingsModal';
 import { ActivityLog } from './components/ActivityLog';
 import { SetupWizard } from './components/SetupWizard';
 import { HelpModal } from './components/HelpModal';
+import { PnLCard } from './components/PnLCard';
+import { DeltaGauge } from './components/DeltaGauge';
 
 function App() {
   const [isBotActive, setIsBotActive] = useState(false);
@@ -15,7 +17,10 @@ function App() {
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
   const [privateKey, setPrivateKey] = useState('');
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem('api_url_v2') || 'http://localhost:3002');
+  const [apiUrl, setApiUrl] = useState(() => 
+    localStorage.getItem('api_url_v2') || 
+    (import.meta.env.PROD ? 'https://sui-clmm-bot-backend.onrender.com' : 'http://localhost:3002')
+  );
 
   const [stats, setStats] = useState({
     totalPnl: '0.00',
@@ -32,9 +37,15 @@ function App() {
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
     pythPrice: null as number | null,
+    // 新データ
+    pnl: null as any,
+    delta: null as any,
+    gasStats: null as any,
+    hedge: null as any,
+    indicators: null as any,
   });
 
-  // pool価格とPyth価格をフロント側でポーリングごとに同時記録（時刻が必ず一致する）
+  // pool価格とPyth価格をフロント側でポーリングごとに同時記録
   const [combinedHistory, setCombinedHistory] = useState<
     { time: string; poolPrice: number; pythPrice: number | null }[]
   >([]);
@@ -48,14 +59,12 @@ function App() {
           setStats(result.data);
           setIsBotActive(result.data.isRunning);
 
-          // 最新のpool価格を取得
           const poolHistory: { time: string; price: number }[] = result.data.priceHistory || [];
           const latestPool = poolHistory.length > 0 ? poolHistory[poolHistory.length - 1] : null;
           const latestPyth: number | null = result.data.pythPrice ?? null;
 
           if (latestPool) {
             setCombinedHistory(prev => {
-              // 同じ時刻が既にある場合はpythPriceを上書き更新
               const exists = prev.find(e => e.time === latestPool.time);
               if (exists) {
                 return prev.map(e =>
@@ -131,6 +140,10 @@ function App() {
   const entryPrice = stats.entryPrice || 0;
   const priceChange = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice * 100) : 0;
 
+  // PnLデータが利用可能か
+  const netPnl = stats.pnl?.netPnl ?? 0;
+  const apr = stats.pnl?.apr ?? 0;
+
   return (
     <div className="dashboard-container">
       <header className="header">
@@ -146,7 +159,7 @@ function App() {
             </span>
           </h1>
           <p style={{ color: 'var(--text-muted)', marginTop: '6px', fontSize: '0.95rem' }}>
-            Advanced Trailing Stop Strategy • V2.0
+            Delta-Neutral Profit Engine • V3.0
           </p>
         </div>
         <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
@@ -189,70 +202,73 @@ function App() {
             onUpdateCapital={handleUpdateCapital}
           />
 
-          {/* 市場状況パネル */}
-          <div className="glass-panel" style={{ background: 'rgba(22, 27, 34, 0.9)', borderColor: 'rgba(88, 166, 255, 0.2)' }}>
-            <h3 style={{ fontSize: '0.95rem', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
-              <BarChart3 size={16} color="var(--accent)" />
-              市場分析
-            </h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>市場状況</div>
-                <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{getMarketConditionText(stats.marketCondition)}</div>
-              </div>
-              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>現在価格 / エントリー価格</div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{currentPrice.toFixed(4)} USDC</span>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>→ {entryPrice.toFixed(4)} USDC</span>
-                </div>
-                {entryPrice > 0 && (
-                  <div style={{ marginTop: '6px', fontSize: '0.85rem', fontWeight: 600, color: priceChange >= 0 ? 'var(--success)' : 'var(--danger)' }}>
-                    {priceChange >= 0 ? '↑' : '↓'} {Math.abs(priceChange).toFixed(2)}%
-                  </div>
-                )}
-              </div>
+          {/* PnLカード */}
+          <PnLCard pnl={stats.pnl} gasStats={stats.gasStats} />
 
-              {stats.pythPrice && (
-                <div style={{ padding: '10px', background: 'rgba(88, 166, 255, 0.08)', borderRadius: '8px', border: '1px solid rgba(88, 166, 255, 0.3)' }}>
-                  <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>SUI 市場価格 (Pyth Oracle)</div>
-                  <div style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--accent)' }}>${stats.pythPrice.toFixed(4)}</div>
-                  <div style={{ marginTop: '4px', fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
-                    <span>プール価格: ${currentPrice.toFixed(4)}</span>
-                    {stats.pythPrice !== currentPrice && (
-                      <span style={{ color: Math.abs(stats.pythPrice - currentPrice) / currentPrice > 0.02 ? '#f97316' : 'var(--success)' }}>
-                        乖離: {((Math.abs(stats.pythPrice - currentPrice) / currentPrice) * 100).toFixed(2)}%
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div style={{ padding: '10px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', border: '1px solid var(--border-panel)' }}>
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginBottom: '4px' }}>現在のレンジ</div>
-                <div style={{ fontSize: '0.85rem', lineHeight: 1.6 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>下限:</span>
-                    <strong style={{ color: 'var(--danger)' }}>{stats.currentRange.lower.toFixed(4)}</strong>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>上限:</span>
-                    <strong style={{ color: 'var(--success)' }}>{stats.currentRange.upper.toFixed(4)}</strong>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          {/* デルタゲージ */}
+          <DeltaGauge delta={stats.delta} hedge={stats.hedge} indicators={stats.indicators} />
         </aside>
 
         <main>
           <div className="stats-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', marginBottom: '20px' }}>
-            <StatCard title="累計利益 (P&L)" value={`$${stats.totalPnl}`} trend={parseFloat(stats.totalPnl) >= 0 ? "up" : "down"} icon={<DollarSign size={18} />} subtitle={`手数料: ${stats.totalFees} USDC`} change={stats.dailyPnl !== '0.00' ? `${stats.dailyPnl}%` : undefined} />
+            <StatCard
+              title="純利益 (Net P&L)"
+              value={`$${netPnl.toFixed(4)}`}
+              trend={netPnl >= 0 ? "up" : "down"}
+              icon={<DollarSign size={18} />}
+              subtitle={`手数料: $${stats.pnl?.fees?.toFixed(4) || '0.0000'}`}
+              change={apr !== 0 ? `APR ${apr.toFixed(1)}%` : undefined}
+            />
             <StatCard title="リバランス回数" value={stats.totalRebalances.toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime}`} />
             <StatCard title="勝率" value={`${stats.winRate}%`} trend={parseFloat(stats.winRate) >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
             <StatCard title="ポジション規模" value={`${stats.positionSize || stats.config.lpAmountUsdc} USDC`} icon={<Wallet size={18} />} subtitle="運用資金" />
-            <StatCard title="現在の状態" value={isBotActive ? "運用中" : "停止中"} icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} subtitle={isBotActive ? "手数料収集中" : "Startボタンで開始"} />
+            <StatCard title="Bot状態" value={isBotActive ? "運用中" : "停止中"} icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} subtitle={isBotActive ? "手数料収集中" : "Startで開始"} />
             <StatCard title="市場状況" value={getMarketConditionText(stats.marketCondition).split(' ')[0]} icon={<BarChart3 size={18} />} subtitle={getMarketConditionText(stats.marketCondition).split(' ').slice(1).join(' ')} />
+          </div>
+
+          {/* 市場分析パネル（メインエリアに移動） */}
+          <div className="glass-panel market-analysis-panel" style={{ marginBottom: '20px' }}>
+            <h3 style={{ fontSize: '0.95rem', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
+              <BarChart3 size={16} color="var(--accent)" />
+              市場分析
+            </h3>
+            <div className="market-analysis-grid">
+              <div className="market-analysis-item">
+                <div className="market-analysis-label">現在価格</div>
+                <div className="market-analysis-value">${currentPrice.toFixed(4)}</div>
+                {entryPrice > 0 && (
+                  <div className="market-analysis-change" style={{ color: priceChange >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+                    {priceChange >= 0 ? '↑' : '↓'} {Math.abs(priceChange).toFixed(2)}%
+                  </div>
+                )}
+              </div>
+              {stats.pythPrice && (
+                <div className="market-analysis-item">
+                  <div className="market-analysis-label">Pyth Oracle</div>
+                  <div className="market-analysis-value" style={{ color: 'var(--accent)' }}>${stats.pythPrice.toFixed(4)}</div>
+                  <div className="market-analysis-change" style={{
+                    color: Math.abs(stats.pythPrice - currentPrice) / currentPrice > 0.02 ? '#f97316' : 'var(--success)'
+                  }}>
+                    乖離: {((Math.abs(stats.pythPrice - currentPrice) / (currentPrice || 1)) * 100).toFixed(2)}%
+                  </div>
+                </div>
+              )}
+              <div className="market-analysis-item">
+                <div className="market-analysis-label">レンジ下限</div>
+                <div className="market-analysis-value" style={{ color: 'var(--danger)' }}>${stats.currentRange.lower.toFixed(4)}</div>
+              </div>
+              <div className="market-analysis-item">
+                <div className="market-analysis-label">レンジ上限</div>
+                <div className="market-analysis-value" style={{ color: 'var(--success)' }}>${stats.currentRange.upper.toFixed(4)}</div>
+              </div>
+              {stats.gasStats && stats.gasStats.txCount > 0 && (
+                <div className="market-analysis-item">
+                  <div className="market-analysis-label">累積ガス代</div>
+                  <div className="market-analysis-value">${stats.gasStats.totalGasUsdc.toFixed(4)}</div>
+                  <div className="market-analysis-change">{stats.gasStats.txCount} TX</div>
+                </div>
+              )}
+            </div>
           </div>
 
           <PriceChart

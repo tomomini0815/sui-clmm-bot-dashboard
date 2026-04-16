@@ -1,0 +1,19 @@
+{
+  "lpEntryValue": 0,
+  "lpEntryPrice": 0,
+  "lpEntryTime": 0,
+  "totalFeesCollected": 0,
+  "hedgeEntryPrice": 0,
+  "hedgeSize": 0,
+  "totalGasCost": 0,
+  "dailySnapshots": [
+    {
+      "date": "2026-04-16",
+      "netPnl": 0,
+      "fees": 0,
+      "gasCost": 0,
+      "lpPnl": 0,
+      "hedgePnl": 0
+    }
+  ]
+}

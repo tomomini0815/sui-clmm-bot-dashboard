@@ -1,10 +1,10 @@
 {
-  "rebalanceCount": 6,
+  "rebalanceCount": 7,
   "totalFeesEarned": 0,
   "pnlTotal": 0,
-  "entryPrice": 0.939056373108336,
-  "currentPrice": 0.9407580166168578,
-  "positionSize": 50,
+  "entryPrice": 0.9587786450594787,
+  "currentPrice": 0.9587786450594787,
+  "positionSize": 0.1,
   "successfulRebalances": 0,
   "history": [
     {
@@ -82,6 +82,24 @@
       "fee": 0,
       "action": "Bot起動",
       "details": "監視開始 (間隔: 10秒)　運用金額: 50 USDC"
+    },
+    {
+      "timestamp": "2026-04-16T01:02:33.487Z",
+      "price": 0.9407580166168578,
+      "pnl": 0,
+      "fee": 0,
+      "action": "Bot起動",
+      "details": "監視開始 (間隔: 30秒)　運用金額: 0.1 USDC"
+    },
+    {
+      "timestamp": "2026-04-16T01:03:05.440Z",
+      "price": 0.9587786450594787,
+      "pnl": 0,
+      "fee": 0,
+      "lowerBound": 0.8868702466800179,
+      "upperBound": 1.0306870434389397,
+      "action": "リバランス(失敗)",
+      "details": "失敗: Insufficient balance: SUI=0.0022, USDC=0.1641. 必要: USDC ≥ 0.0500 + SUI ≥ 0.01"
     }
   ]
 }
