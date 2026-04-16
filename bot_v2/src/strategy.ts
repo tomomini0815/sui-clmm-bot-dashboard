@@ -7,6 +7,8 @@ import { HedgeManager } from './hedgeManager.js';
 import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
 import { Tracker } from './tracker.js';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 
 /**
  * 利益最大化戦略エンジン V3
@@ -56,6 +58,29 @@ export class Strategy {
     private pnlEngine: PnlEngine
   ) {
     this.refreshConfig();
+  }
+
+  // セッション対応メソッド
+  private sessionPrivateKey: string | null = null;
+  private sessionWalletAddress: string | null = null;
+
+  setPrivateKey(privateKey: string): void {
+    this.sessionPrivateKey = privateKey;
+    try {
+      const decoded = decodeSuiPrivateKey(privateKey);
+      const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
+      this.sessionWalletAddress = keypair.getPublicKey().toSuiAddress();
+    } catch (e) {
+      Logger.error('Invalid private key format');
+    }
+  }
+
+  getWalletAddress(): string {
+    return this.sessionWalletAddress || 'unknown';
+  }
+
+  getPrivateKey(): string | null {
+    return this.sessionPrivateKey;
   }
 
   refreshConfig() {
@@ -367,7 +392,11 @@ export class Strategy {
         );
         Tracker.showStats();
 
-        const msg = `✅ リバランス完了\n新レンジ: $${this.currentLowerBound.toFixed(4)} - $${this.currentUpperBound.toFixed(4)}\n実行価格: $${currentPrice.toFixed(4)}\nガス代: $${totalGas.toFixed(4)}\n純利益: $${pnlStatus.netPnl.toFixed(4)} (APR: ${pnlStatus.apr.toFixed(1)}%)`;
+        const msg = `✅ リバランス完了
+新レンジ: $${this.currentLowerBound.toFixed(4)} - $${this.currentUpperBound.toFixed(4)}
+実行価格: $${currentPrice.toFixed(4)}
+ガス代: $${totalGas.toFixed(4)}
+純利益: $${pnlStatus.netPnl.toFixed(4)} (APR: ${pnlStatus.apr.toFixed(1)}%)`;
         Logger.success(msg);
         this.notify(msg);
       } catch (e: any) {

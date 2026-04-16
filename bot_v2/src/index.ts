@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { getFaucetHost, requestSuiFromFaucetV0 } from '@mysten/sui/faucet';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
+import crypto from 'crypto';
 
 import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
@@ -17,6 +18,7 @@ import { PnlEngine } from './pnlEngine.js';
 import { Strategy } from './strategy.js';
 import { Tracker } from './tracker.js';
 import { config, reloadConfig, updateConfigReference } from './config.js';
+import { SessionManager } from './sessionManager.js';
 
 // ES Module dir resolution
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -96,7 +98,62 @@ async function bootstrap() {
   }
 }
 
-// ============== API ENDPOINTS (UI BRIDGE) ============== //
+// ============== API ENDPOINTS (MULTI-USER) ============== //
+
+// セッション作成・ログイン
+app.post('/api/session', async (req, res) => {
+  try {
+    const { privateKey } = req.body;
+    
+    if (!privateKey || !privateKey.startsWith('suiprivkey')) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid private key format' 
+      });
+    }
+
+    // ウォレットアドレスで既存セッションを検索
+    const decoded = decodeSuiPrivateKey(privateKey);
+    const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
+    const walletAddress = keypair.getPublicKey().toSuiAddress();
+
+    let session = SessionManager.getSessionByWallet(walletAddress);
+
+    // 既存セッションがなければ新規作成
+    if (!session) {
+      const sessionId = crypto.randomUUID();
+      session = await SessionManager.createSession(sessionId, privateKey);
+    }
+
+    Logger.success(`Session started for wallet: ${walletAddress}`);
+    
+    res.json({ 
+      success: true, 
+      sessionId: session.sessionId,
+      walletAddress: session.walletAddress
+    });
+  } catch (e: any) {
+    Logger.error('Failed to create session', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// セッション情報取得
+app.get('/api/session/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const session = SessionManager.getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
+  res.json({
+    success: true,
+    sessionId: session.sessionId,
+    walletAddress: session.walletAddress,
+    isRunning: session.strategy.isRunning
+  });
+});
 
 app.post('/api/config', (req, res) => {
   try {
@@ -131,20 +188,57 @@ app.post('/api/config', (req, res) => {
   }
 });
 
+// ボット起動（セッション指定）
 app.post('/api/start', async (req, res) => {
-  if (strategyInstance) {
-    Logger.info('Start command received from UI.');
-    await strategyInstance.start();
-    res.json({ success: true, status: 'running' });
-  } else {
-    res.status(500).json({ success: false, error: 'Bot is not ready yet' });
+  const { sessionId } = req.body;
+  
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
   }
+
+  const session = SessionManager.getSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
+  Logger.info('Start command received from UI.');
+  await session.strategy.start();
+  res.json({ success: true, status: 'running' });
 });
 
+// ボット停止（セッション指定）
+app.post('/api/stop', async (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+
+  const session = SessionManager.getSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
+  session.strategy.stop();
+  res.json({ success: true, status: 'stopped' });
+});
+
+// 統計取得（セッション指定）
 app.get('/api/stats', async (req, res) => {
+  const sessionId = req.query.sessionId as string;
+  
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+
+  const session = SessionManager.getSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
   try {
     const stats = Tracker.getStats();
-    const prices = priceMonitorInstance ? priceMonitorInstance.getPriceHistory() : [];
+    const prices = session.priceMonitor.getPriceHistory();
 
     // Strategy から現在のレンジを取得
     const lowerBound = strategyInstance ? strategyInstance.currentLowerBound : 0;
