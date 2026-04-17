@@ -1,6 +1,6 @@
 import { initCetusSDK, TickMath } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import BN from 'bn.js';
-import { config } from './config.js';
+import { config as globalConfig, BotConfig } from './config.js';
 import { Logger } from './logger.js';
 
 // Pyth Oracle 価格フィード
@@ -19,17 +19,20 @@ export class PriceMonitor {
   private coinTypeB: string = '';
   private isInitialized: boolean = false;
 
-  constructor() {
+  constructor(private config: BotConfig = globalConfig) {
     this.refreshConfig();
   }
 
-  refreshConfig() {
-    const isTestnet = config.rpcUrl.includes('testnet');
+  refreshConfig(newConfig?: BotConfig) {
+    if (newConfig) {
+      this.config = newConfig;
+    }
+    const isTestnet = this.config.rpcUrl.includes('testnet');
     const network = isTestnet ? 'testnet' : 'mainnet';
 
     this.sdk = initCetusSDK({
       network,
-      fullNodeUrl: config.rpcUrl,
+      fullNodeUrl: this.config.rpcUrl,
     });
 
     const MAINNET_USDC_SUI_POOL = '0xb8d7d9e66a60c239e7a60110efcf8de6c705580ed924d0dde141f4a0e2c90105';
@@ -57,7 +60,9 @@ export class PriceMonitor {
         if (coinAMeta) this.decimalsA = coinAMeta.decimals;
         if (coinBMeta) this.decimalsB = coinBMeta.decimals;
         
-        Logger.info(`Pool Initialized: CoinA=${coinAMeta?.symbol}(${this.decimalsA}), CoinB=${coinBMeta?.symbol}(${this.decimalsB})`);
+        Logger.info(`Pool Initialized: ID=${this.poolObjectId}`);
+        Logger.info(` - CoinA: ${this.coinTypeA} (${coinAMeta?.symbol}, decimals=${this.decimalsA})`);
+        Logger.info(` - CoinB: ${this.coinTypeB} (${coinBMeta?.symbol}, decimals=${this.decimalsB})`);
         this.isInitialized = true;
       }
     } catch (e) {
@@ -77,16 +82,28 @@ export class PriceMonitor {
     return this.priceHistory;
   }
 
+  private async fetchWithTimeout(url: string, timeout = 10000): Promise<Response> {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(id);
+      return response;
+    } catch (e) {
+      clearTimeout(id);
+      throw e;
+    }
+  }
+
   async getPythPrice(): Promise<number> {
     try {
       const url = `${PYTH_HERMES_URL}/v2/updates/price/latest?ids[]=${PYTH_SUI_USD_FEED_ID}`;
-      const response = await fetch(url);
+      const response = await this.fetchWithTimeout(url);
       const data = await response.json();
 
       if (data.parsed && data.parsed.length > 0) {
         const priceData = data.parsed[0].price;
         const price = priceData.price * Math.pow(10, priceData.expo);
-        Logger.info(`Pyth Oracle: SUI = $${price.toFixed(4)} USD`);
         return price;
       }
       throw new Error('No price data from Pyth');
@@ -109,45 +126,58 @@ export class PriceMonitor {
 
       const sqrtPriceBN = new BN(pool.current_sqrt_price.toString());
       
-      // SUIの価格（USDC建て）を計算する
-      // Cetus SDK の sqrtPriceX64ToPrice(sqrt, decA, decB) は「1単位のAに対するBの量」を返す。
-      // SUI(B)のUSDC(A)価格を知りたい場合：
-      // 1. SDKの計算結果(B in A)をそのまま使う場合 -> B=SUI, A=USDC なら SUI価格。
-      // 2. 逆にする必要がある場合もある。
-      
-      // USDCがどちらのコインか判定（mainnetのUSDC、またはtestnetのCOIN_Aなど）
-      const isAUsdc = this.coinTypeA.toLowerCase().includes('usdc') || this.coinTypeA.toLowerCase().includes('coin_a');
-      const isBUsdc = this.coinTypeB.toLowerCase().includes('usdc') || this.coinTypeB.toLowerCase().includes('coin_a');
+      // USDC の判定（Native USDC: 0xdba3... または Testnet の COIN_A）
+      const isAUsdc = this.coinTypeA.includes('dba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7') || 
+                      this.coinTypeA.toLowerCase().includes('usdc') || 
+                      this.coinTypeA.toLowerCase().includes('coin_a');
+                      
+      const isBUsdc = this.coinTypeB.includes('dba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7') || 
+                      this.coinTypeB.toLowerCase().includes('usdc') || 
+                      this.coinTypeB.toLowerCase().includes('coin_a');
       
       let price: number;
       
+      // 1 unit of A in terms of B
+      const result = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB).toNumber();
+      
       if (isAUsdc) {
-        // AがUSDCの場合、1 unit A (USDC) あたりの B (SUI) の量
-        // 例: 0.93 SUI / 1 USDC
-        // SUI価格(USDC建て) = 1 / 0.93 = 1.07 USDC/SUI
-        const bInA = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB).toNumber();
-        price = 1 / bInA;
+        // A=USDC, B=SUI. result = SUI quantity for 1 USDC.
+        // Price (USDC/SUI) = 1 / result
+        price = 1 / result;
       } else if (isBUsdc) {
-        // BがUSDCの場合、1 unit A (SUI) あたりの B (USDC) の量
-        // 例: 1.07 USDC / 1 SUI
-        // SUI価格(USDC建て) = 1.07 USDC/SUI
-        price = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB).toNumber();
+        // A=SUI, B=USDC. result = USDC quantity for 1 SUI.
+        // Price (USDC/SUI) = result
+        price = result;
       } else {
-        // どちらもUSDCでない場合はデフォルトの計算（USDC建てと仮定）
-        price = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB).toNumber();
-        if (price > 1000) price = 1 / price; // 保険
+        // Fallback: Assume B is USDC if it has 6 decimals, else A
+        if (this.decimalsB === 6) {
+          price = result;
+        } else {
+          price = 1 / result;
+        }
       }
 
-      Logger.info(`Pool tick=${pool.current_tick_index}, SUI price=$${price.toFixed(4)} USDC (A=${isBUsdc?'SUI':'USDC'})`);
+      // Pyth Oracle チェック
+      const pythPrice = await this.getPythPrice();
+      if (pythPrice > 0) {
+        // 乖離チェック（5%以上離れていればPythを採用 または 警告）
+        const diff = Math.abs(price - pythPrice) / pythPrice;
+        if (diff > 0.05) {
+          Logger.warn(`Price Divergence: Pool=$${price.toFixed(4)}, Pyth=$${pythPrice.toFixed(4)}. Using Pyth.`);
+          price = pythPrice;
+        }
+      }
 
+      Logger.info(`📈 Market Price: $${price.toFixed(4)} USDC/SUI (Tick: ${pool.current_tick_index})`);
+      
       const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+      const timeStr = now.toLocaleTimeString('ja-JP', { hour12: false });
 
-      // 異常な乖離（10倍以上の急変など）を無視して履歴を保護
+      // 異常値フィルタ
       if (this.priceHistory.length > 0) {
         const lastPrice = this.priceHistory[this.priceHistory.length - 1].price;
-        if (lastPrice > 0 && (price > lastPrice * 5 || price < lastPrice / 5)) {
-          Logger.warn(`異常な価格を検知したためスキップしました: ${price.toFixed(4)} (前回: ${lastPrice.toFixed(4)})`);
+        if (lastPrice > 0 && (price > lastPrice * 2 || price < lastPrice * 0.5)) {
+          Logger.warn(`Price spikes/drops skipped: ${price.toFixed(4)} (Last: ${lastPrice.toFixed(4)})`);
           return lastPrice;
         }
       }

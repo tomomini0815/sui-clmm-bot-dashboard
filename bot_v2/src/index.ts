@@ -5,8 +5,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { getFaucetHost, requestSuiFromFaucetV0 } from '@mysten/sui/faucet';
-import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
+import { requestSuiFromFaucetV0, getFaucetHost } from '@mysten/sui/faucet';
+import { decodeSuiPrivateKey, encodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import crypto from 'crypto';
 
 import { Logger } from './logger.js';
@@ -17,7 +17,7 @@ import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
 import { Strategy } from './strategy.js';
 import { Tracker } from './tracker.js';
-import { config, reloadConfig, updateConfigReference } from './config.js';
+import { config, reloadConfig, updateConfigReference, BotConfig } from './config.js';
 import { SessionManager } from './sessionManager.js';
 
 // ES Module dir resolution
@@ -27,74 +27,54 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-let strategyInstance: Strategy | null = null;
-let priceMonitorInstance: PriceMonitor | null = null;
-let lpManagerInstance: LpManager | null = null;
-let hedgeManagerInstance: HedgeManager | null = null;
-let gasTrackerInstance: GasTracker | null = null;
-let pnlEngineInstance: PnlEngine | null = null;
+/**
+ * セッション固有の設定を更新し、コンポーネントに反映
+ */
+function refreshSessionComponents(sessionId: string, newConfig: BotConfig) {
+  const session = SessionManager.getSession(sessionId);
+  if (!session) return;
 
-function refreshAllComponents() {
-  // .envファイルを再読み込み
-  dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true });
+  session.config = newConfig;
+  session.priceMonitor.refreshConfig(newConfig);
+  session.lpManager.refreshConfig(newConfig);
+  session.strategy.refreshConfig(newConfig);
   
-  const newConfig = reloadConfig();
-  updateConfigReference(newConfig);
-  
-  if (priceMonitorInstance) priceMonitorInstance.refreshConfig();
-  if (lpManagerInstance) lpManagerInstance.refreshConfig();
-  if (strategyInstance) strategyInstance.refreshConfig();
-  
-  Logger.success('All components refreshed with new configuration.');
+  Logger.success(`Session [${sessionId}] components refreshed with new configuration.`);
 }
 
 async function bootstrap() {
-  Logger.box('Bot Starting', 'Sui CLMM LP Auto Rebalance Bot V3 — Profit Optimized');
+  Logger.box('API Server Starting', 'Sui CLMM LP Auto Rebalance Bot V3');
 
   try {
-    await Tracker.init();
-
-    // PnLデータの復元
-    const pnlDataPath = path.resolve(process.cwd(), 'pnl_data.json');
-    
-    priceMonitorInstance = new PriceMonitor();
-    gasTrackerInstance = new GasTracker();
-    pnlEngineInstance = new PnlEngine();
-
-    // PnL状態復元
-    try {
-      if (fs.existsSync(pnlDataPath)) {
-        const pnlData = JSON.parse(fs.readFileSync(pnlDataPath, 'utf-8'));
-        pnlEngineInstance.restore(pnlData);
+    // セッションデータ保存タイマー (5分おきに全セッションを保存)
+    setInterval(() => {
+      const stats = SessionManager.getAllSessionsStats();
+      for (const s of stats) {
+        SessionManager.saveSessionState(s.sessionId);
       }
-    } catch (e) {
-      Logger.warn('PnLデータの復元に失敗');
+    }, 5 * 60 * 1000);
+
+    // 【自動復帰】保存されているセッションをスキャンし、運用中だったものを再開
+    const files = fs.readdirSync(process.cwd());
+    const sessionFiles = files.filter(f => f.startsWith('session_state_') && f.endsWith('.json'));
+    
+    for (const file of sessionFiles) {
+      const sessionId = file.replace('session_state_', '').replace('.json', '');
+      Logger.info(`Auto-resuming session from file: ${sessionId}`);
+      // セッションを復元 (内部で loadSessionState が呼ばれ isRunning が復元される)
+      const session = await SessionManager.createSession(sessionId);
+      
+      if (session.strategy.isRunning) {
+        Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${sessionId}`);
+        // 運用中だったので再開
+        session.strategy.isRunning = false; // start()内部で重複チェックがあるため一時リセット
+        await session.strategy.start();
+      }
     }
 
-    lpManagerInstance = new LpManager(priceMonitorInstance, gasTrackerInstance);
-    hedgeManagerInstance = new HedgeManager(config.hedgeMode);
-
-    strategyInstance = new Strategy(
-      priceMonitorInstance,
-      lpManagerInstance,
-      hedgeManagerInstance,
-      gasTrackerInstance,
-      pnlEngineInstance
-    );
-
-    // 定期的にPnLデータを保存 (30秒ごと)
-    setInterval(() => {
-      if (pnlEngineInstance) {
-        try {
-          fs.writeFileSync(pnlDataPath, JSON.stringify(pnlEngineInstance.serialize(), null, 2));
-        } catch (e) {
-          // 静かに無視
-        }
-      }
-    }, 30000);
-
+    Logger.success('Bootstrap complete. API server is ready with Auto-Resume.');
   } catch (error) {
-    Logger.error('Bot logic initialization failed.', error);
+    Logger.error('Bootstrap failed.', error);
   }
 }
 
@@ -103,8 +83,22 @@ async function bootstrap() {
 // セッション作成・ログイン
 app.post('/api/session', async (req, res) => {
   try {
-    const { privateKey, walletAddress, isWalletConnect } = req.body;
+    const { privateKey, mnemonic, walletAddress, isWalletConnect } = req.body;
     
+    // シードフレーズ（mnemonic）によるログイン/復旧
+    if (mnemonic) {
+      let session = await SessionManager.createSession(crypto.randomUUID(), mnemonic);
+      
+      Logger.success(`Session restored/started from mnemonic: ${session.botWalletAddress}`);
+      
+      return res.json({ 
+        success: true, 
+        sessionId: session.sessionId,
+        walletAddress: session.walletAddress,
+        botWalletAddress: session.botWalletAddress
+      });
+    }
+
     // ウォレット接続モード（Sui Walletから接続）
     if (isWalletConnect && walletAddress) {
       let session = SessionManager.getSessionByWallet(walletAddress);
@@ -112,7 +106,7 @@ app.post('/api/session', async (req, res) => {
       // 既存セッションがなければ新規作成
       if (!session) {
         const sessionId = crypto.randomUUID();
-        session = await SessionManager.createSession(sessionId, null, walletAddress);
+        session = await SessionManager.createSession(sessionId, null, null, walletAddress);
       }
 
       Logger.success(`Session started for wallet (WalletConnect): ${walletAddress}`);
@@ -120,7 +114,8 @@ app.post('/api/session', async (req, res) => {
       return res.json({ 
         success: true, 
         sessionId: session.sessionId,
-        walletAddress: session.walletAddress
+        walletAddress: session.walletAddress,
+        botWalletAddress: session.botWalletAddress
       });
     }
     
@@ -142,7 +137,7 @@ app.post('/api/session', async (req, res) => {
     // 既存セッションがなければ新規作成
     if (!session) {
       const sessionId = crypto.randomUUID();
-      session = await SessionManager.createSession(sessionId, privateKey);
+      session = await SessionManager.createSession(sessionId, privateKey as string);
     }
 
     Logger.success(`Session started for wallet: ${addr}`);
@@ -150,7 +145,8 @@ app.post('/api/session', async (req, res) => {
     res.json({ 
       success: true, 
       sessionId: session.sessionId,
-      walletAddress: session.walletAddress
+      walletAddress: session.walletAddress,
+      botWalletAddress: session.botWalletAddress
     });
   } catch (e: any) {
     Logger.error('Failed to create session', e);
@@ -171,39 +167,90 @@ app.get('/api/session/:sessionId', (req, res) => {
     success: true,
     sessionId: session.sessionId,
     walletAddress: session.walletAddress,
+    botWalletAddress: session.botWalletAddress,
     isRunning: session.strategy.isRunning
   });
 });
 
 app.post('/api/config', (req, res) => {
   try {
-    const { privateKey, rangeWidth, hedgeRatio, lpAmountUsdc, telegramToken, telegramChatId, rpcUrl, poolObjectId } = req.body;
+    const { 
+      sessionId, 
+      rangeWidth, 
+      hedgeRatio, 
+      lpAmountUsdc, 
+      totalOperationalCapitalUsdc,
+      telegramToken, 
+      telegramChatId, 
+      rpcUrl, 
+      poolObjectId, 
+      configMode 
+    } = req.body;
     
-    // .env ファイルの生成と保存
-    const envPath = path.resolve(__dirname, '../../.env');
-    let envContent = `PRIVATE_KEY=${privateKey || ''}\n`;
-    envContent += `SUI_RPC_URL=${rpcUrl || 'https://fullnode.mainnet.sui.io'}\n`;
-    envContent += `POOL_OBJECT_ID=${poolObjectId || ''}\n`;
-    envContent += `LP_AMOUNT_USDC=${parseFloat(lpAmountUsdc) || 0.10}\n`;
-    envContent += `RANGE_WIDTH=${(parseFloat(rangeWidth) / 100) || 0.05}\n`;
-    envContent += `HEDGE_RATIO=${(parseFloat(hedgeRatio) / 100) || 0.5}\n`;
-    envContent += `TELEGRAM_BOT_TOKEN=${telegramToken || ''}\n`;
-    envContent += `TELEGRAM_CHAT_ID=${telegramChatId || ''}\n`;
-    envContent += `MONITOR_INTERVAL_MS=30000\n`;
-    envContent += `COOLDOWN_PERIOD_MS=300000\n`;
-    envContent += `FEE_COLLECT_INTERVAL_MS=300000\n`;
-    envContent += `MIN_PROFIT_FOR_REBALANCE=0.005\n`;
-    envContent += `HEDGE_MODE=simulate\n`;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Session ID required' });
+    }
 
-    fs.writeFileSync(envPath, envContent);
-    Logger.success('Success: Configuration saved to .env from UI.');
+    const session = SessionManager.getSession(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Session not found' });
+    }
+
+    // セッション固有の設定を構築
+    const newConfig: BotConfig = {
+      ...session.config,
+      lpAmountUsdc: parseFloat(lpAmountUsdc) || session.config.lpAmountUsdc,
+      totalOperationalCapitalUsdc: parseFloat(totalOperationalCapitalUsdc) || session.config.totalOperationalCapitalUsdc,
+      rangeWidth: (parseFloat(rangeWidth) / 100) || session.config.rangeWidth,
+      hedgeRatio: (parseFloat(hedgeRatio) / 100) || session.config.hedgeRatio,
+      telegramToken: telegramToken || session.config.telegramToken,
+      telegramChatId: telegramChatId || session.config.telegramChatId,
+      rpcUrl: rpcUrl || session.config.rpcUrl,
+      configMode: configMode || session.config.configMode
+    };
+
+    // セッションの設定を更新・反映
+    refreshSessionComponents(sessionId, newConfig);
     
-    // 即座に読み込み
-    refreshAllComponents();
+    // 即座に永続化
+    SessionManager.saveSessionState(sessionId);
     
-    res.json({ success: true, message: 'Settings saved and applied successfully.' });
+    res.json({ success: true, message: 'Settings saved and applied to your session.' });
   } catch (e: any) {
     Logger.error('Failed to save config', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// 専用ウォレットの秘密鍵をエクスポート
+app.get('/api/export-key', (req, res) => {
+  const { sessionId, password } = req.query;
+  
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+
+  // バックアップ保護パスワードの検証
+  if (!password || password !== config.backupPassword) {
+    return res.status(401).json({ success: false, error: '不正なパスワードです。バックアップ情報を取得できません。' });
+  }
+
+  const session = SessionManager.getSession(sessionId as string);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
+  try {
+    const suiprivkey = session.keypair.getSecretKey();
+    
+    res.json({ 
+      success: true, 
+      secretKey: suiprivkey,
+      mnemonic: session.mnemonic, // シードフレーズ
+      address: session.botWalletAddress,
+      warning: 'この秘密鍵またはフレーズは絶対に他人に教えないでください。'
+    });
+  } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -257,15 +304,12 @@ app.get('/api/stats', async (req, res) => {
   }
 
   try {
-    const stats = Tracker.getStats();
     const prices = session.priceMonitor.getPriceHistory();
+    const stats = session.tracker.getStats();
 
-    // Strategy から現在のレンジを取得
-    const lowerBound = strategyInstance ? strategyInstance.currentLowerBound : 0;
-    const upperBound = strategyInstance ? strategyInstance.currentUpperBound : 0;
-
-    // ウォレットアドレスを取得
-    const walletAddress = lpManagerInstance ? lpManagerInstance.getWalletAddress() : '';
+    // セッションに紐づくインスタンスから現在のレンジを取得
+    const lowerBound = session.strategy.currentLowerBound || 0;
+    const upperBound = session.strategy.currentUpperBound || 0;
 
     // 市場状況を判定
     let marketCondition = 'sideways';
@@ -289,26 +333,35 @@ app.get('/api/stats', async (req, res) => {
     // Pyth Oracle価格
     let pythPrice = 0;
     try {
-      if (priceMonitorInstance) {
-        pythPrice = await priceMonitorInstance.getPythPrice();
-      }
+      pythPrice = await session.priceMonitor.getPythPrice();
     } catch (e: any) {
       // silent
     }
 
-    // === 新機能: PnL/Delta/Gas データ ===
-    const currentPrice = prices.length > 0 ? prices[prices.length - 1].price : 0;
+    // === PnL/Delta/Gas データ ===
+    let currentPrice = prices.length > 0 ? prices[prices.length - 1].price : 0;
+    
+    // 初回アクセス時など価格履歴が空の場合は強制取得
+    if (currentPrice === 0) {
+      currentPrice = await session.priceMonitor.getCurrentPrice();
+    }
+
     let pnlData = null;
-    if (strategyInstance && currentPrice > 0) {
-      pnlData = strategyInstance.getPnlData(currentPrice);
+    if (currentPrice > 0) {
+      pnlData = await session.strategy.getPnlData(currentPrice);
     }
 
     res.json({
       success: true,
       data: {
         ...stats,
-        isRunning: strategyInstance ? strategyInstance.isRunning : false,
-        walletAddress,
+        isRunning: session.strategy.isRunning,
+        currentPhase: session.strategy.currentPhase, // 工程情報を最優先で含める
+        ...pnlData,
+        botWalletAddress: session.botWalletAddress,
+        userWalletAddress: session.walletAddress,
+        network: session.config.rpcUrl.includes('testnet') ? 'testnet' : 'mainnet',
+        config: session.config,
         priceHistory: prices,
         activityLogs: stats.history,
         currentRange: {
@@ -316,16 +369,17 @@ app.get('/api/stats', async (req, res) => {
           upper: Number(upperBound.toFixed(4))
         },
         config: {
-          lpAmountUsdc: config.lpAmountUsdc,
-          rangeWidth: config.rangeWidth,
-          hedgeRatio: config.hedgeRatio
+          lpAmountUsdc: session.config.lpAmountUsdc,
+          rangeWidth: session.config.rangeWidth,
+          hedgeRatio: session.config.hedgeRatio,
+          configMode: session.config.configMode
         },
         marketCondition,
         avgHoldingTime: stats.totalRebalances > 0 ? '15分' : '0分',
         dailyPnl: pnlData?.pnl?.dailyPnl?.toFixed(4) || '0.00',
         pythPrice: pythPrice > 0 ? Number(pythPrice.toFixed(4)) : null,
 
-        // === 新データ ===
+        // === 詳細データ ===
         pnl: pnlData?.pnl || null,
         delta: pnlData?.delta || null,
         gasStats: pnlData?.gasStats || null,
@@ -343,13 +397,18 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-app.post('/api/stop', (req, res) => {
-  if (strategyInstance) {
-    Logger.info('Stop command received from UI.');
-    strategyInstance.stop();
+app.post('/api/stop', async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+  const session = SessionManager.getSession(sessionId);
+  if (session) {
+    Logger.info(`Stop command received from UI for session: ${sessionId}`);
+    session.strategy.stop();
     res.json({ success: true, status: 'stopped' });
   } else {
-    res.status(500).json({ success: false, error: 'Bot is not ready yet' });
+    res.status(404).json({ success: false, error: 'Session not found' });
   }
 });
 
@@ -405,10 +464,13 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 起動開始
+console.log('DEBUG: Starting bootstrap...');
 bootstrap().then(() => {
   const port = parseInt(process.env.PORT || '3002', 10);
+  console.log(`DEBUG: Listening on port ${port}...`);
   app.listen(port, '0.0.0.0', () => {
     Logger.success(`API Server Running: port ${port}`);
   });
+}).catch(err => {
+  console.error('DEBUG: Bootstrap ERROR:', err);
 });

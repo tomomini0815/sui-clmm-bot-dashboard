@@ -6,9 +6,16 @@ import { Logger } from './logger.js';
 // ES Module dir resolution
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// .envファイルのパスを明示的に指定（bot_v2の親ディレクトリ）
-const envPath = path.resolve(__dirname, '../../.env');
-dotenv.config({ path: envPath });
+// .envファイルのパスを明示的に指定（bot_v2ディレクトリ直下）
+const envPath = path.resolve(__dirname, '../.env');
+console.log(`DEBUG: Loading .env from: ${envPath}`);
+const result = dotenv.config({ path: envPath });
+if (result.error) {
+  console.error('DEBUG: Dotenv Load Error:', result.error);
+} else {
+  console.log('DEBUG: Dotenv Loaded successfully');
+  console.log('DEBUG: LP_AMOUNT_USDC from env:', process.env.LP_AMOUNT_USDC);
+}
 
 export interface BotConfig {
   privateKey?: string;
@@ -31,6 +38,9 @@ export interface BotConfig {
   hedgeMode: 'simulate' | 'bluefin'; // ヘッジモード
   maxSlippage: number;              // 最大スリッページ (%)
   balanceCheckEnabled: boolean;     // 残高チェック有効化
+  configMode: 'auto' | 'manual';   // 設定モード（追加）
+  backupPassword?: string;          // バックアップ保護パスワード
+  totalOperationalCapitalUsdc: number; // 総運用資金 (USDC)
 }
 
 function loadConfig(): BotConfig {
@@ -53,6 +63,9 @@ function loadConfig(): BotConfig {
     HEDGE_MODE,
     MAX_SLIPPAGE,
     BALANCE_CHECK_ENABLED,
+    CONFIG_MODE,
+    BACKUP_PASSWORD,
+    TOTAL_OPERATIONAL_CAPITAL_USDC,
   } = process.env;
 
   if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here') {
@@ -83,6 +96,9 @@ function loadConfig(): BotConfig {
     hedgeMode: (HEDGE_MODE as 'simulate' | 'bluefin') || 'simulate',
     maxSlippage: parseFloat(MAX_SLIPPAGE || '0.05'),   // 5%
     balanceCheckEnabled: BALANCE_CHECK_ENABLED !== 'false',
+    configMode: (CONFIG_MODE as 'auto' | 'manual') || 'auto',
+    backupPassword: BACKUP_PASSWORD || 'change_me',
+    totalOperationalCapitalUsdc: parseFloat(TOTAL_OPERATIONAL_CAPITAL_USDC || '200'),
   };
 }
 

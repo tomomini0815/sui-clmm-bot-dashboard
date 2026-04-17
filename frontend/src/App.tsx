@@ -9,6 +9,9 @@ import { SetupWizard } from './components/SetupWizard';
 import { HelpModal } from './components/HelpModal';
 import { PnLCard } from './components/PnLCard';
 import { DeltaGauge } from './components/DeltaGauge';
+import { BotWalletCard } from './components/BotWalletCard';
+import { StrategyVisualizer } from './components/StrategyVisualizer';
+import { HedgePerfChart } from './components/HedgePerfChart';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 
 function App() {
@@ -23,16 +26,25 @@ function App() {
   const [sessionId, setSessionId] = useState(() => 
     localStorage.getItem('session_id') || ''
   );
+  const [botWalletAddress, setBotWalletAddress] = useState('');
   const [apiUrl] = useState(() => 
     import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
   );
 
+  // カスタムイベントリスナー（バックアップ画面を直接開く）
+  useEffect(() => {
+    const handleOpenBackup = () => setIsSettingsOpen(true);
+    window.addEventListener('open-settings-backup', handleOpenBackup);
+    return () => window.removeEventListener('open-settings-backup', handleOpenBackup);
+  }, []);
+
   // ウォレット接続時にセッション作成
   useEffect(() => {
     if (currentAccount && !sessionId) {
+      console.log('Detected connected wallet without session. Creating session...');
       createSessionFromWallet();
     }
-  }, [currentAccount]);
+  }, [currentAccount, sessionId]); // sessionIdを追加して同期を確実に
 
   const createSessionFromWallet = async () => {
     if (!currentAccount) return;
@@ -51,12 +63,16 @@ function App() {
       
       if (data.success) {
         setSessionId(data.sessionId);
+        setBotWalletAddress(data.botWalletAddress);
         localStorage.setItem('session_id', data.sessionId);
         localStorage.setItem('wizard_completed', 'true');
         setIsWizardOpen(false);
+      } else {
+        alert('セッションの作成に失敗しました: ' + (data.error || 'Unknown error'));
       }
     } catch (e) {
       console.error('Failed to create session:', e);
+      alert('サーバーとの通信に失敗しました。バックエンドが起動しているか確認してください。');
     }
   };
 
@@ -66,7 +82,7 @@ function App() {
     totalRebalances: 0,
     activityLogs: [] as any[],
     currentRange: { lower: 0, upper: 0 },
-    config: { lpAmountUsdc: 0, rangeWidth: 0, hedgeRatio: 0 },
+    config: { lpAmountUsdc: 0.10, rangeWidth: 0.05, hedgeRatio: 0.5, configMode: 'auto' },
     currentPrice: 0,
     entryPrice: 0,
     positionSize: 0,
@@ -81,6 +97,7 @@ function App() {
     gasStats: null as any,
     hedge: null as any,
     indicators: null as any,
+    currentPhase: '',
   });
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
@@ -98,40 +115,55 @@ function App() {
         if (result.success) {
           setStats(result.data);
           setIsBotActive(result.data.isRunning);
+          if (result.data.botWalletAddress) {
+            setBotWalletAddress(result.data.botWalletAddress);
+          }
 
-          const poolHistory: { time: string; price: number }[] = result.data.priceHistory || [];
+          const poolHistory = (result.data.priceHistory || []).map((p: any) => ({
+            time: p.time,
+            poolPrice: p.price,
+            pythPrice: p.pythPrice || null
+          }));
           const latestPool = poolHistory.length > 0 ? poolHistory[poolHistory.length - 1] : null;
           const latestPyth: number | null = result.data.pythPrice ?? null;
 
           if (latestPool) {
+            // 全体の統計を更新（フェーズ情報もここに含まれる）
+            setStats(result.data);
+
             setCombinedHistory(prev => {
               const exists = prev.find(e => e.time === latestPool.time);
               if (exists) {
                 return prev.map(e =>
                   e.time === latestPool.time
-                    ? { ...e, poolPrice: latestPool.price, pythPrice: latestPyth ?? e.pythPrice }
+                    ? { ...e, poolPrice: latestPool.poolPrice, pythPrice: latestPyth ?? e.pythPrice }
                     : e
                 );
               }
               const newEntry = {
                 time: latestPool.time,
-                poolPrice: latestPool.price,
+                poolPrice: latestPool.poolPrice,
                 pythPrice: latestPyth,
               };
               const updated = [...prev, newEntry];
               return updated.length > 120 ? updated.slice(-120) : updated;
             });
           }
+        } else if (result.error === 'Session not found') {
+          // セッションが無効な場合はクリアして再作成を促す
+          console.warn('Session expired or not found. Resetting...');
+          setSessionId('');
+          localStorage.removeItem('session_id');
         }
       } catch (e) {
-        console.warn('Real-time stats sync failed (Standard behavior for first launch)');
+        console.warn('Real-time stats sync failed');
       }
     };
 
     fetchStats();
     const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
-  }, [apiUrl]);
+  }, [apiUrl, sessionId]);
 
   const toggleBotState = async () => {
     if (!sessionId) return;
@@ -159,9 +191,11 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          sessionId,
           lpAmountUsdc: newAmount,
           rangeWidth: (stats.config.rangeWidth * 100).toString(),
           hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
+          configMode: stats.config.configMode || 'auto'
         }),
       });
       const data = await response.json();
@@ -201,6 +235,19 @@ function App() {
           </h1>
           <p className="header-subtitle">
             Delta-Neutral Profit Engine • V3.0
+            {stats.network === 'mainnet' && (
+              <span style={{ 
+                marginLeft: '12px', 
+                padding: '2px 8px', 
+                background: 'rgba(46, 213, 115, 0.15)', 
+                color: '#2ed573', 
+                borderRadius: '6px', 
+                fontSize: '0.7rem',
+                border: '1px solid rgba(46, 213, 115, 0.3)',
+                fontWeight: 700,
+                letterSpacing: '0.05em'
+              }}>MAINNET</span>
+            )}
           </p>
         </div>
         <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
@@ -221,6 +268,20 @@ function App() {
                 boxShadow: '0 0 8px var(--success)', animation: 'pulse-slow 2s infinite'
               }}></span>
               稼働中
+              {stats.currentPhase && stats.currentPhase !== 'IDLE' && (
+                <>
+                  <span style={{ color: 'var(--border-panel)', margin: '0 4px' }}>|</span>
+                  <span style={{ color: 'var(--accent)', fontWeight: '600' }}>
+                    工程: {
+                      stats.currentPhase === 'SWAPPING' ? 'スワップ中' :
+                      stats.currentPhase === 'ADDING_LP' ? 'LP投入中' :
+                      stats.currentPhase === 'OPENING_HEDGE' ? 'ヘッジ構築中' :
+                      stats.currentPhase === 'MONITORING' ? '運用監視中' :
+                      stats.currentPhase === 'REBALANCING' ? 'リバランス中' : stats.currentPhase
+                    }
+                  </span>
+                </>
+              )}
             </>
           ) : (
             <>
@@ -229,6 +290,24 @@ function App() {
             </>
           )}
         </div>
+
+        {isBotActive && stats.currentPhase && (
+          <div className="badge animate-fade-in" style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            borderColor: 'rgba(88, 166, 255, 0.3)',
+            color: 'var(--accent)',
+            background: 'rgba(88, 166, 255, 0.12)',
+            padding: '8px 14px',
+            fontSize: '0.85rem',
+            marginLeft: '8px',
+            boxShadow: '0 0 10px rgba(88, 166, 255, 0.1)'
+          }}>
+            <Activity size={14} className="animate-spin-slow" />
+            <span style={{ fontWeight: 600 }}>工程: {stats.currentPhase}</span>
+          </div>
+        )}
       </header>
 
       <div className="dashboard-grid">
@@ -241,6 +320,17 @@ function App() {
             onOpenHelp={() => setIsHelpOpen(true)}
             config={stats.config}
             onUpdateCapital={handleUpdateCapital}
+          />
+
+          {/* 戦略配分の視覚化 */}
+          <StrategyVisualizer totalCapital={stats.config?.totalOperationalCapitalUsdc || stats.positionSize || stats.config?.lpAmountUsdc || 0} />
+
+          {/* 専用ウォレットカード */}
+          <BotWalletCard 
+            botAddress={botWalletAddress}
+            suiBalance={stats.pnl?.botWalletBalanceSui || 0}
+            usdcBalance={stats.pnl?.botWalletBalanceUsdc || 0}
+            onRefresh={() => {/* fetchStats will run shortly */}}
           />
 
           {/* PnLカード */}
@@ -318,6 +408,13 @@ function App() {
             upperBound={stats.currentRange.upper}
           />
 
+          <HedgePerfChart
+            data={combinedHistory.map(h => ({ time: h.time, poolPrice: h.poolPrice, entryPrice: stats.hedge?.entryPrice }))}
+            currentPrice={stats.currentPrice}
+            entryPrice={stats.hedge?.entryPrice || 0}
+            active={stats.hedge?.active || false}
+          />
+
           <ActivityLog logs={stats.activityLogs} />
         </main>
       </div>
@@ -327,11 +424,16 @@ function App() {
         onClose={() => setIsSettingsOpen(false)}
         apiUrl={apiUrl}
         sessionId={sessionId}
+        currentConfig={stats.config}
       />
       <SetupWizard
         isOpen={isWizardOpen}
         onComplete={() => {
-          // ウォレット接続を促す
+          const sid = localStorage.getItem('session_id');
+          if (sid) {
+            setSessionId(sid);
+            setIsWizardOpen(false);
+          }
         }}
         onClose={() => setIsWizardOpen(false)}
         apiUrl={apiUrl}

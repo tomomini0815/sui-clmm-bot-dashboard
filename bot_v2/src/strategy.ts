@@ -1,6 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { Logger } from './logger.js';
-import { config } from './config.js';
+import { config, BotConfig } from './config.js';
 import { PriceMonitor } from './priceMonitor.js';
 import { LpManager } from './lpManager.js';
 import { HedgeManager } from './hedgeManager.js';
@@ -21,8 +21,21 @@ import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
  * 5. リアルPnL計算（LP + ヘッジ - ガス代）
  * 6. デルタニュートラルのシミュレーション管理
  * 7. トレイリングストップ（価格急落対応）
+ * 8. サイクル管理（全決済 → 再構築の自動ループ）
  */
+
+export enum CyclePhase {
+  IDLE = '待機中',
+  SWAPPING = 'スワップ中 (USDC -> SUI)',
+  ADDING_LP = 'LP投入中',
+  OPENING_HEDGE = 'ヘッジ注文中',
+  MONITORING = '運用中 (監視)',
+  REBALANCING = 'リバランス中 (全決済実行)',
+  EMERGENCY = '緊急停止中',
+}
+
 export class Strategy {
+  public currentPhase: CyclePhase = CyclePhase.IDLE;
   private telegram: TelegramBot | null = null;
   private lastRebalanceTime: number = 0;
   public currentLowerBound: number = 0;
@@ -55,7 +68,9 @@ export class Strategy {
     private lpManager: LpManager,
     private hedgeManager: HedgeManager,
     private gasTracker: GasTracker,
-    private pnlEngine: PnlEngine
+    private pnlEngine: PnlEngine,
+    private tracker: Tracker,
+    private config: BotConfig
   ) {
     this.refreshConfig();
   }
@@ -70,6 +85,14 @@ export class Strategy {
       const decoded = decodeSuiPrivateKey(privateKey);
       const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
       this.sessionWalletAddress = keypair.getPublicKey().toSuiAddress();
+      
+      // 各マネージャにキーペアを配布
+      this.lpManager.setKeypair(keypair);
+      
+      // Bluefin SDKの初期化 (非同期で実行)
+      const network = this.config.rpcUrl.includes('testnet') ? 'testnet' : 'mainnet';
+      this.hedgeManager.setupBluefin(keypair, this.config.rpcUrl, network as any);
+      
     } catch (e) {
       Logger.error('Invalid private key format');
     }
@@ -83,9 +106,13 @@ export class Strategy {
     return this.sessionPrivateKey;
   }
 
-  refreshConfig() {
-    if (config.telegramToken && config.telegramChatId) {
-      this.telegram = new TelegramBot(config.telegramToken, { polling: false });
+  refreshConfig(newConfig?: BotConfig) {
+    if (newConfig) {
+      this.config = newConfig;
+    }
+
+    if (this.config.telegramToken && this.config.telegramChatId) {
+      this.telegram = new TelegramBot(this.config.telegramToken, { polling: false });
       Logger.info('Strategy: Telegram notifications enabled.');
     } else {
       this.telegram = null;
@@ -93,8 +120,8 @@ export class Strategy {
   }
 
   private notify(message: string) {
-    if (this.telegram && config.telegramChatId) {
-      this.telegram.sendMessage(config.telegramChatId, `🤖 SUI Bot\n${message}`).catch(e => {
+    if (this.telegram && this.config.telegramChatId) {
+      this.telegram.sendMessage(this.config.telegramChatId, `🤖 SUI Bot\n${message}`).catch(e => {
         Logger.warn('Telegram notification failed: ' + e.message);
       });
     }
@@ -234,7 +261,7 @@ export class Strategy {
 
     // ガス代採算チェック
     // リバランス = remove(1) + add(1) + hedgeClose(0) + hedgeOpen(0) = 2TX
-    if (!this.gasTracker.isRebalanceProfitable(config.minProfitForRebalance, 2)) {
+    if (!this.gasTracker.isRebalanceProfitable(this.config.minProfitForRebalance, 2)) {
       return false;
     }
 
@@ -247,12 +274,12 @@ export class Strategy {
   private isGoodEntryTiming(): boolean {
     const rsi = this.calculateRSI();
     
-    if (rsi < config.rsiEntryLow) {
+    if (rsi < this.config.rsiEntryLow) {
       Logger.info(`⏸️ RSI=${rsi.toFixed(1)} — 売られすぎ、新規エントリー見送り`);
       return false;
     }
     
-    if (rsi > config.rsiEntryHigh) {
+    if (rsi > this.config.rsiEntryHigh) {
       Logger.info(`⏸️ RSI=${rsi.toFixed(1)} — 買われすぎ、新規エントリー見送り`);
       return false;
     }
@@ -271,7 +298,7 @@ export class Strategy {
     const elapsed = Date.now() - this.lastFeeCollectTime;
     
     // 最小間隔チェック (デフォルト5分)
-    if (elapsed < config.feeCollectIntervalMs) {
+    if (elapsed < this.config.feeCollectIntervalMs) {
       return false;
     }
 
@@ -312,114 +339,83 @@ export class Strategy {
   async runRebalance(currentPrice: number) {
     const timeSinceLastRebalance = Date.now() - this.lastRebalanceTime;
     
-    // クールダウン判定
-    if (timeSinceLastRebalance < config.cooldownPeriodMs && this.lastRebalanceTime !== 0) {
-      const remaining = Math.floor((config.cooldownPeriodMs - timeSinceLastRebalance) / 1000);
+    // クールダウン判定（起動直後や新規構築時は無視する）
+    if (this.currentLowerBound > 0 && timeSinceLastRebalance < this.config.cooldownPeriodMs && this.lastRebalanceTime !== 0) {
+      const remaining = Math.floor((this.config.cooldownPeriodMs - timeSinceLastRebalance) / 1000);
       Logger.warn(`⏳ クールダウン中: あと${remaining}秒`);
       return;
     }
 
-    // RSIチェック（初回以外）
-    if (this.lastRebalanceTime !== 0 && this.currentLowerBound > 0) {
-      if (!this.isGoodEntryTiming()) {
-        return;
-      }
-    }
-
-    // 採算性チェック（初回以外）
-    if (this.currentLowerBound > 0 && this.currentUpperBound > 0) {
-      if (!this.isRebalanceProfitable(currentPrice)) {
-        return;
-      }
-    }
-
     try {
-      this.notify(`⚡ リバランス開始\n現在価格: $${currentPrice.toFixed(4)} USDC`);
-      Logger.box('Rebalancing Started', `Current Price: $${currentPrice.toFixed(4)} USDC`);
+      this.currentPhase = CyclePhase.REBALANCING;
+      this.notify(`⚡ 戦略サイクル再構築開始 (価格: $${currentPrice.toFixed(4)})`);
+      Logger.box('Strategy Cycle Start', `Price: $${currentPrice.toFixed(4)} USDC/SUI`);
 
-      // 既存ポジションのクローズ
-      Logger.info('既存ポジションをクローズ...');
-      let removeGas = 0;
+      // STEP 1: 全決済 (リムーブLP & クローズヘッジ)
+      Logger.info('--- [STEP 1] 全ポジションのクローズ ---');
       try {
-        const removeResult = await this.lpManager.removeLiquidity();
-        removeGas = removeResult.gasCostUsdc;
-        const hedgeResult = await this.hedgeManager.closeHedge(currentPrice);
-        if (hedgeResult.pnl !== 0) {
-          Logger.info(`📊 ヘッジ決済PnL: ${hedgeResult.pnl >= 0 ? '+' : ''}$${hedgeResult.pnl.toFixed(4)}`);
+        const removeRes = await this.lpManager.removeLiquidity();
+        if (removeRes.digest) {
+          await this.tracker.recordEvent('LP解除', 'レンジ外のためLPを削除しました', currentPrice, removeRes.digest);
         }
-        Logger.success('既存ポジションをクローズしました');
-      } catch (e: any) {
-        Logger.warn(`既存ポジションの削除に失敗（既存なしとして続行）`);
+        
+        const hedgeRes = await this.hedgeManager.closeHedge(currentPrice);
+        if (hedgeRes.digest) {
+          await this.tracker.recordEvent('ヘッジ決済', 'LP解除に伴いショートポジションを決済しました', currentPrice, hedgeRes.digest);
+        }
+      } catch (e) {
+        Logger.warn('ポジションクローズ中にエラーが発生しましたが、新規構築を続行します');
       }
 
-      // 新レンジの計算
-      this.calculateOptimalRange(currentPrice);
+      // STEP 2: 25/25/50 戦略構築
+      Logger.info('--- [STEP 2] 戦略の構築 (25/25/50分配) ---');
+      const totalCapital = 10; // ユーザー指定の10 USDC
+      const swapStepAmount = totalCapital * 0.25;      // ① 2.5 USDC で SUI購入
+      const lpUsdcAmount = totalCapital * 0.25;        // ② 2.5 USDC を LP投入用
+      const marginAmount = totalCapital * 0.50;        // ③ 5.0 USDC をヘッジ担保
 
-      // 新しいポジションをオープン
-      Logger.info('新規ポジションをオープン...');
-      try {
-        const addResult = await this.lpManager.addLiquidity(
-          this.currentLowerBound,
-          this.currentUpperBound,
-          config.lpAmountUsdc
-        );
+      // ① SUI購入 (25%)
+      this.currentPhase = CyclePhase.SWAPPING;
+      Logger.info(`① 25%分 ($${swapStepAmount.toFixed(2)}) の SUI を購入中...`);
+      const swapRes = await this.lpManager.swapUsdcToSui(swapStepAmount);
+      await this.tracker.recordEvent('SUI購入', `LP用資産として ${swapRes.amountOut.toFixed(4)} SUI を購入`, currentPrice, swapRes.digest);
 
-        // ガス代をPnLに記録
-        const totalGas = removeGas + addResult.gasCostUsdc;
-        this.pnlEngine.recordGas(totalGas);
-        this.pnlEngine.recordLpEntry(currentPrice, config.lpAmountUsdc);
+      // ② LP投入 (25%)
+      this.currentPhase = CyclePhase.ADDING_LP;
+      this.calculateOptimalRange(currentPrice); // 価格変動に基づきレンジ計算
+      Logger.info(`② 25%分 ($${lpUsdcAmount.toFixed(2)}) + SUI で LP を提供中...`);
+      const lpRes = await this.lpManager.addLiquidity(this.currentLowerBound, this.currentUpperBound, lpUsdcAmount);
+      await this.tracker.recordRebalance(currentPrice, 0, 0, lpRes.digest, 'LP提供完了', this.currentLowerBound, this.currentUpperBound, 'LP投入');
 
-        // ヘッジポジション開設
-        const hedgeAmount = config.lpAmountUsdc * config.hedgeRatio;
-        await this.hedgeManager.openHedge(hedgeAmount, currentPrice);
-        this.pnlEngine.recordHedgeEntry(currentPrice, hedgeAmount);
+      // ③ ヘッジ証拠金入金 (50%)
+      this.currentPhase = CyclePhase.OPENING_HEDGE;
+      Logger.info(`③ 50%分 ($${marginAmount.toFixed(2)}) をヘッジ証拠金として入金中...`);
+      const depositRes = await this.hedgeManager.depositMargin(marginAmount);
+      await this.tracker.recordEvent('証拠金入金', `ヘッジ用担保 $${marginAmount.toFixed(2)} をBluefinへ入金`, currentPrice, depositRes.digest);
 
-        this.lastRebalanceTime = Date.now();
-        this.lastFeeCollectTime = Date.now(); // 手数料回収タイマーリセット
+      // ④ ヘッジショート構築 (LPのSUI数量の 50%)
+      // 実際のスワップで得たSUI数量の半分をヘッジ
+      const hedgeSuiSize = swapRes.amountOut * 0.5;
+      const hedgeUsdcValue = hedgeSuiSize * currentPrice;
+      Logger.info(`④ LP保有SUIの50% (${hedgeSuiSize.toFixed(4)} SUI) をショート中...`);
+      const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
+      await this.tracker.recordHedge('SHORT', 'デルタ中立化のためのショート開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
 
-        // PnL状況を記録
-        const pnlStatus = this.pnlEngine.calculateNetPnl(currentPrice);
+      // 完了処理
+      this.currentPhase = CyclePhase.MONITORING;
+      this.lastRebalanceTime = Date.now();
+      
+      this.pnlEngine.recordLpEntry(currentPrice, lpUsdcAmount * 2); // LP総額 (~5 USDC)
+      this.pnlEngine.recordHedgeEntry(currentPrice, hedgeUsdcValue);
 
-        await Tracker.recordRebalance(
-          currentPrice,
-          pnlStatus.netPnl,
-          0,
-          addResult.digest,
-          undefined,
-          this.currentLowerBound,
-          this.currentUpperBound,
-          'リバランス'
-        );
-        Tracker.showStats();
-
-        const msg = `✅ リバランス完了
-新レンジ: $${this.currentLowerBound.toFixed(4)} - $${this.currentUpperBound.toFixed(4)}
-実行価格: $${currentPrice.toFixed(4)}
-ガス代: $${totalGas.toFixed(4)}
-純利益: $${pnlStatus.netPnl.toFixed(4)} (APR: ${pnlStatus.apr.toFixed(1)}%)`;
-        Logger.success(msg);
-        this.notify(msg);
-      } catch (e: any) {
-        Logger.error('新規ポジション作成に失敗しました', e);
-        throw e;
-      }
+      const msg = `✅ 戦略サイクル構築完了 (25/25/50)\n運用額: ${totalCapital} USDC\nレンジ: $${this.currentLowerBound.toFixed(4)} 〜 $${this.currentUpperBound.toFixed(4)}`;
+      Logger.success(msg);
+      this.notify(msg);
 
     } catch (e: any) {
-      Logger.error('Rebalance execution failed', e);
-      
-      const errorMsg = e.message.substring(0, 100);
-      await Tracker.recordRebalance(
-        currentPrice,
-        0,
-        0,
-        undefined,
-        `失敗: ${errorMsg}`,
-        this.currentLowerBound,
-        this.currentUpperBound,
-        'リバランス(失敗)'
-      );
-      
-      this.notify(`❌ リバランス失敗\n${errorMsg}`);
+      this.currentPhase = CyclePhase.IDLE;
+      Logger.error('サイクル実行中にエラーが発生しました', e);
+      this.notify(`❌ サイクルエラー: ${e.message}`);
       this.lastRebalanceTime = Date.now();
     }
   }
@@ -432,12 +428,30 @@ export class Strategy {
       return;
     }
     
-    Logger.info(`🚀 ボット起動 (監視間隔: ${config.monitorIntervalMs / 1000}秒)`);
+    Logger.info(`🚀 ボット起動 (監視間隔: ${this.config.monitorIntervalMs / 1000}秒)`);
     this.isRunning = true;
     this.notify('🚀 ボットを起動しました');
-    await Tracker.recordEvent('Bot起動', `監視開始 (間隔: ${config.monitorIntervalMs / 1000}秒)　運用金額: ${config.lpAmountUsdc} USDC`);
+    await this.tracker.recordEvent('Bot起動', `監視開始 (間隔: ${this.config.monitorIntervalMs / 1000}秒)　運用金額: ${this.config.lpAmountUsdc} USDC`);
 
-    Tracker.setConfig({ lpAmountUsdc: config.lpAmountUsdc });
+    this.tracker.setConfig({ lpAmountUsdc: this.config.lpAmountUsdc });
+
+    // 運用初期化: 前回のレンジとクールダウンをリセットして強制的に新規構築プロセスを開始する
+    this.currentLowerBound = 0;
+    this.currentUpperBound = 0;
+    this.lastRebalanceTime = 0; // クールダウンをリセット
+
+    // 起動直後に一回実行して最初の価格をチャートに載せる
+    const firstPrice = await this.priceMonitor.getCurrentPrice();
+    if (firstPrice > 0) {
+      this.priceHistoryForAnalysis.push(firstPrice);
+      this.tracker.updateCurrentPrice(firstPrice);
+      
+      Logger.box('Strategy Reset Triggered', `Forcing fresh 25/25/50 cycle at $${firstPrice.toFixed(4)}`);
+      this.tracker.recordEvent('戦略テスト開始', `10 USDC での新戦略 (25/25/50) の構築をゼロから開始します。`);
+      
+      // 非同期でリバランスを開始 (1秒後)
+      setTimeout(() => this.runRebalance(firstPrice), 1000);
+    }
 
     this.intervalId = setInterval(async () => {
       try {
@@ -448,7 +462,7 @@ export class Strategy {
           return;
         }
 
-        Tracker.updateCurrentPrice(currentPrice);
+        this.tracker.updateCurrentPrice(currentPrice);
 
         // 価格履歴を記録
         this.priceHistoryForAnalysis.push(currentPrice);
@@ -460,7 +474,7 @@ export class Strategy {
         if (this.currentLowerBound > 0 && this.currentUpperBound > 0) {
           const rangeWidth = this.currentUpperBound - this.currentLowerBound;
           const feeRate = 0.0025; // 0.25% スワップ手数料の想定
-          const estimatedIntervalFee = config.lpAmountUsdc * feeRate * (config.monitorIntervalMs / (24 * 60 * 60 * 1000));
+          const estimatedIntervalFee = this.config.lpAmountUsdc * feeRate * (this.config.monitorIntervalMs / (24 * 60 * 60 * 1000));
           this.accumulatedEstimatedFees += estimatedIntervalFee;
         }
 
@@ -523,13 +537,16 @@ export class Strategy {
             if (feeRes.amount > 0) {
               this.pnlEngine.recordFee(feeRes.amount);
               this.pnlEngine.recordGas(feeRes.gasCostUsdc);
-              await Tracker.recordFee(feeRes.amount);
+              await this.tracker.recordFee(feeRes.amount);
               Logger.info(`💰 手数料回収: +$${feeRes.amount.toFixed(4)} (ガス: $${feeRes.gasCostUsdc.toFixed(4)})`);
             }
-          } else {
-            const pnl = this.pnlEngine.calculateNetPnl(currentPrice);
-            Logger.info(`✓ レンジ内 ($${currentPrice.toFixed(4)}) | 純利益: $${pnl.netPnl} | APR: ${pnl.apr}%`);
           }
+
+          // === 新規: Bluefin維持証拠金チェック ===
+          await this.hedgeManager.checkAndMaintainMargin(currentPrice);
+
+          const pnl = this.pnlEngine.calculateNetPnl(currentPrice);
+          Logger.info(`✓ レンジ内 ($${currentPrice.toFixed(4)}) | 純利益: $${pnl.netPnl} | APR: ${pnl.apr}%`);
         }
 
       } catch (e: any) {
@@ -545,16 +562,23 @@ export class Strategy {
       this.isRunning = false;
       Logger.info('⏹️ ボットを停止しました');
       this.notify('⏹️ ボットを停止しました');
-      Tracker.recordEvent('Bot停止', 'ユーザーまたはシステムにより停止').catch(() => {});
+      this.tracker.recordEvent('Bot停止', 'ユーザーまたはシステムにより停止').catch(() => {});
     }
   }
 
   /**
    * PnL/Delta/Gas情報をAPIに返す
    */
-  getPnlData(currentPrice: number) {
+  async getPnlData(currentPrice: number) {
+    const balance = await this.lpManager.checkBalance();
+    const trackerStats = this.tracker.getStats();
+    
     return {
-      pnl: this.pnlEngine.calculateNetPnl(currentPrice),
+      pnl: {
+        ...this.pnlEngine.calculateNetPnl(currentPrice),
+        botWalletBalanceSui: balance.suiBalance,
+        botWalletBalanceUsdc: balance.usdcBalance,
+      },
       delta: this.pnlEngine.calculateDelta(config.hedgeRatio),
       gasStats: this.gasTracker.getStats(),
       hedge: this.hedgeManager.getStatus(currentPrice),
@@ -562,6 +586,8 @@ export class Strategy {
       volatility: Number((this.calculateVolatility() * 100).toFixed(2)),
       trend: this.detectTrend(),
       dailySnapshots: this.pnlEngine.getDailySnapshots(),
+      currentPhase: this.currentPhase,
+      ...trackerStats, // trackerからの統計（履歴含む）を追加
     };
   }
 }

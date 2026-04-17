@@ -4,16 +4,14 @@ import Table from 'cli-table3';
 import chalk from 'chalk';
 import { Logger } from './logger.js';
 
-const TRACKER_FILE = path.resolve(process.cwd(), 'tracker_data.json');
-
 export interface TrackerData {
   rebalanceCount: number;
   totalFeesEarned: number;
   pnlTotal: number;
-  entryPrice: number; // エントリー価格
-  currentPrice: number; // 現在価格
-  positionSize: number; // ポジションサイズ
-  successfulRebalances: number; // 成功したリバランス数
+  entryPrice: number;
+  currentPrice: number;
+  positionSize: number;
+  successfulRebalances: number;
   history: Array<{
     timestamp: string;
     price: number;
@@ -23,12 +21,12 @@ export interface TrackerData {
     upperBound?: number;
     txDigest?: string;
     details?: string;
-    action?: string; // アクション種別（リバランス・ストップ・スタート等）
+    action?: string;
   }>;
 }
 
 export class Tracker {
-  private static data: TrackerData = {
+  private data: TrackerData = {
     rebalanceCount: 0,
     totalFeesEarned: 0,
     pnlTotal: 0,
@@ -39,30 +37,36 @@ export class Tracker {
     history: [],
   };
 
-  static async init() {
+  private filePath: string;
+
+  constructor(private sessionId: string) {
+    this.filePath = path.resolve(process.cwd(), `tracker_${this.sessionId}.json`);
+  }
+
+  async init() {
     try {
-      const content = await fs.readFile(TRACKER_FILE, 'utf-8');
+      const content = await fs.readFile(this.filePath, 'utf-8');
       this.data = JSON.parse(content);
-      Logger.info('Prior tracking data loaded.');
+      Logger.info(`Tracker initialized for session ${this.sessionId}`);
     } catch (e: any) {
       if (e.code === 'ENOENT') {
-        Logger.info('No prior tracking data found. Starting fresh.');
+        Logger.info(`New tracker created for session ${this.sessionId}`);
         await this.save();
       } else {
-        Logger.warn('Failed to parse tracker data, initializing empty tracking info.');
+        Logger.warn(`Failed to parse tracker data for ${this.sessionId}, starting fresh.`);
       }
     }
   }
 
-  private static async save() {
+  private async save() {
     try {
-      await fs.writeFile(TRACKER_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
+      await fs.writeFile(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
     } catch (e) {
-      Logger.error('Failed to save tracking data', e);
+      Logger.error(`Failed to save tracking data for ${this.sessionId}`, e);
     }
   }
 
-  static async recordRebalance(
+  async recordRebalance(
     price: number,
     pnl: number,
     feeCollected: number,
@@ -101,10 +105,9 @@ export class Tracker {
     await this.save();
   }
 
-  static async recordFee(feeCollected: number) {
+  async recordFee(feeCollected: number, txDigest?: string) {
     if (feeCollected > 0) {
       this.data.totalFeesEarned += feeCollected;
-      // 手数料回収も履歴に記録
       this.data.history.push({
         timestamp: new Date().toISOString(),
         price: this.data.currentPrice,
@@ -113,6 +116,7 @@ export class Tracker {
         action: '手数料回収',
         lowerBound: undefined,
         upperBound: undefined,
+        txDigest,
         details: `手数料回収: +${feeCollected.toFixed(4)} USDC`
       });
       if (this.data.history.length > 200) {
@@ -122,8 +126,7 @@ export class Tracker {
     }
   }
 
-  // Bot起動・停止などの一般イベントを履歴に記録
-  static async recordEvent(action: string, details: string, price?: number) {
+  async recordEvent(action: string, details: string, price?: number, txDigest?: string) {
     this.data.history.push({
       timestamp: new Date().toISOString(),
       price: price ?? this.data.currentPrice,
@@ -132,6 +135,7 @@ export class Tracker {
       action,
       lowerBound: undefined,
       upperBound: undefined,
+      txDigest,
       details
     });
     if (this.data.history.length > 200) {
@@ -140,15 +144,31 @@ export class Tracker {
     await this.save();
   }
 
-  static updateCurrentPrice(price: number) {
+  async recordHedge(action: string, details: string, price: number, size: number, txDigest?: string) {
+    this.data.history.push({
+      timestamp: new Date().toISOString(),
+      price,
+      pnl: 0,
+      fee: 0,
+      action: `ヘッジ:${action}`,
+      txDigest,
+      details: `${details} (Size: ${size.toFixed(4)} SUI)`
+    });
+    if (this.data.history.length > 200) {
+      this.data.history.shift();
+    }
+    await this.save();
+  }
+
+  updateCurrentPrice(price: number) {
     this.data.currentPrice = price;
   }
 
-  static setConfig(config: { lpAmountUsdc: number }) {
-    this.data.positionSize = config.lpAmountUsdc;
+  setConfig(config: { totalOperationalCapitalUsdc?: number; lpAmountUsdc?: number }) {
+    this.data.positionSize = config.totalOperationalCapitalUsdc || config.lpAmountUsdc || 0;
   }
 
-  static getStats() {
+  getStats() {
     const priceChange = this.data.entryPrice > 0 
       ? ((this.data.currentPrice - this.data.entryPrice) / this.data.entryPrice * 100) 
       : 0;
@@ -182,31 +202,5 @@ export class Tracker {
         txDigest: h.txDigest
       }))
     };
-  }
-
-  static showStats() {
-// ... existing code ...
-    const table = new Table({
-      head: [
-        chalk.cyan('Rebalance Count'),
-        chalk.cyan('Total Fees (USDC)'),
-        chalk.cyan('Total P&L (USDC)'),
-        chalk.cyan('Win Rate'),
-      ],
-      style: { head: [], border: [] }
-    });
-
-    const winRate = this.data.rebalanceCount > 0 
-      ? (this.data.successfulRebalances / this.data.rebalanceCount * 100).toFixed(1)
-      : '0.0';
-
-    table.push([
-      this.data.rebalanceCount.toString(),
-      this.data.totalFeesEarned.toFixed(4),
-      chalk[this.data.pnlTotal >= 0 ? 'green' : 'redBright'](this.data.pnlTotal.toFixed(4)),
-      `${winRate}%`
-    ]);
-
-    console.log('\n' + table.toString() + '\n');
   }
 }
