@@ -15,6 +15,9 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBal
   const [depositAmount, setDepositAmount] = useState('1'); // デフォルト1 SUI
   const [isDepositing, setIsDepositing] = useState(false);
   
+  // 固定アドレス判定
+  const isFixedAddress = botAddress.toLowerCase() === '0xc17e3ef45cfb8ff6f0d5e55669b148fc27e615e2bde27109ccf3e952d1215559'.toLowerCase();
+  
   const currentAccount = useCurrentAccount();
   const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
@@ -73,15 +76,32 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBal
           </div>
           <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0 }}>専用運用ウォレット</h3>
         </div>
-        <div style={{ 
-          background: needsSui ? 'rgba(255, 71, 87, 0.1)' : 'rgba(46, 213, 115, 0.1)',
-          color: needsSui ? '#ff4757' : '#2ed573',
-          padding: '4px 12px',
-          borderRadius: '20px',
-          fontSize: '0.75rem',
-          fontWeight: 600
-        }}>
-          {needsSui ? '入金が必要です' : '運用可能'}
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          {isFixedAddress && (
+            <div style={{ 
+              background: 'rgba(88, 166, 255, 0.2)', 
+              color: 'var(--accent)',
+              padding: '4px 8px',
+              borderRadius: '6px',
+              fontSize: '0.65rem',
+              fontWeight: 800,
+              border: '1px solid var(--accent)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em'
+            }}>
+              MASTER FIXED
+            </div>
+          )}
+          <div style={{ 
+            background: needsSui ? 'rgba(255, 71, 87, 0.1)' : 'rgba(46, 213, 115, 0.1)',
+            color: needsSui ? '#ff4757' : '#2ed573',
+            padding: '4px 12px',
+            borderRadius: '20px',
+            fontSize: '0.75rem',
+            fontWeight: 600
+          }}>
+            {needsSui ? '入金が必要です' : '運用可能'}
+          </div>
         </div>
       </div>
 

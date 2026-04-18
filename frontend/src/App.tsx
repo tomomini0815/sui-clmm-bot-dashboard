@@ -113,11 +113,14 @@ function App() {
         const response = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
         const result = await response.json();
         if (result.success) {
-          setStats(result.data);
-          setIsBotActive(result.data.isRunning);
-          if (result.data.botWalletAddress) {
+          // アドレスの同期を強化
+          if (result.data.botWalletAddress && result.data.botWalletAddress !== botWalletAddress) {
+            console.log(`[SYNC] Bot Wallet Address forced to: ${result.data.botWalletAddress}`);
             setBotWalletAddress(result.data.botWalletAddress);
           }
+          
+          setStats(result.data);
+          setIsBotActive(result.data.isRunning);
 
           const poolHistory = (result.data.priceHistory || []).map((p: any) => ({
             time: p.time,

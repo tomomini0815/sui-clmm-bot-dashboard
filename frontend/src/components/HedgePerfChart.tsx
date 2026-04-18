@@ -100,14 +100,15 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
               
               <ReferenceLine 
                 y={entryPrice} 
-                stroke="var(--accent)" 
+                stroke="#ff4d4d" 
                 strokeDasharray="3 3" 
+                strokeWidth={2}
                 label={{ 
                   value: 'SHORT ENTRY', 
                   position: 'insideTopRight', 
-                  fill: 'var(--accent)', 
-                  fontSize: 10,
-                  fontWeight: 700
+                  fill: '#ff4d4d', 
+                  fontSize: 11,
+                  fontWeight: 800
                 }}
               />
 
@@ -142,8 +143,8 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
         alignItems: 'center',
         gap: '10px'
       }}>
-        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--accent)' }}></div>
-        <span>青点線：建玉価格（ショートエントリー）を基準に、SUI価格が下がるほど利益が発生します。</span>
+        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff4d4d' }}></div>
+        <span>赤点線：建玉価格（ショートエントリー）を基準に、SUI価格が下がるほど利益が発生します。</span>
       </div>
     </div>
   );

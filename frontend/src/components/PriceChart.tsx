@@ -105,9 +105,9 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperB
         </div>
       </div>
 
-      <div className="price-chart-container" style={{ flex: 1, width: '100%' }}>
+      <div className="price-chart-container" style={{ flex: 1, width: '100%', minHeight: '300px', height: '300px', position: 'relative' }}>
         {data.length === 0 ? (
-          <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.95rem' }}>
+          <div style={{ height: '300px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.95rem' }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{ marginBottom: '8px' }}>📊</div>
               <div>Botを起動すると価格チャートが表示されます</div>
@@ -115,7 +115,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperB
             </div>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height={300}>
             <LineChart data={data} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
               <defs>
                 <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">

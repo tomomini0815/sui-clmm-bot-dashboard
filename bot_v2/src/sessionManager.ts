@@ -54,72 +54,89 @@ export class SessionManager {
 
     // セッション専用のキーペアを準備
     let sessionKeypair: Ed25519Keypair | null = null;
-    
-    // まず既存の永続化ファイルから鍵を復元できるか試みる
-    // シードフレーズが提供された場合、既存のセッションファイルをスキャンして一致するものを探す
-    let targetSessionId = sessionId;
-    if (mnemonic) {
-      const existingId = this.findSessionIdByMnemonic(mnemonic);
-      if (existingId) {
-        Logger.success(`Found existing session [${existingId}] for provided mnemonic.`);
-        targetSessionId = existingId;
-      }
-    }
-
-    // まず既存の永続化ファイルから鍵を復元できるか試みる
-    const filePath = path.resolve(process.cwd(), `session_state_${targetSessionId}.json`);
     let sessionMnemonic: string | undefined = mnemonic || undefined;
 
-    if (fs.existsSync(filePath)) {
+    // 【最優先】 .env にマスター秘密鍵が設定されている場合はそれを使用する (固定化)
+    if (globalConfig.privateKey && globalConfig.privateKey !== 'your_private_key_here') {
       try {
-        const state = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        
-        // シードフレーズがあれば優先的に使用
-        if (state.mnemonic) {
-          sessionMnemonic = state.mnemonic;
-          sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic as string);
-          Logger.success(`Dedicated Bot Wallet restored from Mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
-        } 
-        // 秘密鍵のみの場合
-        else if (state.botSecretKey) {
-          const { secretKey } = (state.botSecretKey.startsWith('suiprivkey')) 
-            ? decodeSuiPrivateKey(state.botSecretKey)
-            : { secretKey: Buffer.from(state.botSecretKey.replace('0x', ''), 'hex') };
-          sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
-          Logger.success(`Dedicated Bot Wallet restored from Secret Key: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
-        }
+        const { secretKey } = (globalConfig.privateKey.startsWith('suiprivkey')) 
+          ? decodeSuiPrivateKey(globalConfig.privateKey)
+          : { secretKey: Buffer.from(globalConfig.privateKey.replace('0x', ''), 'hex') };
+        sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
+        Logger.success(`[MASTER KEY] Dedicated Bot Wallet FIXED to: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
       } catch (e) {
-        Logger.warn(`Failed to restore wallet from file: ${targetSessionId}`);
+        Logger.error('Failed to load MASTER PRIVATE_KEY from .env');
       }
     }
 
     if (!sessionKeypair) {
-      if (sessionMnemonic) {
-        try {
-          sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
-          Logger.success(`Wallet derived from provided mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
-        } catch (e) {
-          Logger.error('Failed to derive wallet from provided mnemonic');
+      // まず既存の永続化ファイルから鍵を復元できるか試みる
+      // シードフレーズが提供された場合、既存のセッションファイルをスキャンして一致するものを探す
+      let targetSessionId = sessionId;
+      if (mnemonic) {
+        const existingId = this.findSessionIdByMnemonic(mnemonic);
+        if (existingId) {
+          Logger.success(`Found existing session [${existingId}] for provided mnemonic.`);
+          targetSessionId = existingId;
         }
       }
+
+      // まず既存の永続化ファイルから鍵を復元できるか試みる
+      const filePath = path.resolve(process.cwd(), `session_state_${targetSessionId}.json`);
       
-      if (!sessionKeypair && privateKey) {
+      if (fs.existsSync(filePath)) {
         try {
-          const { secretKey } = (privateKey.startsWith('suiprivkey')) 
-            ? decodeSuiPrivateKey(privateKey)
-            : { secretKey: Buffer.from(privateKey.replace('0x', ''), 'hex') };
-          sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
+          const state = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          
+          // シードフレーズがあれば優先的に使用
+          if (state.mnemonic) {
+            sessionMnemonic = state.mnemonic;
+            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic as string);
+            Logger.success(`Dedicated Bot Wallet restored from Mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
+          } 
+          // 秘密鍵のみの場合
+          else if (state.botSecretKey) {
+            const { secretKey } = (state.botSecretKey.startsWith('suiprivkey')) 
+              ? decodeSuiPrivateKey(state.botSecretKey)
+              : { secretKey: Buffer.from(state.botSecretKey.replace('0x', ''), 'hex') };
+            sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
+            Logger.success(`Dedicated Bot Wallet restored from Secret Key: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
+          }
         } catch (e) {
-          Logger.warn('Invalid private key provided, generating new one with mnemonic.');
+          Logger.warn(`Failed to restore wallet from file: ${targetSessionId}`);
+        }
+      }
+
+      if (!sessionKeypair) {
+        if (sessionMnemonic) {
+          try {
+            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
+            Logger.success(`Wallet derived from provided mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
+          } catch (e) {
+            Logger.error('Failed to derive wallet from provided mnemonic');
+          }
+        }
+        
+        if (!sessionKeypair && privateKey) {
+          try {
+            const { secretKey } = (privateKey.startsWith('suiprivkey')) 
+              ? decodeSuiPrivateKey(privateKey)
+              : { secretKey: Buffer.from(privateKey.replace('0x', ''), 'hex') };
+            sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
+          } catch (e) {
+            Logger.warn('Invalid private key provided, generating new one with mnemonic.');
+            sessionMnemonic = bip39.generateMnemonic(wordlist);
+            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
+          }
+        } else if (!sessionKeypair) {
+          // 完全新規生成
           sessionMnemonic = bip39.generateMnemonic(wordlist);
           sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
         }
-      } else if (!sessionKeypair) {
-        // 完全新規生成
-        sessionMnemonic = bip39.generateMnemonic(wordlist);
-        sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
       }
     }
+
+    const targetSessionId = sessionId; // 互換性のため保持
 
     const botWalletAddress = sessionKeypair.getPublicKey().toSuiAddress();
     Logger.info(`Dedicated Bot Wallet generated: ${botWalletAddress}`);

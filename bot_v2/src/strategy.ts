@@ -393,11 +393,10 @@ export class Strategy {
       const depositRes = await this.hedgeManager.depositMargin(marginAmount);
       await this.tracker.recordEvent('証拠金入金', `ヘッジ用担保 $${marginAmount.toFixed(2)} をBluefinへ入金`, currentPrice, depositRes.digest);
 
-      // ④ ヘッジショート構築 (LPのSUI数量の 50%)
-      // 実際のスワップで得たSUI数量の半分をヘッジ
-      const hedgeSuiSize = swapRes.amountOut * 0.5;
+      // ④ ヘッジショート構築 (LPのSUI数量に対する比率を適用)
+      const hedgeSuiSize = swapRes.amountOut * this.config.hedgeRatio;
       const hedgeUsdcValue = hedgeSuiSize * currentPrice;
-      Logger.info(`④ LP保有SUIの50% (${hedgeSuiSize.toFixed(4)} SUI) をショート中...`);
+      Logger.info(`④ LP保有SUIの${(this.config.hedgeRatio * 100).toFixed(0)}% (${hedgeSuiSize.toFixed(4)} SUI) をショート中...`);
       const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
       await this.tracker.recordHedge('SHORT', 'デルタ中立化のためのショート開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
 
@@ -434,11 +433,30 @@ export class Strategy {
     await this.tracker.recordEvent('Bot起動', `監視開始 (間隔: ${this.config.monitorIntervalMs / 1000}秒)　運用金額: ${this.config.lpAmountUsdc} USDC`);
 
     this.tracker.setConfig({ lpAmountUsdc: this.config.lpAmountUsdc });
+    
+    // --- 新規: 履歴データの復元ロジック ---
+    try {
+      const stats = this.tracker.getStats();
+      if (stats.history && stats.history.length > 0) {
+        // historyから価格情報を抽出し、古い順に並べて復元
+        const priceHistory = [...stats.history]
+          .reverse() // getStatsがreverseしているので戻す
+          .filter(h => h.price > 0)
+          .map(h => ({ time: h.time, price: h.price }));
+          
+        this.priceMonitor.restoreHistory(priceHistory);
+      }
+    } catch (e) {
+      Logger.warn('価格履歴の復元に失敗しましたが、続行します');
+    }
 
     // 運用初期化: 前回のレンジとクールダウンをリセットして強制的に新規構築プロセスを開始する
     this.currentLowerBound = 0;
     this.currentUpperBound = 0;
     this.lastRebalanceTime = 0; // クールダウンをリセット
+
+    // 起動直後のポジション同期
+    await this.hedgeManager.syncPositionWithBluefin();
 
     // 起動直後に一回実行して最初の価格をチャートに載せる
     const firstPrice = await this.priceMonitor.getCurrentPrice();
@@ -539,6 +557,29 @@ export class Strategy {
               this.pnlEngine.recordGas(feeRes.gasCostUsdc);
               await this.tracker.recordFee(feeRes.amount);
               Logger.info(`💰 手数料回収: +$${feeRes.amount.toFixed(4)} (ガス: $${feeRes.gasCostUsdc.toFixed(4)})`);
+            }
+          }
+
+          // === 追加: ヘッジポジションの自己修復ロジック ===
+          const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
+          if (!hedgeStatus.active && this.currentPhase === CyclePhase.MONITORING) {
+            Logger.warn('⚠️ [REPAIR] ヘッジポジションの欠損を検知しました。補完執行を開始します...');
+            
+            // 現在のスワップ実績（購入済みSUI量）から必要なヘッジサイズを算出
+            const totalSuiInLp = await this.lpManager.getSuiAmountInLp();
+            if (totalSuiInLp > 0) {
+              const hedgeSuiSize = totalSuiInLp * this.config.hedgeRatio;
+              const hedgeUsdcValue = hedgeSuiSize * currentPrice;
+              
+              this.notify(`🔧 ヘッジポジションの補完執行を開始します (サイズ: ${hedgeSuiSize.toFixed(4)} SUI)`);
+              
+              try {
+                const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
+                await this.tracker.recordHedge('SHORT', '【自己修復】欠落していたヘッジショートを補完開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
+                Logger.success('✅ [REPAIR] ヘッジポジションの補完が完了しました。');
+              } catch (e: any) {
+                Logger.error('[REPAIR] ヘッジ補完に失敗しました', e);
+              }
             }
           }
 

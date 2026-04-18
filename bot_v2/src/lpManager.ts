@@ -1,13 +1,14 @@
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { SuiClient } from '@mysten/sui/client';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
-import { TickMath, ClmmPoolUtil } from '@cetusprotocol/cetus-sui-clmm-sdk';
+import { TickMath, ClmmPoolUtil, Percentage, adjustForSlippage, d } from '@cetusprotocol/cetus-sui-clmm-sdk';
 import { Decimal } from 'decimal.js';
 import BN from 'bn.js';
-import { config } from './config.js';
+import { config as globalConfig, BotConfig } from './config.js';
 import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
 import { GasTracker } from './gasTracker.js';
+import { Tracker } from './tracker.js';
 
 export class LpManager {
   private keypair!: Ed25519Keypair;
@@ -25,33 +26,47 @@ export class LpManager {
 
   constructor(
     private priceMonitor: PriceMonitor,
-    private gasTracker: GasTracker
+    private gasTracker: GasTracker,
+    private tracker: Tracker,
+    private config: BotConfig = globalConfig
   ) {
-    this.refreshConfig();
+    this.suiClient = new SuiClient({ url: this.config.rpcUrl });
+    // constructorでは初期化せず、明示的にsetKeypairを呼ぶまで待機
   }
 
-  refreshConfig() {
-    this.suiClient = new SuiClient({ url: config.rpcUrl });
+  /**
+   * セッション専用のキーペアをセットする
+   */
+  setKeypair(keypair: Ed25519Keypair) {
+    this.keypair = keypair;
+    this.walletAddress = this.keypair.getPublicKey().toSuiAddress();
     this.isInitialized = false;
+    Logger.info(`LpManager: Keypair set. Address: ${this.walletAddress}`);
+  }
 
-    try {
-      if (config.privateKey && config.privateKey.startsWith('suiprivkey')) {
-        const { secretKey } = decodeSuiPrivateKey(config.privateKey);
-        this.keypair = Ed25519Keypair.fromSecretKey(secretKey);
-      } else if (config.privateKey && config.privateKey.replace('0x', '').length >= 64) {
-        const privateKeyHex = config.privateKey.startsWith('0x')
-          ? config.privateKey.slice(2)
-          : config.privateKey;
-        this.keypair = Ed25519Keypair.fromSecretKey(Buffer.from(privateKeyHex, 'hex'));
-      } else {
-        throw new Error('No valid private key configured');
+  refreshConfig(newConfig?: BotConfig) {
+    if (newConfig) {
+      this.config = newConfig;
+    }
+    this.suiClient = new SuiClient({ url: this.config.rpcUrl });
+    
+    // グローバル設定に秘密鍵がある場合のみ読み込む（単体起動用）
+    if (this.config.privateKey) {
+      try {
+        if (this.config.privateKey.startsWith('suiprivkey')) {
+          const { secretKey } = decodeSuiPrivateKey(this.config.privateKey);
+          this.keypair = Ed25519Keypair.fromSecretKey(secretKey);
+        } else if (this.config.privateKey.replace('0x', '').length >= 64) {
+          const privateKeyHex = this.config.privateKey.startsWith('0x')
+            ? this.config.privateKey.slice(2)
+            : this.config.privateKey;
+          this.keypair = Ed25519Keypair.fromSecretKey(Buffer.from(privateKeyHex, 'hex'));
+        }
+        this.walletAddress = this.keypair.getPublicKey().toSuiAddress();
+        this.isInitialized = false;
+      } catch (e) {
+        Logger.warn('Failed to load global private key.');
       }
-      this.walletAddress = this.keypair.getPublicKey().toSuiAddress();
-      Logger.info(`LpManager: Wallet loaded. Address: ${this.walletAddress}`);
-    } catch (e: any) {
-      Logger.warn(`Invalid or missing private key (${e.message}). Running in read-only mode.`);
-      this.keypair = new Ed25519Keypair();
-      this.walletAddress = this.keypair.getPublicKey().toSuiAddress();
     }
   }
 
@@ -133,6 +148,7 @@ export class LpManager {
    * Insufficient balance エラーを防止
    */
   async checkBalance(): Promise<{ suiBalance: number; usdcBalance: number; sufficient: boolean }> {
+    if (!this.isInitialized) await this.initializePoolData();
     try {
       // SUI残高
       const suiBalance = await this.suiClient.getBalance({
@@ -156,7 +172,7 @@ export class LpManager {
       }
 
       // ガス用SUI (最低0.01 SUI) + LP用USDC がウォレットにあるか
-      const sufficient = suiAmount >= 0.01 && usdcAmount >= config.lpAmountUsdc * 0.5;
+      const sufficient = suiAmount >= 0.01 && usdcAmount >= this.config.lpAmountUsdc * 0.5;
 
       Logger.info(`💰 残高: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)} → ${sufficient ? '✅ 十分' : '❌ 不足'}`);
 
@@ -171,7 +187,7 @@ export class LpManager {
     if (!this.isInitialized) await this.initializePoolData();
 
     // 残高チェック
-    if (config.balanceCheckEnabled) {
+    if (this.config.balanceCheckEnabled) {
       const balance = await this.checkBalance();
       if (!balance.sufficient) {
         throw new Error(`Insufficient balance: SUI=${balance.suiBalance.toFixed(4)}, USDC=${balance.usdcBalance.toFixed(4)}. 必要: USDC ≥ ${(amountUsdc * 0.5).toFixed(4)} + SUI ≥ 0.01`);
@@ -212,7 +228,7 @@ export class LpManager {
         usdcAmountBN,
         this.usdcIsA,
         true,
-        config.maxSlippage,
+        this.config.maxSlippage,
         currentSqrtPrice
       );
 
@@ -252,14 +268,14 @@ export class LpManager {
     }
   }
 
-  async removeLiquidity(): Promise<{ gasCostUsdc: number }> {
+  async removeLiquidity(): Promise<{ digest: string; gasCostUsdc: number }> {
     Logger.startSpin('Removing existing Liquidity...');
 
     try {
       const posId = await this.getActivePositionId();
       if (!posId) {
         Logger.stopSpin('No active position found to remove.');
-        return { gasCostUsdc: 0 };
+        return { digest: '', gasCostUsdc: 0 };
       }
 
       const sdk = this.getSdkWithSender();
@@ -298,7 +314,7 @@ export class LpManager {
       const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'removeLiquidity');
 
       Logger.stopSpin(`Liquidity removed! TX: ${response.digest}`);
-      return { gasCostUsdc };
+      return { digest: response.digest, gasCostUsdc };
     } catch (error: any) {
       Logger.stopSpin(`Failed to remove liquidity: ${error.message}`);
       throw error;
@@ -362,6 +378,98 @@ export class LpManager {
     } catch (error: any) {
       Logger.stopSpin(`Fee collection failed: ${error.message}`);
       return { amount: 0, digest: '', gasCostUsdc: 0 };
+    }
+  }
+
+  /**
+   * USDC を SUI に交換する (LP用)
+   */
+  async swapUsdcToSui(amountUsdc: number): Promise<{ digest: string; amountOut: number }> {
+    if (!this.isInitialized) await this.initializePoolData();
+    Logger.startSpin(`Swapping ${amountUsdc} USDC to SUI...`);
+    
+    const usdcAmountBN = new BN(Math.floor(amountUsdc * Math.pow(10, this.usdcDecimals)).toString());
+    const res = await this.executeSwap(this.usdcIsA, usdcAmountBN);
+    
+    Logger.stopSpin(`Swap complete! Digest: ${res.digest}`);
+    return res;
+  }
+
+  /**
+   * SUI を USDC に戻す (全決済用)
+   */
+  async swapSuiToUsdc(amountSui: number): Promise<{ digest: string; amountOut: number }> {
+    if (!this.isInitialized) await this.initializePoolData();
+    Logger.startSpin(`Swapping ${amountSui.toFixed(4)} SUI to USDC...`);
+    
+    const suiAmountBN = new BN(Math.floor(amountSui * 1e9).toString());
+    const res = await this.executeSwap(!this.usdcIsA, suiAmountBN);
+    
+    Logger.stopSpin(`Swap complete! Digest: ${res.digest}`);
+    return res;
+  }
+
+  private async executeSwap(a2b: boolean, amountInBN: BN): Promise<{ digest: string; amountOut: number }> {
+    try {
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const pool = await sdk.Pool.getPool(poolId);
+      if (!pool) throw new Error("Pool not found");
+
+      // プリスワップ (見積もり)
+      const res = await sdk.Swap.preswap({
+        pool: pool,
+        currentSqrtPrice: pool.current_sqrt_price,
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB,
+        decimalsA: this.decimalsA,
+        decimalsB: this.decimalsB,
+        a2b,
+        byAmountIn: true,
+        amount: amountInBN.toString(),
+      });
+
+      if (!res) {
+        throw new Error("Swap estimation result is null");
+      }
+
+      // スリッページ計算 (0.5%)
+      const slippage = Percentage.fromDecimal(d(this.config.maxSlippage * 100));
+      const amountLimit = adjustForSlippage(
+        new BN(res.estimatedAmountOut),
+        slippage,
+        false
+      );
+
+      const txPayload = await sdk.Swap.createSwapTransactionPayload({
+        pool_id: poolId,
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB,
+        a2b,
+        by_amount_in: true,
+        amount: amountInBN.toString(),
+        amount_limit: amountLimit.toString(),
+      });
+
+      const response = await this.suiClient.signAndExecuteTransaction({
+        transaction: txPayload as any,
+        signer: this.keypair,
+        options: { showEffects: true, showEvents: true },
+      });
+
+      if (response.effects?.status?.status !== 'success') {
+        throw new Error(`Swap TX failed: ${response.effects?.status?.error}`);
+      }
+
+      // ガス代記録
+      const currentPrice = await this.priceMonitor.getCurrentPrice();
+      this.gasTracker.recordGas(response.effects, currentPrice, 'swap');
+
+      const amountOut = Number(res.estimatedAmountOut) / Math.pow(10, a2b ? this.decimalsB : this.decimalsA);
+      return { digest: response.digest, amountOut };
+    } catch (e: any) {
+      Logger.error(`Execution failed: ${e.message}`);
+      throw e;
     }
   }
 }

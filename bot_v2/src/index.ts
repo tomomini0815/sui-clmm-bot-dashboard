@@ -54,21 +54,55 @@ async function bootstrap() {
       }
     }, 5 * 60 * 1000);
 
-    // 【自動復帰】保存されているセッションをスキャンし、運用中だったものを再開
-    const files = fs.readdirSync(process.cwd());
-    const sessionFiles = files.filter(f => f.startsWith('session_state_') && f.endsWith('.json'));
-    
-    for (const file of sessionFiles) {
-      const sessionId = file.replace('session_state_', '').replace('.json', '');
-      Logger.info(`Auto-resuming session from file: ${sessionId}`);
-      // セッションを復元 (内部で loadSessionState が呼ばれ isRunning が復元される)
-      const session = await SessionManager.createSession(sessionId);
+    // 【自動復帰】保存されているセッションをスキャンし、最新の運用中だったもののみを再開
+    const files = fs.readdirSync(process.cwd());    // セッションファイルの一覧を取得
+    const sessionFiles = files
+      .filter(f => f.startsWith('session_state_') && f.endsWith('.json'))
+      .map(f => {
+        const sessionId = f.replace('session_state_', '').replace('.json', '');
+        const trackerFile = `tracker_${sessionId}.json`;
+        let trackerSize = 0;
+        let isRunning = false;
+        
+        try {
+          if (fs.existsSync(trackerFile)) {
+            trackerSize = fs.statSync(trackerFile).size;
+          }
+          const content = JSON.parse(fs.readFileSync(f, 'utf8'));
+          isRunning = content.isRunning === true;
+        } catch (e) {}
+
+        return {
+          name: f,
+          time: fs.statSync(f).mtime.getTime(),
+          sessionId,
+          trackerSize,
+          isRunning
+        };
+      })
+      // ソート順: 実行中のものを優先 > トラッカーサイズが大きいものを優先 > タイムスタンプが新しいものを優先
+      .sort((a, b) => {
+        if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
+        if (Math.abs(a.trackerSize - b.trackerSize) > 500) return b.trackerSize - a.trackerSize;
+        return b.time - a.time;
+      });
+
+    if (sessionFiles.length > 0) {
+      const latest = sessionFiles[0];
+      const sessionId = latest.sessionId;
       
+      Logger.info(`ℹ Auto-resuming most relevant session: ${sessionId} (Running: ${latest.isRunning}, Tracker: ${latest.trackerSize} bytes)`);
+      
+      const session = await SessionManager.createSession(sessionId);
       if (session.strategy.isRunning) {
         Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${sessionId}`);
-        // 運用中だったので再開
-        session.strategy.isRunning = false; // start()内部で重複チェックがあるため一時リセット
+        session.strategy.isRunning = false;
         await session.strategy.start();
+      }
+
+      // 他の古いセッションはスキップ
+      if (sessionFiles.length > 1) {
+        Logger.warn(`Skipped ${sessionFiles.length - 1} older session files to prevent competition.`);
       }
     }
 
@@ -341,22 +375,20 @@ app.get('/api/stats', async (req, res) => {
     // === PnL/Delta/Gas データ ===
     let currentPrice = prices.length > 0 ? prices[prices.length - 1].price : 0;
     
-    // 初回アクセス時など価格履歴が空の場合は強制取得
-    if (currentPrice === 0) {
+    // 価格が未取得の場合は強制取得
+    if (currentPrice <= 0) {
       currentPrice = await session.priceMonitor.getCurrentPrice();
     }
 
-    let pnlData = null;
-    if (currentPrice > 0) {
-      pnlData = await session.strategy.getPnlData(currentPrice);
-    }
+    // PnLデータを強制再計算
+    const pnlData = await session.strategy.getPnlData(currentPrice);
 
     res.json({
       success: true,
       data: {
         ...stats,
         isRunning: session.strategy.isRunning,
-        currentPhase: session.strategy.currentPhase, // 工程情報を最優先で含める
+        currentPhase: session.strategy.currentPhase,
         ...pnlData,
         botWalletAddress: session.botWalletAddress,
         userWalletAddress: session.walletAddress,
@@ -368,28 +400,15 @@ app.get('/api/stats', async (req, res) => {
           lower: Number(lowerBound.toFixed(4)),
           upper: Number(upperBound.toFixed(4))
         },
-        config: {
-          lpAmountUsdc: session.config.lpAmountUsdc,
-          rangeWidth: session.config.rangeWidth,
-          hedgeRatio: session.config.hedgeRatio,
-          configMode: session.config.configMode
-        },
         marketCondition,
-        avgHoldingTime: stats.totalRebalances > 0 ? '15分' : '0分',
         dailyPnl: pnlData?.pnl?.dailyPnl?.toFixed(4) || '0.00',
         pythPrice: pythPrice > 0 ? Number(pythPrice.toFixed(4)) : null,
-
-        // === 詳細データ ===
+        
+        // ヘッジチャートと詳細表示のために明示的に追加
+        hedge: pnlData?.hedge || null,
+        dailySnapshots: pnlData?.dailySnapshots || [],
         pnl: pnlData?.pnl || null,
         delta: pnlData?.delta || null,
-        gasStats: pnlData?.gasStats || null,
-        hedge: pnlData?.hedge || null,
-        indicators: pnlData ? {
-          rsi: pnlData.rsi,
-          volatility: pnlData.volatility,
-          trend: pnlData.trend,
-        } : null,
-        dailySnapshots: pnlData?.dailySnapshots || [],
       }
     });
   } catch (e: any) {
@@ -459,18 +478,21 @@ process.on('unhandledRejection', (reason, promise) => {
   Logger.error('Unhandled Rejection at:', reason);
 });
 
-// Renderのヘルスチェック用エンドポイント
+// Render/Fly.io Health Check Endpoint (Early Registration)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-console.log('DEBUG: Starting bootstrap...');
-bootstrap().then(() => {
-  const port = parseInt(process.env.PORT || '3002', 10);
-  console.log(`DEBUG: Listening on port ${port}...`);
-  app.listen(port, '0.0.0.0', () => {
-    Logger.success(`API Server Running: port ${port}`);
+console.log('DEBUG: Starting API Server...');
+const port = parseInt(process.env.PORT || '3002', 10);
+app.listen(port, '0.0.0.0', () => {
+  Logger.success(`API Server Running: port ${port}`);
+  
+  // Start bot logic in background to avoid health check timeout
+  console.log('DEBUG: Starting background bootstrap...');
+  bootstrap().then(() => {
+    Logger.info('Bot Bootstrap completed successfully.');
+  }).catch(err => {
+    Logger.error('DEBUG: Bootstrap ERROR:', err);
   });
-}).catch(err => {
-  console.error('DEBUG: Bootstrap ERROR:', err);
 });

@@ -6,7 +6,7 @@ interface ConfigPanelProps {
   onToggleBot: () => void;
   onOpenSettings: () => void;
   onOpenWizard: () => void;
-  config?: { lpAmountUsdc: number; rangeWidth: number; hedgeRatio: number };
+  config?: { lpAmountUsdc: number; rangeWidth: number; hedgeRatio: number; configMode?: 'auto' | 'manual' };
   onUpdateCapital: (amount: number) => void;
   onOpenHelp: () => void;
 }
@@ -76,6 +76,19 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
         >
           <Edit3 size={14} /> 編集
         </button>
+      </div>
+
+      {/* モード表示バッジ */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '-8px' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '6px',
+          padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 600,
+          background: config?.configMode === 'manual' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(88, 166, 255, 0.15)',
+          color: config?.configMode === 'manual' ? 'var(--text-muted)' : 'var(--accent)',
+          border: config?.configMode === 'manual' ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(88, 166, 255, 0.3)'
+        }}>
+          {config?.configMode === 'manual' ? 'カスタム設定' : 'お任せモード（推奨）'}
+        </div>
       </div>
 
       {/* 設定項目 */}

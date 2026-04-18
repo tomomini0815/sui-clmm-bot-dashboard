@@ -16,6 +16,8 @@ interface HedgeData {
   currentPnl: number;
   cumulativePnl: number;
   fundingCost: number;
+  marginBalance: number;
+  maintenanceMargin: number;
 }
 
 interface Indicators {
@@ -82,6 +84,17 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
     return 'var(--success)';
   };
 
+  // 証拠金ヘルスの計算
+  const marginHealth = hedge?.active && hedge.marginBalance > 0 
+    ? Math.min(100, (hedge.marginBalance / (hedge.maintenanceMargin || 1)) * 100) 
+    : 0;
+  
+  const getMarginHealthColor = (health: number) => {
+    if (health > 120) return 'var(--success)';
+    if (health > 105) return '#f59e0b';
+    return 'var(--danger)';
+  };
+
   return (
     <div className="glass-panel delta-gauge">
       <h3 className="delta-gauge-title">
@@ -114,12 +127,12 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
         <div className="delta-recommendation">{delta.recommendation}</div>
       </div>
 
-      {/* ヘッジ情報 */}
+      {/* ヘッジ・証拠金情報 */}
       {hedge && (
         <div className="hedge-info">
           <div className="hedge-info-title">
             <Activity size={14} />
-            ヘッジポジション
+            ヘッジ & 証拠金監視
             <span className={`hedge-badge ${hedge.active ? 'hedge-active' : 'hedge-inactive'}`}>
               {hedge.active ? '稼働中' : '未稼働'}
             </span>
@@ -129,11 +142,59 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
           {hedge.active && (
             <div className="hedge-details">
               <div className="hedge-detail-row">
-                <span>サイズ</span>
+                <span>ショートサイズ</span>
                 <strong>${hedge.size.toFixed(2)}</strong>
               </div>
+              
+              {/* 証拠金ヘルスバー */}
+              {hedge.marginBalance > 0 && (
+                <div style={{ marginTop: '24px', paddingTop: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <Shield size={12} /> Bluefin 証拠金ヘルス
+                    </span>
+                    <span style={{ 
+                      fontSize: '0.75rem', 
+                      fontWeight: 600, 
+                      color: marginRatio > 60 ? 'var(--success)' : marginRatio > 45 ? 'var(--warning)' : 'var(--danger)'
+                    }}>
+                      {marginRatio.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div style={{ 
+                    height: '8px', 
+                    background: 'rgba(255, 255, 255, 0.05)', 
+                    borderRadius: '10px', 
+                    overflow: 'hidden',
+                    position: 'relative'
+                  }}>
+                    <div style={{ 
+                      width: `${Math.min(100, marginRatio)}%`, 
+                      height: '100%', 
+                      background: `linear-gradient(90deg, ${marginRatio > 45 ? '#2ed573' : '#ff4757'} 0%, #58a6ff 100%)`,
+                      boxShadow: '0 0 10px rgba(88, 166, 255, 0.3)',
+                      transition: 'width 1s ease-in-out'
+                    }} />
+                    {/* 維持証拠金（40%）のしきい値ライン */}
+                    <div style={{
+                      position: 'absolute',
+                      left: '40%',
+                      top: 0,
+                      bottom: 0,
+                      width: '2px',
+                      background: 'rgba(248, 81, 73, 0.5)',
+                      zIndex: 1
+                    }} title="維持証拠金しきい値 (40%)" />
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '6px' }}>
+                    <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>維持しきい値: 40%</span>
+                    <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>目標: 50%+</span>
+                  </div>
+                </div>
+              )}
+
               <div className="hedge-detail-row">
-                <span>エントリー</span>
+                <span>エントリー価格</span>
                 <strong>${hedge.entryPrice.toFixed(4)}</strong>
               </div>
               <div className="hedge-detail-row">

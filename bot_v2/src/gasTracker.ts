@@ -91,8 +91,27 @@ export class GasTracker {
   /**
    * 直近N件のガス代合計 (USDC)
    */
-  getRecentGasUsdc(n: number = 10): number {
-    const recent = this.gasHistory.slice(-n);
-    return recent.reduce((sum, entry) => sum + entry.gasUsdc, 0);
+  /**
+   * セッション間で状態を復元するためのシリアライズ
+   */
+  serialize() {
+    return {
+      totalGasSui: this.totalGasSui,
+      totalGasUsdc: this.totalGasUsdc,
+      txCount: this.txCount,
+      gasHistory: this.gasHistory,
+    };
+  }
+
+  /**
+   * シリアライズされた状態から復元
+   */
+  restore(data: any) {
+    if (!data) return;
+    this.totalGasSui = data.totalGasSui || 0;
+    this.totalGasUsdc = data.totalGasUsdc || 0;
+    this.txCount = data.txCount || 0;
+    this.gasHistory = data.gasHistory || [];
+    Logger.info(`⛽ ガス代: 前回データ復元 - 累積: $${this.totalGasUsdc.toFixed(4)} (${this.txCount} TX)`);
   }
 }

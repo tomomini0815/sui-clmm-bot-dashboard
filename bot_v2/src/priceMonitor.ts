@@ -183,7 +183,7 @@ export class PriceMonitor {
       }
 
       this.priceHistory.push({ time: timeStr, price: Number(price.toFixed(4)) });
-      if (this.priceHistory.length > 60) {
+      if (this.priceHistory.length > 120) { // 履歴保持を120件に拡張
         this.priceHistory.shift();
       }
 
@@ -193,6 +193,17 @@ export class PriceMonitor {
       const lastEntry = this.priceHistory[this.priceHistory.length - 1];
       return lastEntry ? lastEntry.price : 0;
     }
+  }
+
+  /**
+   * 履歴データから過去の推移を復元する
+   */
+  restoreHistory(prices: { time: string, price: number }[]) {
+    if (!prices || prices.length === 0) return;
+    
+    // 重複を避けつつ、最新の120件を保持
+    this.priceHistory = [...prices].slice(-120);
+    Logger.info(`📈 PriceMonitor: 価格履歴 ${this.priceHistory.length} 件を復元しました`);
   }
 
   isOutOfRange(currentPrice: number, lowerBound: number, upperBound: number): boolean {

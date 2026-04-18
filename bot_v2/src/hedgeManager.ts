@@ -67,6 +67,47 @@ export class HedgeManager {
   }
 
   /**
+   * Bluefin上の実ポジションと内部状態を同期する
+   */
+  async syncPositionWithBluefin(): Promise<boolean> {
+    if (this.mode === 'simulate' || !this.bluefinClient) return this.hasPosition;
+
+    try {
+      const details = await this.bluefinClient.accountDataApi.getAccountDetails();
+      const positions = (details as any).positionDetails || [];
+      const suiPos = positions.find((p: any) => p.symbol === 'SUI-PERP');
+
+      if (suiPos) {
+        // ポジションが存在する場合
+        const quantity = Math.abs(new BigNumber(suiPos.quantity).dividedBy(1e18).toNumber());
+        const entryPrice = new BigNumber(suiPos.entryPrice).dividedBy(1e18).toNumber();
+        
+        if (quantity > 0) {
+          this.hasPosition = true;
+          this.entryPrice = entryPrice;
+          this.currentAmount = quantity * entryPrice;
+          this.lastMarginBalance = new BigNumber((details as any).totalMarginBalance || 0).dividedBy(1e6).toNumber();
+          
+          Logger.info(`📊 Bluefin: 実ポジションを同期しました (Size: ${quantity.toFixed(2)} SUI, Entry: $${this.entryPrice.toFixed(4)})`);
+          return true;
+        }
+      }
+      
+      // ポジションがない場合
+      if (this.hasPosition) {
+        Logger.warn('📊 Bluefin: 内部では「ヘッジあり」ですが、実ポジションが見つかりません。フラグをオフにします。');
+      }
+      this.hasPosition = false;
+      this.currentAmount = 0;
+      this.entryPrice = 0;
+      return false;
+    } catch (e: any) {
+      Logger.error(`❌ Bluefin: ポジション同期失敗: ${e.message}`);
+      return this.hasPosition;
+    }
+  }
+
+  /**
    * Bluefin サブアカウントに証拠金を入金する
    */
   async depositMargin(amountUsdc: number): Promise<{ digest: string }> {
@@ -123,17 +164,21 @@ export class HedgeManager {
         // 50%デルタヘッジ用に数量を計算 (amountUsdc / currentPrice)
         const quantity = amountUsdc / currentPrice;
         
-        // 数量の単位調整 (SDKの仕様に合わせる e.g. 1e9)
-        const quantityRaw = new BigNumber(quantity).times(1e9).integerValue().toString();
+        // --- 修正: Bluefin SDK は数量と価格の両方を 18桁 (1e18) で期待します ---
+        const quantityRaw = new BigNumber(quantity).times(1e18).integerValue().toString();
+        
+        // 成行注文でも「最悪の約定価格」を指定する必要があります (ショートなら現在価格の -10%)
+        const slippagePrice = currentPrice * 0.9; 
+        const priceRaw = new BigNumber(slippagePrice).times(1e18).integerValue().toString();
 
-        Logger.info(`Bluefin: Placing Market SHORT order for ${quantity.toFixed(4)} SUI ($${amountUsdc.toFixed(2)})`);
+        Logger.info(`Bluefin: Placing Market SHORT order for ${quantity.toFixed(4)} SUI ($${amountUsdc.toFixed(2)}) at limit price $${slippagePrice.toFixed(4)}`);
         
         const response = await (this.bluefinClient as any).tradeApi.postCreateOrder({
           symbol: market,
           side: OrderSide.Short,
           type: OrderType.Market,
           quantity: quantityRaw,
-          price: '0',
+          price: priceRaw,
           timeInForce: OrderTimeInForce.Ioc,
           clientOrderId: Date.now().toString(),
         });
@@ -173,13 +218,18 @@ export class HedgeManager {
         if (suiPos) {
           const qty = suiPos.quantity; 
           
-          Logger.info(`Bluefin: Closing position with opposite order (BUY)...`);
+          // 決済用成行買い注文 (ロング)
+          // 現在価格の +10% をスリッページ許容価格とする
+          const slippagePrice = currentPrice * 1.1;
+          const priceRaw = new BigNumber(slippagePrice).times(1e18).integerValue().toString();
+
+          Logger.info(`Bluefin: Closing position with opposite order (BUY) at limit $${slippagePrice.toFixed(4)}...`);
           const response = await (this.bluefinClient as any).tradeApi.postCreateOrder({
             symbol: 'SUI-PERP',
             side: OrderSide.Long,
             type: OrderType.Market,
-            quantity: qty,
-            price: '0',
+            quantity: qty, // ポジション数量は既に 1e18 スケールの文字列のはず
+            price: priceRaw,
             timeInForce: OrderTimeInForce.Ioc,
             clientOrderId: Date.now().toString(),
           });
