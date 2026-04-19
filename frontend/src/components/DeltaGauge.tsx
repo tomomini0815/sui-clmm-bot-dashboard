@@ -85,7 +85,7 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
   };
 
   // 証拠金ヘルスの計算
-  const marginRatio = hedge?.active && hedge.marginBalance > 0 
+  const marginHealth = hedge?.active && hedge.marginBalance > 0 
     ? Math.min(100, (hedge.marginBalance / (hedge.maintenanceMargin || 1)) * 100) 
     : 0;
 
