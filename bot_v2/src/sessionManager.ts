@@ -57,7 +57,9 @@ export class SessionManager {
     let sessionMnemonic: string | undefined = mnemonic || undefined;
 
     // 【最優先】 .env にマスター秘密鍵が設定されている場合はそれを使用する (固定化)
-    if (globalConfig.privateKey && globalConfig.privateKey !== 'your_private_key_here') {
+    if (globalConfig.privateKey && 
+        globalConfig.privateKey !== 'your_private_key_here' && 
+        globalConfig.privateKey.length > 20) {
       try {
         const { secretKey } = (globalConfig.privateKey.startsWith('suiprivkey')) 
           ? decodeSuiPrivateKey(globalConfig.privateKey)

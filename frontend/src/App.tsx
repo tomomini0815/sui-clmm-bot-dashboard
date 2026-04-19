@@ -12,11 +12,10 @@ import { DeltaGauge } from './components/DeltaGauge';
 import { BotWalletCard } from './components/BotWalletCard';
 import { StrategyVisualizer } from './components/StrategyVisualizer';
 import { HedgePerfChart } from './components/HedgePerfChart';
-import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
+import { useCurrentAccount } from '@mysten/dapp-kit';
 
 function App() {
   const currentAccount = useCurrentAccount();
-  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
   
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -82,7 +81,7 @@ function App() {
     totalRebalances: 0,
     activityLogs: [] as any[],
     currentRange: { lower: 0, upper: 0 },
-    config: { lpAmountUsdc: 0.10, rangeWidth: 0.05, hedgeRatio: 0.5, configMode: 'auto' },
+    config: { lpAmountUsdc: 0.10, rangeWidth: 0.05, hedgeRatio: 0.5, configMode: 'auto' as 'auto' | 'manual', totalOperationalCapitalUsdc: 0.10 },
     currentPrice: 0,
     entryPrice: 0,
     positionSize: 0,
@@ -98,6 +97,7 @@ function App() {
     hedge: null as any,
     indicators: null as any,
     currentPhase: '',
+    network: 'mainnet',
   });
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
@@ -157,6 +157,8 @@ function App() {
           console.warn('Session expired or not found. Resetting...');
           setSessionId('');
           localStorage.removeItem('session_id');
+          localStorage.removeItem('wizard_completed');
+          setIsWizardOpen(true);
         }
       } catch (e) {
         console.warn('Real-time stats sync failed');
@@ -198,7 +200,7 @@ function App() {
           lpAmountUsdc: newAmount,
           rangeWidth: (stats.config.rangeWidth * 100).toString(),
           hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
-          configMode: stats.config.configMode || 'auto'
+          configMode: (stats.config.configMode || 'auto') as 'auto' | 'manual'
         }),
       });
       const data = await response.json();

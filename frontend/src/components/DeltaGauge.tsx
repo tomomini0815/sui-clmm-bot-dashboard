@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, AlertTriangle, Activity } from 'lucide-react';
+import { Shield, Activity } from 'lucide-react';
 
 interface DeltaData {
   current: number;
@@ -85,15 +85,9 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
   };
 
   // 証拠金ヘルスの計算
-  const marginHealth = hedge?.active && hedge.marginBalance > 0 
+  const marginRatio = hedge?.active && hedge.marginBalance > 0 
     ? Math.min(100, (hedge.marginBalance / (hedge.maintenanceMargin || 1)) * 100) 
     : 0;
-  
-  const getMarginHealthColor = (health: number) => {
-    if (health > 120) return 'var(--success)';
-    if (health > 105) return '#f59e0b';
-    return 'var(--danger)';
-  };
 
   return (
     <div className="glass-panel delta-gauge">

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Wallet, ArrowRight, Copy, Check, Info, Coins, Send } from 'lucide-react';
+import { Wallet, Copy, Check, Info, Send } from 'lucide-react';
 import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 
@@ -60,7 +60,6 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBal
   };
 
   const needsSui = suiBalance < 0.05;
-  const needsUsdc = usdcBalance < 0.01;
 
   return (
     <div className="card-premium" style={{ marginBottom: '24px' }}>

@@ -20,12 +20,18 @@ import { Tracker } from './tracker.js';
 import { config, reloadConfig, updateConfigReference, BotConfig } from './config.js';
 import { SessionManager } from './sessionManager.js';
 
-// ES Module dir resolution
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.resolve(__dirname, '../public');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Serve static frontend files
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  Logger.info(`Serving dashboard from ${publicDir}`);
+}
 
 /**
  * セッション固有の設定を更新し、コンポーネントに反映

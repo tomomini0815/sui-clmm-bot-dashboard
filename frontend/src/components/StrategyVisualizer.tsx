@@ -1,5 +1,5 @@
 import React from 'react';
-import { PieChart, Layers, Info } from 'lucide-react';
+import { Layers, Info } from 'lucide-react';
 
 interface StrategyVisualizerProps {
   totalCapital: number;
