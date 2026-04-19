@@ -94,8 +94,10 @@ async function bootstrap() {
       Logger.info(`ℹ Auto-resuming most relevant session: ${sessionId} (Running: ${latest.isRunning}, Tracker: ${latest.trackerSize} bytes)`);
       
       const session = await SessionManager.createSession(sessionId);
+      const actualSessionId = session.sessionId; // 確定後のIDを取得
+
       if (session.strategy.isRunning) {
-        Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${sessionId}`);
+        Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${actualSessionId}`);
         session.strategy.isRunning = false;
         await session.strategy.start();
       }
@@ -186,6 +188,21 @@ app.post('/api/session', async (req, res) => {
     Logger.error('Failed to create session', e);
     res.status(500).json({ success: false, error: e.message });
   }
+});
+
+// 現在アクティブな全セッションを一覧表示 (デバッグ用)
+app.get('/api/sessions/active', (req, res) => {
+  const stats = SessionManager.getAllSessionsStats();
+  res.json({
+    success: true,
+    count: stats.length,
+    sessions: stats.map(s => ({
+      sessionId: s.sessionId,
+      botWalletAddress: s.botWalletAddress,
+      userWalletAddress: s.userWalletAddress,
+      isRunning: s.isRunning
+    }))
+  });
 });
 
 // セッション情報取得

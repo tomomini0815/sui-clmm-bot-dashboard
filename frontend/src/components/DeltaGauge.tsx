@@ -156,9 +156,9 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
                     <span style={{ 
                       fontSize: '0.75rem', 
                       fontWeight: 600, 
-                      color: marginRatio > 60 ? 'var(--success)' : marginRatio > 45 ? 'var(--warning)' : 'var(--danger)'
+                      color: marginHealth > 60 ? 'var(--success)' : marginHealth > 45 ? 'var(--warning)' : 'var(--danger)'
                     }}>
-                      {marginRatio.toFixed(1)}%
+                      {marginHealth.toFixed(1)}%
                     </span>
                   </div>
                   <div style={{ 
@@ -169,9 +169,9 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
                     position: 'relative'
                   }}>
                     <div style={{ 
-                      width: `${Math.min(100, marginRatio)}%`, 
+                      width: `${Math.min(100, marginHealth)}%`, 
                       height: '100%', 
-                      background: `linear-gradient(90deg, ${marginRatio > 45 ? '#2ed573' : '#ff4757'} 0%, #58a6ff 100%)`,
+                      background: `linear-gradient(90deg, ${marginHealth > 45 ? '#2ed573' : '#ff4757'} 0%, #58a6ff 100%)`,
                       boxShadow: '0 0 10px rgba(88, 166, 255, 0.3)',
                       transition: 'width 1s ease-in-out'
                     }} />
