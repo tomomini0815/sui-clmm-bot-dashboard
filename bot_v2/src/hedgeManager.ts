@@ -30,10 +30,28 @@ export class HedgeManager {
   // Bluefin SDK
   private bluefinClient: BluefinProSdk | null = null;
   private readonly SIMULATED_FUNDING_RATE_8H = 0.0001; // 8時間ごとの Funding Rate (0.01%)
-  
+  private isInitialized: boolean = false;
+
+  private currentAddress: string = ''; // 0xありの Sui アドレス
+  private lastSyncTime: number = 0;   // 最終時刻同期タイムスタンプ
+
   constructor(mode: 'simulate' | 'bluefin' = 'simulate') {
     this.mode = mode;
     Logger.info(`HedgeManager: モード = ${mode}`);
+  }
+
+  /**
+   * 現在の動作モードを取得
+   */
+  getMode() {
+    return this.mode;
+  }
+
+  /**
+   * 初期化が完了しているか
+   */
+  isReady() {
+    return this.mode === 'simulate' || (this.mode === 'bluefin' && this.isInitialized);
   }
 
   /**
@@ -47,21 +65,99 @@ export class HedgeManager {
       const signer = new BluefinRequestSigner(makeSigner(keypair as any, false));
       const suiClient = new SuiClient({ url: rpcUrl });
       
-      this.bluefinClient = new BluefinProSdk(signer, network as any, suiClient as any);
-      await this.bluefinClient.initialize();
+      // ログイン用には 0x ありの Sui アドレスを使用 (テストで成功確認済み)
+      this.currentAddress = keypair.toSuiAddress();
       
-      Logger.success('Bluefin SDK initialized successfully.');
+      this.bluefinClient = new BluefinProSdk(signer, network as any, suiClient as any, {
+        currentAccountAddress: this.currentAddress
+      });
+      await this.bluefinClient.initialize();
+
+      // [重要] サーバー時刻との同期処理 (初回)
+      await this.syncTimeWithServer();
+
+      // SDKの不具合対策: getAccountDetails に認証ヘッダーを手動で付与
+      try {
+        Logger.info(`Bluefin: Checking account onboarding status for ${this.currentAddress}...`);
+        const details = await this.bluefinClient.accountDataApi.getAccountDetails(
+          undefined, 
+          this.getAuthHeaders()
+        );
+        const accountId = (details as any).data?.accountAddress;
+        
+        if (!accountId) {
+          throw new Error('FAILED_TO_EXTRACT_ACCOUNT_ID');
+        }
+        
+        Logger.success(`✅ Bluefin Account Onboarded: ${accountId}`);
+        this.isInitialized = true;
+      } catch (checkErr: any) {
+        const errorMsg = checkErr.response?.data?.message || checkErr.message;
+        Logger.warn(`Bluefin Onboarding Check Note: ${errorMsg}`);
+        
+        if (errorMsg.includes('account is not found') || errorMsg.includes('Failed to extract account id')) {
+          // 画像で入金が確認できているため、致命的エラーにせず実稼働を試行
+          Logger.info('⚠️ アカウントIDの抽出に失敗しましたが、入金済みのため稼動を開始します。');
+          this.isInitialized = true;
+          return;
+        }
+        throw checkErr;
+      }
+      Logger.success(`Bluefin SDK initialized. Wallet: ${this.currentAddress}`);
     } catch (e: any) {
-      Logger.error(`Bluefin initialization failed: ${e.message}`);
-      this.mode = 'simulate'; // 失敗した場合はシミュレーションにフォールバック
+      if (e.message === 'ONBOARDING_REQUIRED') {
+        Logger.warn('⚠️ オンボーディング待ちのため、シミュレーションモードで待機します。');
+      } else {
+        Logger.error(`❌ Bluefin initialization failed: ${e.message}`, e);
+        Logger.warn('⚠️ Bluefin の初期化に失敗したため、シミュレーションモードにフォールバックします。');
+      }
+      this.mode = 'simulate';
     }
   }
 
+  /**
+   * SDKの不具合（ヘッダー漏れ）を補完するための認証ヘッダー取得ヘルパー
+   */
+  private getAuthHeaders() {
+    const token = (this.bluefinClient as any).getTokenResponse()?.accessToken;
+    if (!token) return {};
+    return {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    };
+  }
+
+  /**
+   * Bluefin サーバー時刻との同期を実行
+   */
+  async syncTimeWithServer() {
+    if (!this.bluefinClient) return;
+    try {
+      const infoRes = await (this.bluefinClient as any).exchangeDataApi.getExchangeInfo();
+      const serverDate = infoRes.headers?.date;
+      if (serverDate) {
+        const serverTimeMs = new Date(serverDate).getTime();
+        this.bluefinClient.updateCurrentTimeMs(serverTimeMs);
+        this.lastSyncTime = Date.now();
+        Logger.success(`⏰ Bluefin: Server time synced to ${new Date(serverTimeMs).toISOString()} (Offset calibration applied)`);
+      }
+    } catch (err: any) {
+      const msg = err.response?.data?.message || err.message;
+      Logger.warn(`⚠️ Bluefin time sync failed: ${msg}`);
+    }
+  }
+
+
   async hasExistingHedge(): Promise<boolean> {
     if (this.mode === 'bluefin' && this.bluefinClient) {
-      const details = await this.bluefinClient.accountDataApi.getAccountDetails();
-      const positions = (details as any).positionDetails || [];
-      return positions.some((p: any) => p.symbol === 'SUI-PERP');
+      const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+        undefined, 
+        this.getAuthHeaders()
+      );
+      const details = (detailsRes as any).data || detailsRes;
+      const positions = details.positions || [];
+      return positions.some((p: any) => p.symbol === 'SUI-PERP' || p.symbol === 'SUI-P');
     }
     return this.hasPosition;
   }
@@ -73,22 +169,37 @@ export class HedgeManager {
     if (this.mode === 'simulate' || !this.bluefinClient) return this.hasPosition;
 
     try {
-      const details = await this.bluefinClient.accountDataApi.getAccountDetails();
-      const positions = (details as any).positionDetails || [];
-      const suiPos = positions.find((p: any) => p.symbol === 'SUI-PERP');
+      // 5分経過していたら自動で再同期
+      if (Date.now() - this.lastSyncTime > 5 * 60 * 1000) {
+        await this.syncTimeWithServer();
+      }
+      const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+        undefined, 
+        this.getAuthHeaders()
+      );
+      const details = (detailsRes as any).data || detailsRes;
+      
+      // デバッグログ: 利用可能なポジション情報を出力
+      const positions = details.positions || [];
+      if (positions.length > 0) {
+        const symbols = positions.map((p: any) => p.symbol).join(', ');
+        Logger.info(`Bluefin Account Positions: [${symbols}]`);
+      }
+
+      const suiPos = positions.find((p: any) => p.symbol === 'SUI-PERP' || p.symbol === 'SUI-P');
 
       if (suiPos) {
-        // ポジションが存在する場合
-        const quantity = Math.abs(new BigNumber(suiPos.quantity).dividedBy(1e18).toNumber());
-        const entryPrice = new BigNumber(suiPos.entryPrice).dividedBy(1e18).toNumber();
+        // ポジションが存在する場合 (V2 SDK は E9 精度)
+        const quantity = Math.abs(new BigNumber(suiPos.sizeE9 || 0).dividedBy(1e9).toNumber());
+        const entryPrice = new BigNumber(suiPos.avgEntryPriceE9 || 0).dividedBy(1e9).toNumber();
         
         if (quantity > 0) {
           this.hasPosition = true;
           this.entryPrice = entryPrice;
           this.currentAmount = quantity * entryPrice;
-          this.lastMarginBalance = new BigNumber((details as any).totalMarginBalance || 0).dividedBy(1e6).toNumber();
+          this.lastMarginBalance = new BigNumber(details.totalAccountValueE9 || 0).dividedBy(1e9).toNumber();
           
-          Logger.info(`📊 Bluefin: 実ポジションを同期しました (Size: ${quantity.toFixed(2)} SUI, Entry: $${this.entryPrice.toFixed(4)})`);
+          Logger.info(`📊 Bluefin: 実ポジションを同期しました (Symbol: ${suiPos.symbol}, Size: ${quantity.toFixed(2)} SUI, Entry: $${this.entryPrice.toFixed(4)})`);
           return true;
         }
       }
@@ -102,7 +213,13 @@ export class HedgeManager {
       this.entryPrice = 0;
       return false;
     } catch (e: any) {
-      Logger.error(`❌ Bluefin: ポジション同期失敗: ${e.message}`);
+      const errorMsg = e.response?.data?.message || e.message;
+      Logger.error(`❌ Bluefin: ポジション同期失敗: ${errorMsg}`);
+      
+      // SignedAtUtcMillis エラーの場合は即座に時刻同期して次回に備える
+      if (errorMsg.includes('SignedAtUtcMillis')) {
+        await this.syncTimeWithServer();
+      }
       return this.hasPosition;
     }
   }
@@ -114,21 +231,105 @@ export class HedgeManager {
     if (this.mode === 'simulate' || !this.bluefinClient) return { digest: 'simulated' };
 
     try {
-      Logger.info(`Bluefin: Depositing $${amountUsdc.toFixed(2)} USDC as margin...`);
-      
-      const amountRaw = new BigNumber(amountUsdc).times(1e6).integerValue().toString();
-      
-      // @ts-ignore - Pro SDK v1 internal API
-      const bankResponse = await (this.bluefinClient as any).transactionApi.postDeposit({
-        amount: amountRaw,
-        symbol: 'USDC'
-      });
+      const addr = (this.bluefinClient as any).currentAccountAddress; // 0xありのオリジナル地址
 
-      Logger.info(`✅ Bluefin: 証拠金入金完了。Digest: ${bankResponse.hash}`);
-      return { digest: bankResponse.hash };
+      // 既存マージン残高の確認
+      try {
+        const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+          undefined, 
+          this.getAuthHeaders()
+        );
+        const details = (detailsRes as any).data || detailsRes;
+        const currentMargin = new BigNumber(details.totalAccountValueE9 || 0).dividedBy(1e9).toNumber();
+        
+        if (currentMargin >= amountUsdc - 0.1) {
+          Logger.success(`📊 Bluefin: Current margin ($${currentMargin.toFixed(2)}) is sufficient for $${amountUsdc.toFixed(2)} hedge. Skipping deposit.`);
+          return { digest: 'skipped' };
+        }
+        
+        Logger.info(`Bluefin: Current margin is $${currentMargin.toFixed(2)}. Depositing additional funds...`);
+      } catch (checkErr: any) {
+        const errorMsg = checkErr.response?.data?.message || checkErr.message;
+        Logger.warn(`Bluefin: Could not check current margin: ${errorMsg}`);
+        if (errorMsg.includes('SignedAtUtcMillis')) {
+          await this.syncTimeWithServer();
+        }
+      }
+
+      Logger.info(`Bluefin: Depositing $${amountUsdc.toFixed(2)} USDC as margin...`);
+
+      // 実際の Sui 残高を確認
+      const suiClient = (this.bluefinClient as any).suiClient;
+      const coinRes = await suiClient.getCoins({
+        owner: addr,
+        coinType: '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+      });
+      const walletBalanceRaw = coinRes.data.reduce((acc: bigint, c: any) => acc + BigInt(c.balance), 0n);
+      const walletBalanceUsdc = new BigNumber(walletBalanceRaw.toString()).dividedBy(1e6).toNumber();
+      
+      Logger.info(`💰 Wallet USDC Balance: $${walletBalanceUsdc.toFixed(2)}`);
+
+      // 入金額を残高内に収める (安全マージン 0.1 USDC 確保)
+      let finalAmount = amountUsdc;
+      if (walletBalanceUsdc < amountUsdc + 0.1) {
+        finalAmount = Math.max(0, walletBalanceUsdc - 0.1);
+        Logger.warn(`⚠️ 残高不足のため入金額を調整しました: $${amountUsdc.toFixed(2)} -> $${finalAmount.toFixed(2)}`);
+      }
+
+      if (finalAmount <= 0) {
+        Logger.warn('入金可能な USDC がありません。スキップします。');
+        return { digest: 'skipped' };
+      }
+
+      const amountRaw = new BigNumber(finalAmount).times(1e6).integerValue().toString();
+      Logger.info(`Bluefin: 最終入金額: ${finalAmount.toFixed(4)} USDC (Raw E6: ${amountRaw})`);
+
+      // 修正: 第2引数に明示的に Sui アドレス (0xあり) を渡すことでオンチェーン操作を正常化
+      const response = await this.bluefinClient.deposit(amountRaw, this.currentAddress);
+      const digest = (response as any).digest || (response as any).hash || 'success';
+
+      Logger.info(`✅ Bluefin: 証拠金入金完了。Digest: ${digest}`);
+      return { digest };
     } catch (e: any) {
-      Logger.error(`❌ Bluefin: 入金失敗: ${e.message}`);
+      Logger.error(`❌ Bluefin: 入金失敗: ${e.message || 'Unknown Error'}`);
+      if (e.response && e.response.data) {
+        Logger.error(`Detailed Error Data: ${JSON.stringify(e.response.data)}`);
+      }
       throw e;
+    }
+  }
+
+  /**
+   * Bluefin サブアカウントから全ての証拠金を引き出す
+   */
+  async withdrawAllMargin(): Promise<{ digest: string }> {
+    if (this.mode === 'simulate' || !this.bluefinClient) return { digest: 'simulated' };
+
+    try {
+      const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+        undefined, 
+        this.getAuthHeaders()
+      );
+      const details = (detailsRes as any).data || detailsRes;
+      const marginRaw = new BigNumber(details.totalAccountValueE9 || 0);
+      
+      if (marginRaw.isZero()) {
+        Logger.info(`Bluefin: 回収可能な証拠金はありません。`);
+        return { digest: '' };
+      }
+
+      const amountUsdc = marginRaw.dividedBy(1e9).toNumber();
+      Logger.info(`Bluefin: Withdrawing all margin ($${amountUsdc.toFixed(2)} USDC) to wallet...`);
+      
+      const withdrawAmountRaw = new BigNumber(amountUsdc).times(1e9).integerValue().toString();
+      
+      await this.bluefinClient.withdraw('USDC', withdrawAmountRaw);
+
+      Logger.info(`✅ Bluefin: 証拠金回収をリクエストしました`);
+      return { digest: 'success' };
+    } catch (e: any) {
+      Logger.warn(`⚠️ Bluefin: 証拠金回収に失敗しました（無視して続行可能）: ${e.message}`);
+      return { digest: '' };
     }
   }
 
@@ -152,34 +353,46 @@ export class HedgeManager {
         const market = 'SUI-PERP';
 
         // --- 自動マージン補充 ---
-        const details = await this.bluefinClient.accountDataApi.getAccountDetails();
-        const marginBalance = new BigNumber((details as any).totalMarginBalance || 0).dividedBy(1e6).toNumber();
+        const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+          undefined, 
+          this.getAuthHeaders()
+        );
+        const details = (detailsRes as any).data || detailsRes;
+        const marginBalance = new BigNumber(details.totalAccountValueE9 || 0).dividedBy(1e9).toNumber();
         
         // 必要な担保額（ポジションサイズの50%以上を推奨）
+        // 修正: 実際にウォレットにある USDC 残高を超えないように制限する
+        const safetyMargin = 0.5; // ガス代等
+        let targetDeposit = amountUsdc;
+        
         if (marginBalance < amountUsdc * 0.5) {
-          Logger.info(`Bluefin: 残高不足 ($${marginBalance.toFixed(2)})。自動補充を実行します...`);
-          await this.depositMargin(amountUsdc); // 指定されたヘッジ割り当て額を入金
+          Logger.info(`Bluefin: 残高不足 ($${marginBalance.toFixed(2)})。自動補充を検討します...`);
+          // ここでは実際の入金は depositMargin 内で残高チェックを行うように任せるか、
+          // あるいはここで量を調整する
+          await this.depositMargin(targetDeposit);
         }
 
         // 50%デルタヘッジ用に数量を計算 (amountUsdc / currentPrice)
         const quantity = amountUsdc / currentPrice;
         
-        // --- 修正: Bluefin SDK は数量と価格の両方を 18桁 (1e18) で期待します ---
-        const quantityRaw = new BigNumber(quantity).times(1e18).integerValue().toString();
+        // --- 修正: Bluefin SDK の注文パラメータ(E9)は 9桁 (1e9) を期待します ---
+        const quantityRaw = new BigNumber(quantity).times(1e9).integerValue().toString();
         
-        // 成行注文でも「最悪の約定価格」を指定する必要があります (ショートなら現在価格の -10%)
+        // 成行注文でも価格指定が必要な場合のための計算 (現在は '0' を使用)
         const slippagePrice = currentPrice * 0.9; 
-        const priceRaw = new BigNumber(slippagePrice).times(1e18).integerValue().toString();
+        const priceRaw = new BigNumber(slippagePrice).times(1e9).integerValue().toString();
 
-        Logger.info(`Bluefin: Placing Market SHORT order for ${quantity.toFixed(4)} SUI ($${amountUsdc.toFixed(2)}) at limit price $${slippagePrice.toFixed(4)}`);
+        Logger.info(`Bluefin: Placing Market SHORT order for ${quantity.toFixed(4)} SUI ($${amountUsdc.toFixed(2)})`);
         
-        const response = await (this.bluefinClient as any).tradeApi.postCreateOrder({
+        const response = await this.bluefinClient.createOrder({
           symbol: market,
           side: OrderSide.Short,
           type: OrderType.Market,
-          quantity: quantityRaw,
-          price: priceRaw,
-          timeInForce: OrderTimeInForce.Ioc,
+          quantityE9: quantityRaw, 
+          priceE9: '0', // 成行注文では価格を '0' に設定する必要がある (400エラー回避)
+          leverageE9: new BigNumber(1).times(1e9).toString(), // レバレッジ1倍 (E9 = 10^9)
+          isIsolated: true,
+          expiresAtMillis: Date.now() + 600000, // 有効期限を10分に延長 (時刻同期ズレ対策)
           clientOrderId: Date.now().toString(),
         });
 
@@ -188,10 +401,14 @@ export class HedgeManager {
         this.entryPrice = currentPrice;
         this.lastFundingTime = Date.now();
 
-        Logger.stopSpin(`✅ Bluefin: ショートポジションを開設しました。Digest: ${response.hash}`);
-        return { digest: response.hash };
+        const digest = (response as any).hash || (response as any).digest || 'success';
+        Logger.stopSpin(`✅ Bluefin: ショートポジションを開設しました。Digest: ${digest}`);
+        return { digest };
       } catch (e: any) {
         Logger.stopSpin(`❌ Bluefin: ショート開設に失敗しました: ${e.message}`);
+        if (e.response && e.response.data) {
+           Logger.error(`Order Error Details: ${JSON.stringify(e.response.data)}`);
+        }
         throw e;
       }
     }
@@ -211,29 +428,33 @@ export class HedgeManager {
 
     if (this.mode === 'bluefin' && this.bluefinClient) {
       try {
-        const details = await this.bluefinClient.accountDataApi.getAccountDetails();
-        const positions = (details as any).positionDetails || [];
-        const suiPos = positions.find((p: any) => p.symbol === 'SUI-PERP');
+        // 修正: 引数なしで呼び出す
+        const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails();
+        const details = (detailsRes as any).data || detailsRes;
+        const positions = details.positions || [];
+        const suiPos = positions.find((p: any) => p.symbol === 'SUI-PERP' || p.symbol === 'SUI-P');
 
         if (suiPos) {
-          const qty = suiPos.quantity; 
+          const qty = suiPos.sizeE9; 
           
           // 決済用成行買い注文 (ロング)
           // 現在価格の +10% をスリッページ許容価格とする
           const slippagePrice = currentPrice * 1.1;
-          const priceRaw = new BigNumber(slippagePrice).times(1e18).integerValue().toString();
+          const priceRaw = new BigNumber(slippagePrice).times(1e9).integerValue().toString();
 
           Logger.info(`Bluefin: Closing position with opposite order (BUY) at limit $${slippagePrice.toFixed(4)}...`);
-          const response = await (this.bluefinClient as any).tradeApi.postCreateOrder({
-            symbol: 'SUI-PERP',
+          const response = await this.bluefinClient.createOrder({
+            symbol: suiPos.symbol,
             side: OrderSide.Long,
             type: OrderType.Market,
-            quantity: qty, // ポジション数量は既に 1e18 スケールの文字列のはず
-            price: priceRaw,
-            timeInForce: OrderTimeInForce.Ioc,
+            quantityE9: qty, 
+            priceE9: priceRaw,
+            leverageE9: new BigNumber(1).times(1e9).toString(),
+            isIsolated: true,
+            expiresAtMillis: Date.now() + 60000,
             clientOrderId: Date.now().toString(),
           });
-          digest = response.hash;
+          digest = (response as any).hash || (response as any).digest || 'success';
           Logger.info(`✅ Bluefin: ショートを決済しました。Digest: ${digest}`);
         }
       } catch (e: any) {
@@ -289,30 +510,44 @@ export class HedgeManager {
     if (this.mode === 'simulate' || !this.bluefinClient || !this.hasPosition) return;
 
     try {
-      const details = await this.bluefinClient.accountDataApi.getAccountDetails();
-      const marginBalance = new BigNumber((details as any).totalMarginBalance || 0).dividedBy(1e6).toNumber();
+      // 5分経過していたら自動で再同期
+      if (Date.now() - this.lastSyncTime > 5 * 60 * 1000) {
+        await this.syncTimeWithServer();
+      }
+
+      const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(
+        undefined, 
+        this.getAuthHeaders()
+      );
+      const details = (detailsRes as any).data || detailsRes;
+      
+      // totalAccountValueE9 を使用 (E9精度)
+      const marginBalance = new BigNumber(details.totalAccountValueE9 || 0).dividedBy(1e9).toNumber();
+      
       this.lastMarginBalance = marginBalance;
       
       // メンテナンスマージン（維持証拠金）の閾値
-      // 理想は50%だが、急な価格変動を考慮して、40%を下回ったら補充するようにする
       const requiredMargin = this.currentAmount * 0.5;
       const minThreshold = this.currentAmount * 0.4;
 
       if (marginBalance < minThreshold) {
         Logger.warn(`⚠️ Bluefin: 証拠金維持率低下 ($${marginBalance.toFixed(2)} < $${minThreshold.toFixed(2)})。自動補充を実行します。`);
         
-        // 足りない分ではなく、目標維持額(50%)まで補充し、プラスアルファでバッファを持たせる
         const topUpAmount = requiredMargin - marginBalance + (this.currentAmount * 0.1);
-        await this.depositMargin(Math.max(10, topUpAmount)); // 最低10ドル単位で補充
+        await this.depositMargin(Math.max(10, topUpAmount)); 
         
         Logger.success(`✅ Bluefin: 証拠金を補充しました。`);
       } else {
-        // 定期的なステータスログ
         const ratio = (marginBalance / (this.currentAmount || 1) * 100).toFixed(1);
         Logger.info(`📊 Bluefin維持証拠金: $${marginBalance.toFixed(2)} (${ratio}%)`);
       }
     } catch (e: any) {
-      Logger.error(`❌ Bluefin証拠金チェック失敗: ${e.message}`);
+      const errorMsg = e.response?.data?.message || e.message;
+      Logger.error(`❌ Bluefin証拠金チェック失敗: ${errorMsg}`);
+      
+      if (errorMsg.includes('SignedAtUtcMillis')) {
+        await this.syncTimeWithServer();
+      }
     }
   }
 

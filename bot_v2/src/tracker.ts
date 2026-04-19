@@ -38,6 +38,8 @@ export class Tracker {
   };
 
   private filePath: string;
+  private lastSaveTime: number = 0;
+  private readonly SAVE_INTERVAL_MS = 60 * 1000; // 1分ごとに保存
 
   constructor(private sessionId: string) {
     this.filePath = path.resolve(process.cwd(), `tracker_${this.sessionId}.json`);
@@ -160,6 +162,23 @@ export class Tracker {
     await this.save();
   }
 
+  /**
+   * 価格とPnLの定期的更新（1分以上の間隔で自動保存）
+   */
+  async update(price: number, pnl: number) {
+    this.data.currentPrice = price;
+    this.data.pnlTotal = pnl; // ストラテジーから渡された最新の純利益（LP + ヘッジ + 手数料）を反映
+    
+    const now = Date.now();
+    if (now - this.lastSaveTime > this.SAVE_INTERVAL_MS) {
+      await this.save();
+      this.lastSaveTime = now;
+    }
+  }
+
+  /**
+   * @deprecated update(price, pnl) を使用してください
+   */
   updateCurrentPrice(price: number) {
     this.data.currentPrice = price;
   }
@@ -202,5 +221,25 @@ export class Tracker {
         txDigest: h.txDigest
       }))
     };
+  }
+
+  /**
+   * データのシリアライズ（保存用）
+   */
+  serialize(): TrackerData {
+    return { ...this.data };
+  }
+
+  /**
+   * データの復元
+   */
+  restore(data: any): void {
+    if (!data) return;
+    this.data = {
+      ...this.data,
+      ...data,
+      history: data.history || this.data.history
+    };
+    Logger.info(`Tracker data restored (Rebalances: ${this.data.rebalanceCount})`);
   }
 }

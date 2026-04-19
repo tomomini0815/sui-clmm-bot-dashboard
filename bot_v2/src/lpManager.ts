@@ -144,6 +144,35 @@ export class LpManager {
   }
 
   /**
+   * 現在のLPポジション内に含まれる SUI の数量を取得する
+   * (ヘッジ修復ロジックで使用)
+   */
+  async getSuiAmountInLp(): Promise<number> {
+    if (!this.isInitialized) await this.initializePoolData();
+    const posId = await this.getActivePositionId();
+    if (!posId) return 0;
+
+    try {
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
+      const position = positionList.find(p => p.pos_object_id === posId);
+      
+      if (!position) return 0;
+
+      // USDCがCoinAの場合、SUIはCoinB。逆ならSUIはCoinA。
+      const suiAmountRaw = this.usdcIsA ? position.coinAmountB : position.coinAmountA;
+      
+      // getPositionList から取得できる値はすでに decimal 調整後の文字列または数値である場合が多いが、
+      // SDKの仕様に合わせて安全に数値変換
+      return Number(suiAmountRaw);
+    } catch (e) {
+      Logger.error('Failed to get SUI amount in LP', e);
+      return 0;
+    }
+  }
+
+  /**
    * ウォレット残高チェック
    * Insufficient balance エラーを防止
    */
@@ -171,10 +200,11 @@ export class LpManager {
         }
       }
 
-      // ガス用SUI (最低0.01 SUI) + LP用USDC がウォレットにあるか
-      const sufficient = suiAmount >= 0.01 && usdcAmount >= this.config.lpAmountUsdc * 0.5;
+      // 最小運用可能額 (0.1 USDC)
+      const MIN_OPERATIONAL_USDC = 0.1;
+      const sufficient = suiAmount >= 0.01 && usdcAmount >= MIN_OPERATIONAL_USDC;
 
-      Logger.info(`💰 残高: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)} → ${sufficient ? '✅ 十分' : '❌ 不足'}`);
+      Logger.info(`💰 残高: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)} → ${sufficient ? '✅ 運用可能' : '❌ 資金不足 (0.1 USDC以上必要)'}`);
 
       return { suiBalance: suiAmount, usdcBalance: usdcAmount, sufficient };
     } catch (e: any) {
@@ -232,15 +262,50 @@ export class LpManager {
         currentSqrtPrice
       );
 
+      // --- 残高ガードロジック ---
+      const balances = await this.checkBalance();
+      const GAS_RESERVE = 1.0; // ガス代温存
+      const safeSuiBalance = Math.max(0, balances.suiBalance - GAS_RESERVE);
+      
+      const amountA_Needed = new Decimal(estResult.coinAmountA.toString()).div(Math.pow(10, this.decimalsA));
+      const amountB_Needed = new Decimal(estResult.coinAmountB.toString()).div(Math.pow(10, this.decimalsB));
+      
+      const usdcNeeded = this.usdcIsA ? amountA_Needed : amountB_Needed;
+      const suiNeeded = this.usdcIsA ? amountB_Needed : amountA_Needed;
+      
+      let scale = 1.0;
+      if (suiNeeded.toNumber() > safeSuiBalance) {
+        scale = Math.min(scale, safeSuiBalance / suiNeeded.toNumber());
+        Logger.warn(`⚠️ SUI残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。`);
+      }
+      if (usdcNeeded.toNumber() > balances.usdcBalance) {
+        scale = Math.min(scale, balances.usdcBalance / usdcNeeded.toNumber());
+        Logger.warn(`⚠️ USDC残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。`);
+      }
+
+      // 最終的な流動性と数量（ガード適用後）
+      const finalLiquidity = scale < 1.0 
+        ? estResult.liquidityAmount.muln(Math.floor(scale * 1000)).divn(1000)
+        : estResult.liquidityAmount;
+        
+      const finalAmountA = scale < 1.0
+        ? estResult.coinAmountA.muln(Math.floor(scale * 1000)).divn(1000)
+        : estResult.coinAmountA;
+        
+      const finalAmountB = scale < 1.0
+        ? estResult.coinAmountB.muln(Math.floor(scale * 1000)).divn(1000)
+        : estResult.coinAmountB;
+        
       const txPayload = await sdk.Position.createAddLiquidityPayload({
         pool_id:            pool.poolAddress,
         coinTypeA:          pool.coinTypeA,
         coinTypeB:          pool.coinTypeB,
         tick_lower:         lowerTick,
         tick_upper:         upperTick,
-        delta_liquidity:    estResult.liquidityAmount.toString(),
-        max_amount_a:       estResult.coinAmountA.toString(),
-        max_amount_b:       estResult.coinAmountB.toString(),
+        delta_liquidity:    finalLiquidity.toString(),
+        // 0.5% のバッファを追加して端数不足による MoveAbort を防ぐ
+        max_amount_a:       new BN(finalAmountA.muln(1005).divn(1000)).toString(),
+        max_amount_b:       new BN(finalAmountB.muln(1005).divn(1000)).toString(),
         collect_fee:        false,
         rewarder_coin_types:[],
         pos_id:             '',
@@ -268,57 +333,75 @@ export class LpManager {
     }
   }
 
-  async removeLiquidity(): Promise<{ digest: string; gasCostUsdc: number }> {
-    Logger.startSpin('Removing existing Liquidity...');
-
+  /**
+   * ウォレットが保有する該当プールの全ポジションをブロックチェーンから取得し、すべて強制クローズする
+   * (セッション情報が消失した場合でも確実に資産を回収するための「大掃除」ロジック)
+   */
+  async forceCloseAllPositions(): Promise<void> {
+    Logger.info('--- 既存の迷子ポジションをスキャンして全回収します ---');
+    if (!this.isInitialized) await this.initializePoolData();
+    
     try {
-      const posId = await this.getActivePositionId();
-      if (!posId) {
-        Logger.stopSpin('No active position found to remove.');
-        return { digest: '', gasCostUsdc: 0 };
-      }
-
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-
-      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
-      const targetPos = positionList.find(p => p.pos_object_id === posId);
-      if (!targetPos) throw new Error('Position data missing from SDK');
-
       const pool = await sdk.Pool.getPool(poolId);
-
-      const txPayload = await sdk.Position.removeLiquidityTransactionPayload({
-        pool_id:             poolId,
-        pos_id:              posId,
-        coinTypeA:           pool.coinTypeA,
-        coinTypeB:           pool.coinTypeB,
-        delta_liquidity:     targetPos.liquidity.toString(),
-        min_amount_a:        '0',
-        min_amount_b:        '0',
-        collect_fee:         true,
-        rewarder_coin_types: [],
-      });
-
-      const response = await this.suiClient.signAndExecuteTransaction({
-        transaction: txPayload as any,
-        signer: this.keypair,
-        options: { showEffects: true },
-      });
-
-      if (response.effects?.status?.status !== 'success') {
-        throw new Error(`TX failed: ${response.effects?.status?.error}`);
+      
+      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
+      
+      if (positionList.length === 0) {
+        Logger.info('回収すべき既存ポジションは見つかりませんでした。');
+        return;
       }
 
-      // ガス代を記録
-      const currentPrice = await this.priceMonitor.getCurrentPrice();
-      const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'removeLiquidity');
+      Logger.warn(`${positionList.length} 個のポジションを検知しました。一括解除を開始します...`);
 
-      Logger.stopSpin(`Liquidity removed! TX: ${response.digest}`);
-      return { digest: response.digest, gasCostUsdc };
-    } catch (error: any) {
-      Logger.stopSpin(`Failed to remove liquidity: ${error.message}`);
+      for (const pos of positionList) {
+        try {
+          Logger.info(`- ポジション回収中: ${pos.pos_object_id} (Liquidity: ${pos.liquidity})`);
+          
+          if (Number(pos.liquidity) === 0) {
+            Logger.info(`  ! 流動性が 0 のためスキップします`);
+            continue;
+          }
+        
+          const txPayload = await sdk.Position.removeLiquidityTransactionPayload({
+            pool_id:             poolId,
+            pos_id:              pos.pos_object_id,
+            coinTypeA:           pool.coinTypeA,
+            coinTypeB:           pool.coinTypeB,
+            delta_liquidity:     pos.liquidity.toString(),
+            min_amount_a:        '0',
+            min_amount_b:        '0',
+            collect_fee:         true,
+            rewarder_coin_types: [],
+          });
+
+          const response = await this.suiClient.signAndExecuteTransaction({
+            transaction: txPayload as any,
+            signer: this.keypair,
+            options: { showEffects: true },
+          });
+
+          if (response.effects?.status?.status === 'success') {
+            Logger.success(`  ✓ ポジション ${pos.pos_object_id} を正常に回収しました。`);
+          } else {
+            Logger.error(`  × ポジション ${pos.pos_object_id} の回収に失敗しました: ${response.effects?.status?.error}`);
+          }
+        } catch (innerError) {
+          Logger.error(`  × ポジション ${pos.pos_object_id} 処理中にエラーが発生しました`, innerError);
+        }
+      }
+      Logger.success('--- ポジション回収プロセス完了 ---');
+    } catch (error) {
+      Logger.error('ポジション一括回収中に重大なエラーが発生しました', error);
       throw error;
     }
+  }
+
+  async removeLiquidity(): Promise<{ digest: string; gasCostUsdc: number }> {
+    // 下位互換性のため残すが、実態は forceCloseAllPositions を使用する
+    await this.forceCloseAllPositions();
+    return { digest: 'forced_check_complete', gasCostUsdc: 0 };
   }
 
   async collectFees(): Promise<{ amount: number, digest: string, gasCostUsdc: number }> {

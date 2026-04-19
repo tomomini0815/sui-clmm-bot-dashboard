@@ -273,7 +273,7 @@ function App() {
                 boxShadow: '0 0 8px var(--success)', animation: 'pulse-slow 2s infinite'
               }}></span>
               稼働中
-              {stats.currentPhase && stats.currentPhase !== 'IDLE' && (
+              {stats.currentPhase && (
                 <>
                   <span style={{ color: 'var(--border-panel)', margin: '0 4px' }}>|</span>
                   <span style={{ color: 'var(--accent)', fontWeight: '600' }}>
@@ -282,7 +282,8 @@ function App() {
                       stats.currentPhase === 'ADDING_LP' ? 'LP投入中' :
                       stats.currentPhase === 'OPENING_HEDGE' ? 'ヘッジ構築中' :
                       stats.currentPhase === 'MONITORING' ? '運用監視中' :
-                      stats.currentPhase === 'REBALANCING' ? 'リバランス中' : stats.currentPhase
+                      stats.currentPhase === 'REBALANCING' ? 'リバランス中' : 
+                      stats.currentPhase === 'IDLE' ? '待機中' : stats.currentPhase
                     }
                   </span>
                 </>
@@ -295,24 +296,6 @@ function App() {
             </>
           )}
         </div>
-
-        {isBotActive && stats.currentPhase && (
-          <div className="badge animate-fade-in" style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            borderColor: 'rgba(88, 166, 255, 0.3)',
-            color: 'var(--accent)',
-            background: 'rgba(88, 166, 255, 0.12)',
-            padding: '8px 14px',
-            fontSize: '0.85rem',
-            marginLeft: '8px',
-            boxShadow: '0 0 10px rgba(88, 166, 255, 0.1)'
-          }}>
-            <Activity size={14} className="animate-spin-slow" />
-            <span style={{ fontWeight: 600 }}>工程: {stats.currentPhase}</span>
-          </div>
-        )}
       </header>
 
       <div className="dashboard-grid">

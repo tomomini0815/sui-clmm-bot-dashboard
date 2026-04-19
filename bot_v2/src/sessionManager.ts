@@ -64,10 +64,25 @@ export class SessionManager {
         const { secretKey } = (globalConfig.privateKey.startsWith('suiprivkey')) 
           ? decodeSuiPrivateKey(globalConfig.privateKey)
           : { secretKey: Buffer.from(globalConfig.privateKey.replace('0x', ''), 'hex') };
+        
         sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
-        Logger.success(`[MASTER KEY] Dedicated Bot Wallet FIXED to: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
-      } catch (e) {
-        Logger.error('Failed to load MASTER PRIVATE_KEY from .env');
+        const masterAddress = sessionKeypair.getPublicKey().toSuiAddress();
+        Logger.success(`[MASTER KEY] Dedicated Bot Wallet FIXED to: ${masterAddress}`);
+        
+        // マスターキー使用時は、入力された sessionId にかかわらず、アドレスベースの固定IDを使用する
+        const masterSessionId = `master-${masterAddress.slice(0, 8)}`;
+        
+        // メモリ上に既存のセッションがあればそれを返す
+        const existingMasterSession = this.sessions.get(masterSessionId) || Array.from(this.sessions.values()).find(s => s.botWalletAddress === masterAddress);
+        if (existingMasterSession) {
+          Logger.info(`[SINGLETON] Reusing existing session [${existingMasterSession.sessionId}] for master wallet: ${masterAddress}`);
+          return existingMasterSession;
+        }
+
+        // ここで sessionId をマスター用のものに上書き
+        sessionId = masterSessionId;
+      } catch (e: any) {
+        Logger.error(`Failed to load MASTER PRIVATE_KEY from .env: ${e.message}`);
       }
     }
 
@@ -169,6 +184,9 @@ export class SessionManager {
       tracker,
       sessionConfig
     );
+
+    // Strategyに秘密鍵を設定して初期化 (Bluefin等のセットアップを待機)
+    await strategy.setPrivateKey(sessionKeypair.getSecretKey());
 
     // 保存された状態があれば復元
     const savedState = this.loadSessionState({ sessionId: targetSessionId, pnlEngine, gasTracker, hedgeManager, tracker, strategy });
@@ -340,10 +358,11 @@ export class SessionManager {
         pnl: session.pnlEngine.serialize(),
         gas: session.gasTracker.serialize(),
         hedge: session.hedgeManager.serialize(),
+        tracker: session.tracker.serialize(), // Trackerデータを追加
         botSecretKey: session.keypair.getSecretKey(),
-        mnemonic: session.mnemonic, // リカバリーフレーズを追加
+        mnemonic: session.mnemonic,
         config: session.config,
-        isRunning: session.strategy.isRunning, // 実行状態を保存
+        isRunning: session.strategy.isRunning,
         updatedAt: Date.now()
       };
       
@@ -375,6 +394,7 @@ export class SessionManager {
         pnlEngine.restore(state.pnl);
         gasTracker.restore(state.gas);
         hedgeManager.restore(state.hedge);
+        if (state.tracker) components.tracker.restore(state.tracker); // Trackerデータを復元
         
         // 実行状態を復元
         if (state.isRunning) {
