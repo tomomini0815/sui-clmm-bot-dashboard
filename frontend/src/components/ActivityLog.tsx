@@ -17,15 +17,24 @@ interface ActivityLogProps {
 }
 
 export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
-  // 統計情報の計算
-  const totalRebalances = logs.filter(log => log.action === 'リバランス' || log.action === 'Rebalance').length;
+  // 統計情報の計算 (リバランスサイクルに関連するアクションを網羅)
+  const totalRebalances = logs.filter(log => 
+    log.action.includes('リバランス') || 
+    log.action.includes('LP提供') || 
+    log.action.includes('LP投入') || 
+    log.action.includes('資産調整') ||
+    log.action.includes('Rebalance')
+  ).length;
+  
   const totalFeesCollected = logs.reduce((sum, log) => {
     const fee = log.fee ? parseFloat(log.fee) : 0;
     return sum + (isNaN(fee) ? 0 : fee);
   }, 0);
+
   const successfulRebalances = logs.filter(log =>
-    log.status.includes('+')
+    log.status.includes('+') || (log.status === '完了' && !log.action.includes('失敗'))
   ).length;
+  
   const successRate = totalRebalances > 0 ? (successfulRebalances / totalRebalances * 100).toFixed(1) : '0';
 
   return (

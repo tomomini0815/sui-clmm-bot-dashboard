@@ -41,6 +41,13 @@ export interface BotConfig {
   configMode: 'auto' | 'manual';   // 設定モード（追加）
   backupPassword?: string;          // バックアップ保護パスワード
   totalOperationalCapitalUsdc: number; // 総運用資金 (USDC)
+
+  // === 指値レンジ戦略 (Range Order) 設定 ===
+  strategyMode: 'balanced' | 'range_order';
+  rangeOrderSide: 'above' | 'below';
+  rangeOrderOffsetPct: number;      // 現在価格からのオフセット (%)
+  rangeOrderWidthPct: number;       // レンジ幅 (%)
+  rangeOrderHedgeEnabled: boolean;  // デルタヘッジを有効にするか（指値注文中は通常false）
 }
 
 function loadConfig(): BotConfig {
@@ -66,11 +73,16 @@ function loadConfig(): BotConfig {
     CONFIG_MODE,
     BACKUP_PASSWORD,
     TOTAL_OPERATIONAL_CAPITAL_USDC,
+    // 戦略
+    STRATEGY_MODE,
+    RANGE_ORDER_SIDE,
+    RANGE_ORDER_OFFSET_PCT,
+    RANGE_ORDER_WIDTH_PCT,
+    RANGE_ORDER_HEDGE_ENABLED,
   } = process.env;
 
   if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here') {
     Logger.warn('PRIVATE_KEY is not configured yet. Bot logic will wait for configuration.');
-    // 不要なプロセス終了を避け、APIサーバーが起動できるようにします
   } else {
     Logger.info(`PRIVATE_KEY loaded (${PRIVATE_KEY.length} characters)`);
   }
@@ -88,17 +100,24 @@ function loadConfig(): BotConfig {
     apiPort: parseInt(process.env.PORT || '3002', 10),
     
     // 新設定のデフォルト値
-    feeCollectIntervalMs: parseInt(FEE_COLLECT_INTERVAL_MS || '300000', 10), // 5分
-    minProfitForRebalance: parseFloat(MIN_PROFIT_FOR_REBALANCE || '0.005'),  // $0.005
+    feeCollectIntervalMs: parseInt(FEE_COLLECT_INTERVAL_MS || '300000', 10), 
+    minProfitForRebalance: parseFloat(MIN_PROFIT_FOR_REBALANCE || '0.005'),  
     gasBudgetSui: parseFloat(GAS_BUDGET_SUI || '0.05'),
     rsiEntryLow: parseInt(RSI_ENTRY_LOW || '35', 10),
     rsiEntryHigh: parseInt(RSI_ENTRY_HIGH || '65', 10),
     hedgeMode: (HEDGE_MODE as 'simulate' | 'bluefin') || 'simulate',
-    maxSlippage: parseFloat(MAX_SLIPPAGE || '0.05'),   // 5%
+    maxSlippage: parseFloat(MAX_SLIPPAGE || '0.05'),   
     balanceCheckEnabled: BALANCE_CHECK_ENABLED !== 'false',
     configMode: (CONFIG_MODE as 'auto' | 'manual') || 'auto',
     backupPassword: BACKUP_PASSWORD || 'change_me',
     totalOperationalCapitalUsdc: parseFloat(TOTAL_OPERATIONAL_CAPITAL_USDC || '200'),
+
+    // 戦略設定
+    strategyMode: (STRATEGY_MODE as 'balanced' | 'range_order') || 'balanced',
+    rangeOrderSide: (RANGE_ORDER_SIDE as 'above' | 'below') || 'above',
+    rangeOrderOffsetPct: parseFloat(RANGE_ORDER_OFFSET_PCT || '0.005'), // デフォルト 0.5%
+    rangeOrderWidthPct: parseFloat(RANGE_ORDER_WIDTH_PCT || '0.001'),  // デフォルト 0.1%
+    rangeOrderHedgeEnabled: RANGE_ORDER_HEDGE_ENABLED === 'true',     // 指値レンジではデフォルト false
   };
 }
 

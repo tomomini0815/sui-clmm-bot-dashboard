@@ -23,20 +23,23 @@ function App() {
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
 
-  const [sessionId, setSessionId] = useState(() => 
-    localStorage.getItem('session_id') || ''
-  );
+  const [sessionId, setSessionId] = useState(() => {
+    // 1. URLのクエリパラメータ (?sessionId=...) を優先
+    const params = new URLSearchParams(window.location.search);
+    const urlSessionId = params.get('sessionId');
+    if (urlSessionId) {
+      localStorage.setItem('session_id', urlSessionId);
+      return urlSessionId;
+    }
+    // 2. localStorage から復元
+    return localStorage.getItem('session_id') || '';
+  });
   const [botWalletAddress, setBotWalletAddress] = useState('');
   const [apiUrl] = useState(() => 
     import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
   );
 
-  // カスタムイベントリスナー（バックアップ画面を直接開く）
-  useEffect(() => {
-    const handleOpenBackup = () => setIsSettingsOpen(true);
-    window.addEventListener('open-settings-backup', handleOpenBackup);
-    return () => window.removeEventListener('open-settings-backup', handleOpenBackup);
-  }, []);
+
 
   // ウォレット接続時にセッション作成
   useEffect(() => {
@@ -119,6 +122,7 @@ function App() {
             setBotWalletAddress(result.data.botWalletAddress);
           }
           
+          console.log('[DEBUG] API Stats Data:', result.data);
           setStats(result.data);
           setIsBotActive(result.data.isRunning);
 
@@ -196,6 +200,7 @@ function App() {
         body: JSON.stringify({
           sessionId,
           lpAmountUsdc: newAmount,
+          strategyMode: stats.config.strategyMode,
           rangeWidth: (stats.config.rangeWidth * 100).toString(),
           hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
           configMode: stats.config.configMode || 'auto'
@@ -210,6 +215,38 @@ function App() {
       alert('更新に失敗しました。バックエンドが起動中か確認してください。');
     }
   };
+
+  const handleUpdateStrategyMode = async (mode: 'balanced' | 'range_order') => {
+    if (!sessionId) return;
+    
+    try {
+      const response = await fetch(`${apiUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          strategyMode: mode,
+          lpAmountUsdc: stats.config.lpAmountUsdc,
+          rangeWidth: (stats.config.rangeWidth * 100).toString(),
+          hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
+          configMode: stats.config.configMode || 'auto'
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode } }));
+        // ボットが稼働中の場合はリバランスがトリガーされる旨を通知
+        if (isBotActive) {
+          alert(`🚀 戦略を ${mode === 'balanced' ? 'バランス型' : '指値レンジ型'} に切り替えました。即座にリバランスが実行されます。`);
+        } else {
+          alert(`✅ 戦略を ${mode === 'balanced' ? 'バランス型' : '指値レンジ型'} に設定しました。`);
+        }
+      }
+    } catch (e) {
+      alert('戦略の切り替えに失敗しました。');
+    }
+  };
+
 
   const getMarketConditionText = (condition: string) => {
     switch (condition) {
@@ -306,6 +343,7 @@ function App() {
             onOpenHelp={() => setIsHelpOpen(true)}
             config={stats.config}
             onUpdateCapital={handleUpdateCapital}
+            onUpdateStrategyMode={handleUpdateStrategyMode}
           />
 
           {/* 戦略配分の視覚化 */}

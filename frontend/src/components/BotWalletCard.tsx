@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
-import { Wallet, ArrowRight, Copy, Check, Info, Coins, Send } from 'lucide-react';
-import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
-import { Transaction } from '@mysten/sui/transactions';
+import { Wallet, Copy, Check } from 'lucide-react';
 
 interface BotWalletCardProps {
   botAddress: string;
@@ -12,51 +10,15 @@ interface BotWalletCardProps {
 
 export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBalance, usdcBalance, onRefresh }) => {
   const [copied, setCopied] = useState(false);
-  const [depositAmount, setDepositAmount] = useState('1'); // デフォルト1 SUI
-  const [isDepositing, setIsDepositing] = useState(false);
   
   // 固定アドレス判定
   const isFixedAddress = botAddress.toLowerCase() === '0xc17e3ef45cfb8ff6f0d5e55669b148fc27e615e2bde27109ccf3e952d1215559'.toLowerCase();
   
-  const currentAccount = useCurrentAccount();
-  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(botAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleDeposit = async () => {
-    if (!currentAccount || !botAddress) return;
-    
-    setIsDepositing(true);
-    try {
-      const tx = new Transaction();
-      const amount = parseFloat(depositAmount) * 1e9; // SUI -> MIST
-      
-      const [coin] = tx.splitCoins(tx.gas, [amount]);
-      tx.transferObjects([coin], botAddress);
-
-      signAndExecute(
-        { transaction: tx },
-        {
-          onSuccess: (result) => {
-            console.log('Deposit success:', result.digest);
-            setTimeout(onRefresh, 3000); // 3秒後にリフレッシュ
-          },
-          onError: (error) => {
-            console.error('Deposit error:', error);
-          },
-          onSettled: () => {
-            setIsDepositing(false);
-          }
-        }
-      );
-    } catch (e) {
-      console.error(e);
-      setIsDepositing(false);
-    }
   };
 
   const needsSui = suiBalance < 0.05;
@@ -148,78 +110,6 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBal
         </div>
       </div>
 
-      {/* 簡易クイック送金 */}
-      <div style={{ marginTop: '24px', paddingTop: '20px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-          <input 
-            type="number" 
-            value={depositAmount}
-            onChange={(e) => setDepositAmount(e.target.value)}
-            style={{ 
-              flex: 1, 
-              background: 'rgba(255, 255, 255, 0.05)', 
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '8px',
-              padding: '8px 12px',
-              color: 'white',
-              fontSize: '0.9rem'
-            }}
-            placeholder="SUI量"
-          />
-          <button 
-            onClick={handleDeposit}
-            disabled={isDepositing || !currentAccount}
-            className="btn-primary"
-            style={{ padding: '8px 20px', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
-            {isDepositing ? '送金中...' : <><Send size={16} /> 入金</>}
-          </button>
-        </div>
-        
-        {/* バックアップ案内 */}
-        <div style={{ 
-          marginTop: '16px', 
-          padding: '12px', 
-          background: 'rgba(255, 122, 127, 0.05)', 
-          borderRadius: '10px',
-          border: '1px solid rgba(255, 122, 127, 0.15)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '8px'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#ff7a7f', fontSize: '0.8rem', fontWeight: 600 }}>
-            <Info size={14} />
-            資産保護のための重要事項
-          </div>
-          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.4 }}>
-            運用資金を安全に管理するため、必ず**リカバリーフレーズ**をバックアップしてください。
-          </p>
-          <button 
-            onClick={() => {
-              // App.tsx側でSettingsを開くように通知するなどの仕組みが必要だが、
-              // 一旦はユーザーに「Settingsを開いてください」と促すか、カスタムイベントを発火させる
-              window.dispatchEvent(new CustomEvent('open-settings-backup'));
-            }}
-            style={{
-              background: 'rgba(255, 122, 127, 0.15)',
-              border: '1px solid rgba(255, 122, 127, 0.3)',
-              borderRadius: '6px',
-              padding: '6px',
-              color: '#ff7a7f',
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }}
-          >
-            バックアップを確認する
-          </button>
-        </div>
-
-        <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'center', marginTop: '12px' }}>
-          運用にはガス代として少量のSUIが必要です。
-        </p>
-      </div>
     </div>
   );
 };

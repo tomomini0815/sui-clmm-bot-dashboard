@@ -223,7 +223,7 @@ app.get('/api/session/:sessionId', (req, res) => {
   });
 });
 
-app.post('/api/config', (req, res) => {
+app.post('/api/config', async (req, res) => {
   try {
     const { 
       sessionId, 
@@ -247,9 +247,12 @@ app.post('/api/config', (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
 
+    const oldStrategyMode = session.config.strategyMode;
+
     // セッション固有の設定を構築
     const newConfig: BotConfig = {
       ...session.config,
+      strategyMode: strategyMode || session.config.strategyMode,
       lpAmountUsdc: parseFloat(lpAmountUsdc) || session.config.lpAmountUsdc,
       totalOperationalCapitalUsdc: parseFloat(totalOperationalCapitalUsdc) || session.config.totalOperationalCapitalUsdc,
       rangeWidth: (parseFloat(rangeWidth) / 100) || session.config.rangeWidth,
@@ -262,6 +265,16 @@ app.post('/api/config', (req, res) => {
 
     // セッションの設定を更新・反映
     refreshSessionComponents(sessionId, newConfig);
+    
+    // 戦略モードが変更された場合、または設定が更新された場合に即座にリバランスを実行
+    if (session.strategy.isRunning) {
+      Logger.info(`Config updated via API. Triggering immediate rebalance for strategy: ${newConfig.strategyMode}`);
+      const currentPrice = await session.priceMonitor.getCurrentPrice();
+      // 非同期で実行（レスポンスを待たせない）
+      session.strategy.runRebalance(currentPrice).catch(err => {
+        Logger.error('Auto-rebalance after config update failed', err);
+      });
+    }
     
     // 即座に永続化
     SessionManager.saveSessionState(sessionId);

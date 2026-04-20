@@ -81,7 +81,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
       </div>
 
       <div style={{ height: '220px', width: '100%', position: 'relative' }}>
-        {!active || data.length === 0 ? (
+        {(!active && entryPrice <= 0) || data.length === 0 ? (
           <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', opacity: 0.6 }}>
             待機中：ポジションが開かれるとチャートが表示されます
           </div>

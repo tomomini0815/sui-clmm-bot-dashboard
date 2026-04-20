@@ -213,18 +213,11 @@ export class LpManager {
     }
   }
 
-  async addLiquidity(lowerPrice: number, upperPrice: number, amountUsdc: number): Promise<{ digest: string; gasCostUsdc: number }> {
+  async addLiquidity(lowerPrice: number, upperPrice: number, amount: number, isUsdc: boolean = true): Promise<{ digest: string; gasCostUsdc: number }> {
     if (!this.isInitialized) await this.initializePoolData();
 
-    // 残高チェック
-    if (this.config.balanceCheckEnabled) {
-      const balance = await this.checkBalance();
-      if (!balance.sufficient) {
-        throw new Error(`Insufficient balance: SUI=${balance.suiBalance.toFixed(4)}, USDC=${balance.usdcBalance.toFixed(4)}. 必要: USDC ≥ ${(amountUsdc * 0.5).toFixed(4)} + SUI ≥ 0.01`);
-      }
-    }
-    
-    Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC/SUI, ${amountUsdc} USDC)...`);
+    // 残高チェックは上位で行うため簡略化
+    Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)} USDC/SUI, ${amount.toFixed(4)} ${isUsdc ? 'USDC' : 'SUI'})...`);
 
     try {
       const sdk = this.getSdkWithSender();
@@ -239,24 +232,40 @@ export class LpManager {
       let upperTick: number;
       
       if (this.usdcIsA) {
+        // Price = SUI / USDC
+        // SUI/USDC が上がる = USDC/SUI が下がる
         const invLower = 1 / upperPrice;
         const invUpper = 1 / lowerPrice;
         lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(invLower.toString()), this.decimalsA, this.decimalsB, tickSpacing);
         upperTick = TickMath.priceToInitializableTickIndex(new Decimal(invUpper.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       } else {
+        // Price = USDC / SUI
         lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(lowerPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
         upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       }
 
-      Logger.info(`[Blockchain] Range: [${lowerTick}, ${upperTick}], USDC_Is_A=${this.usdcIsA}, Decimals=[${this.decimalsA}, ${this.decimalsB}]`);
+      // SDKは lowerTick < upperTick を期待する
+      if (lowerTick > upperTick) {
+        const tmp = lowerTick;
+        lowerTick = upperTick;
+        upperTick = tmp;
+      }
+      // 同じティックになった場合は最低1スパン空ける
+      if (lowerTick === upperTick) {
+        upperTick += tickSpacing;
+      }
 
-      const usdcAmountBN = new BN(Math.floor(amountUsdc * Math.pow(10, this.usdcDecimals)).toString());
-      
+      Logger.info(`[Blockchain] Range: [${lowerTick}, ${upperTick}], CurrentTick: ${pool.current_tick_index}, isUsdc: ${isUsdc}`);
+
+      const decimals = isUsdc ? this.usdcDecimals : (this.usdcIsA ? this.decimalsB : this.decimalsA);
+      const amountBN = new BN(new Decimal(amount).mul(Math.pow(10, decimals)).toFixed(0));
+      const isCoinA = isUsdc ? this.usdcIsA : !this.usdcIsA;
+
       const estResult = ClmmPoolUtil.estLiquidityAndcoinAmountFromOneAmounts(
         lowerTick,
         upperTick,
-        usdcAmountBN,
-        this.usdcIsA,
+        amountBN,
+        isCoinA,
         true,
         this.config.maxSlippage,
         currentSqrtPrice

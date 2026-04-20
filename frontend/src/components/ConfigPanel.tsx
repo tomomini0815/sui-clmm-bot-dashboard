@@ -6,8 +6,9 @@ interface ConfigPanelProps {
   onToggleBot: () => void;
   onOpenSettings: () => void;
   onOpenWizard: () => void;
-  config?: { lpAmountUsdc: number; rangeWidth: number; hedgeRatio: number; configMode?: 'auto' | 'manual' };
+  config?: { lpAmountUsdc: number; rangeWidth: number; hedgeRatio: number; configMode?: 'auto' | 'manual'; strategyMode?: 'balanced' | 'range_order' };
   onUpdateCapital: (amount: number) => void;
+  onUpdateStrategyMode: (mode: 'balanced' | 'range_order') => void;
   onOpenHelp: () => void;
 }
 
@@ -18,6 +19,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   onOpenWizard,
   config,
   onUpdateCapital,
+  onUpdateStrategyMode,
   onOpenHelp,
 }) => {
   const [isEditingCapital, setIsEditingCapital] = useState(false);
@@ -42,7 +44,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   };
 
   return (
-    <div className="glass-panel config-panel" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div className="glass-panel config-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* ヘッダー */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -65,49 +67,77 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
             cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
             fontSize: '0.85rem', fontWeight: 500, transition: 'all 0.2s'
           }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.2)';
-            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.4)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.1)';
-            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.25)';
-          }}
         >
           <Edit3 size={14} /> 編集
         </button>
       </div>
 
+      {/* 戦略選択（タグ形式） */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+          運用戦略エンジン
+        </span>
+        <div style={{ 
+          display: 'flex', background: 'rgba(255, 255, 255, 0.05)', 
+          padding: '4px', borderRadius: '10px', gap: '4px' 
+        }}>
+          <button
+            onClick={() => onUpdateStrategyMode('balanced')}
+            style={{
+              flex: 1, padding: '8px 4px', borderRadius: '8px', border: 'none',
+              fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
+              background: config?.strategyMode === 'balanced' ? 'var(--accent)' : 'transparent',
+              color: config?.strategyMode === 'balanced' ? 'white' : 'var(--text-muted)',
+              boxShadow: config?.strategyMode === 'balanced' ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
+            }}
+          >
+            バランス (25/25/50)
+          </button>
+          <button
+            onClick={() => onUpdateStrategyMode('range_order')}
+            style={{
+              flex: 1, padding: '8px 4px', borderRadius: '8px', border: 'none',
+              fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
+              background: config?.strategyMode === 'range_order' ? 'var(--accent)' : 'transparent',
+              color: config?.strategyMode === 'range_order' ? 'white' : 'var(--text-muted)',
+              boxShadow: config?.strategyMode === 'range_order' ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
+            }}
+          >
+            指値レンジ (B)
+          </button>
+        </div>
+      </div>
+
       {/* モード表示バッジ */}
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '-8px' }}>
+      <div style={{ display: 'flex', gap: '8px' }}>
         <div style={{
           display: 'flex', alignItems: 'center', gap: '6px',
-          padding: '4px 10px', borderRadius: '20px', fontSize: '0.75rem', fontWeight: 600,
+          padding: '4px 10px', borderRadius: '20px', fontSize: '0.7rem', fontWeight: 600,
           background: config?.configMode === 'manual' ? 'rgba(255, 255, 255, 0.05)' : 'rgba(88, 166, 255, 0.15)',
           color: config?.configMode === 'manual' ? 'var(--text-muted)' : 'var(--accent)',
           border: config?.configMode === 'manual' ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(88, 166, 255, 0.3)'
         }}>
-          {config?.configMode === 'manual' ? 'カスタム設定' : 'お任せモード（推奨）'}
+          {config?.configMode === 'manual' ? 'MOD: カスタム' : 'MOD: お任せ設定'}
         </div>
       </div>
 
       {/* 設定項目 */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {/* 対象プール */}
         <div style={{
           display: 'flex', justifyContent: 'space-between',
-          padding: '12px 14px', background: 'rgba(255, 255, 255, 0.03)',
+          padding: '10px 14px', background: 'rgba(255, 255, 255, 0.02)',
           borderRadius: '10px', border: '1px solid var(--border-panel)'
         }}>
-          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>対象プール</span>
-          <span style={{ fontWeight: 600, color: 'var(--accent)' }}>SUI / USDC</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>対象プール</span>
+          <span style={{ fontWeight: 600, color: 'var(--accent)', fontSize: '0.85rem' }}>SUI / USDC</span>
         </div>
 
         {/* 運用資金（インライン編集） */}
         <div style={{
-          padding: '12px 14px', background: isEditingCapital
-            ? 'rgba(88, 166, 255, 0.08)'
-            : 'rgba(255, 255, 255, 0.03)',
+          padding: '10px 14px', background: isEditingCapital
+            ? 'rgba(88, 166, 255, 0.06)'
+            : 'rgba(255, 255, 255, 0.02)',
           borderRadius: '10px',
           border: isEditingCapital
             ? '1px solid rgba(88, 166, 255, 0.4)'
@@ -115,157 +145,86 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
           transition: 'all 0.2s'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: 'var(--text-muted)', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
               運用資金
             </span>
             {!isEditingCapital ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <span style={{ fontWeight: 600 }}>
-                  {config?.lpAmountUsdc || 0}
-                  <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginLeft: '4px' }}>USDC</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>
+                  {config?.lpAmountUsdc || 0} USDC
                 </span>
                 <button
                   onClick={handleEditCapital}
-                  title="運用資金を変更"
                   style={{
-                    background: 'rgba(88, 166, 255, 0.12)',
-                    border: '1px solid rgba(88, 166, 255, 0.3)',
-                    borderRadius: '6px',
-                    padding: '4px 8px',
-                    color: 'var(--accent)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    fontSize: '0.78rem',
-                    fontWeight: 500,
-                    transition: 'all 0.2s',
+                    background: 'rgba(88, 166, 255, 0.1)', border: '1px solid rgba(88, 166, 255, 0.2)',
+                    borderRadius: '4px', padding: '2px 6px', color: 'var(--accent)',
+                    cursor: 'pointer', fontSize: '0.75rem'
                   }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(88, 166, 255, 0.25)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(88, 166, 255, 0.12)'; }}
                 >
-                  <PlusCircle size={12} /> 変更
+                  変更
                 </button>
               </div>
             ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <input
                   type="number"
                   value={capitalInput}
                   onChange={(e) => setCapitalInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleSaveCapital(); if (e.key === 'Escape') handleCancelCapital(); }}
+                  style={{ width: '60px', padding: '2px', fontSize: '0.8rem' }}
                   autoFocus
-                  min="0.01"
-                  step="0.01"
-                  style={{
-                    width: '90px',
-                    background: 'rgba(22, 27, 34, 0.9)',
-                    border: '1px solid rgba(88, 166, 255, 0.5)',
-                    borderRadius: '6px',
-                    padding: '4px 8px',
-                    color: 'var(--text-main)',
-                    fontSize: '0.9rem',
-                    fontWeight: 600,
-                    outline: 'none',
-                    textAlign: 'right',
-                  }}
                 />
-                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>USDC</span>
-                <button onClick={handleSaveCapital} title="保存" style={{
-                  background: 'rgba(63, 185, 80, 0.15)', border: '1px solid rgba(63, 185, 80, 0.35)',
-                  borderRadius: '6px', padding: '4px 6px', color: 'var(--success)',
-                  cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s',
-                }}>
-                  <Check size={14} />
-                </button>
-                <button onClick={handleCancelCapital} title="キャンセル" style={{
-                  background: 'rgba(248, 81, 73, 0.1)', border: '1px solid rgba(248, 81, 73, 0.25)',
-                  borderRadius: '6px', padding: '4px 6px', color: 'var(--danger)',
-                  cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.2s',
-                }}>
-                  <X size={14} />
-                </button>
+                <button onClick={handleSaveCapital} style={{ color: 'var(--success)' }}><Check size={14}/></button>
+                <button onClick={handleCancelCapital} style={{ color: 'var(--danger)' }}><X size={14}/></button>
               </div>
             )}
           </div>
-          {isEditingCapital && (
-            <div style={{ marginTop: '8px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              💡 Enter で保存 / Esc でキャンセル　※ボット再起動後に反映
-            </div>
-          )}
         </div>
 
-        {/* リバランス幅 */}
+        {/* リバランス幅（指値モード時は非表示にするなどの調整も可能だが、一旦表示） */}
         <div style={{
           display: 'flex', justifyContent: 'space-between',
-          padding: '12px 14px', background: 'rgba(255, 255, 255, 0.03)',
+          padding: '10px 14px', background: 'rgba(255, 255, 255, 0.02)',
           borderRadius: '10px', border: '1px solid var(--border-panel)'
         }}>
-          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>リバランス幅</span>
-          <span style={{ fontWeight: 600, color: 'var(--success)' }}>±{(config?.rangeWidth || 0) * 100}%</span>
-        </div>
-
-        {/* ヘッジ比率 */}
-        <div style={{
-          display: 'flex', justifyContent: 'space-between',
-          padding: '12px 14px', background: 'rgba(255, 255, 255, 0.03)',
-          borderRadius: '10px', border: '1px solid var(--border-panel)'
-        }}>
-          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>ヘッジ比率</span>
-          <span style={{ fontWeight: 600, color: 'var(--accent)' }}>{(config?.hedgeRatio || 0) * 100}%</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+            {config?.strategyMode === 'range_order' ? '指値オフセット' : 'リバランス幅'}
+          </span>
+          <span style={{ fontWeight: 600, color: 'var(--success)', fontSize: '0.85rem' }}>
+            ±{(config?.rangeWidth || 0) * 100}%
+          </span>
         </div>
 
         <button
           style={{
-            background: 'transparent', border: '1px dashed rgba(88, 166, 255, 0.25)',
-            borderRadius: '10px', padding: '10px 14px', color: 'var(--text-muted)',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            gap: '8px', fontSize: '0.85rem', fontWeight: 500, transition: 'all 0.2s'
+            background: 'transparent', border: '1px dashed rgba(88, 166, 255, 0.2)',
+            borderRadius: '10px', padding: '10px', color: 'var(--text-muted)',
+            cursor: 'pointer', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
           }}
           onClick={onOpenWizard}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.08)';
-            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.4)';
-            e.currentTarget.style.color = 'var(--text-main)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            e.currentTarget.style.borderColor = 'rgba(88, 166, 255, 0.25)';
-            e.currentTarget.style.color = 'var(--text-muted)';
-          }}
         >
-          <Compass size={14} /> 初回セットアップを開く
+          <Compass size={14} /> 初回セットアップ
         </button>
 
         <button
           style={{
-            background: 'rgba(249, 115, 22, 0.1)', border: '1px solid rgba(249, 115, 22, 0.25)',
-            borderRadius: '10px', padding: '10px 14px', color: '#f97316',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            gap: '8px', fontSize: '0.85rem', fontWeight: 600, transition: 'all 0.2s'
+            background: 'rgba(249, 115, 22, 0.08)', border: '1px solid rgba(249, 115, 22, 0.2)',
+            borderRadius: '10px', padding: '10px', color: '#f97316',
+            cursor: 'pointer', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px'
           }}
           onClick={onOpenHelp}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(249, 115, 22, 0.15)';
-            e.currentTarget.style.borderColor = 'rgba(249, 115, 22, 0.4)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'rgba(249, 115, 22, 0.1)';
-            e.currentTarget.style.borderColor = 'rgba(249, 115, 22, 0.25)';
-          }}
         >
           <Droplets size={14} /> Faucet / 資金追加
         </button>
       </div>
 
       {/* 操作ボタン */}
-      <div style={{ marginTop: 'auto', paddingTop: '20px', borderTop: '1px solid var(--border-panel)' }}>
+      <div style={{ marginTop: 'auto', paddingTop: '16px', borderTop: '1px solid var(--border-panel)' }}>
         <button
           className="primary-btn"
           onClick={onToggleBot}
           style={{
             background: isBotActive ? 'var(--danger)' : 'var(--success)',
-            boxShadow: isBotActive ? '0 2px 8px rgba(248, 81, 73, 0.3)' : '0 2px 8px rgba(63, 185, 80, 0.3)'
+            padding: '12px', fontSize: '0.9rem'
           }}
         >
           {isBotActive ? (
@@ -278,3 +237,6 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
     </div>
   );
 };
+
+
+

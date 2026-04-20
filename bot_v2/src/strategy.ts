@@ -59,6 +59,7 @@ export class Strategy {
   private accumulatedEstimatedFees: number = 0;
   private lastHeartbeatTime: number = 0;
   private readonly HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000; // 1時間ごとにログ
+  private lastRepairAttemptTime: number = 0; // REPAIRロジックのスパム防止用
 
   // 戦略パラメータ
   private readonly VOLATILITY_WINDOW = 20;
@@ -337,7 +338,7 @@ export class Strategy {
     }
   }
 
-  // ===== リバランス実行 ===== //
+  // ===== 戦略ディスパッチャー ===== //
 
   async runRebalance(currentPrice: number) {
     const timeSinceLastRebalance = Date.now() - this.lastRebalanceTime;
@@ -351,139 +352,211 @@ export class Strategy {
 
     try {
       this.currentPhase = CyclePhase.REBALANCING;
-      this.notify(`⚡ 戦略サイクル再構築開始 (価格: $${currentPrice.toFixed(4)})`);
-      Logger.box('Strategy Cycle Start', `Price: $${currentPrice.toFixed(4)} USDC/SUI`);
-
-      // STEP 1: 全決済 (リムーブLP & クローズヘッジ)
-      Logger.info('--- [STEP 1] 全ポジションのクローズ ---');
-      try {
-        const removeRes = await this.lpManager.removeLiquidity();
-        if (removeRes.digest) {
-          await this.tracker.recordEvent('LP解除', 'レンジ外のためLPを削除しました', currentPrice, removeRes.digest);
-        }
-        
-        const hedgeRes = await this.hedgeManager.closeHedge(currentPrice);
-        if (hedgeRes.digest) {
-          await this.tracker.recordEvent('ヘッジ決済', 'LP解除に伴いショートポジションを決済しました', currentPrice, hedgeRes.digest);
-        }
-
-        // --- 追加: Bluefin の証拠金残高も全額回収する ---
-        await this.hedgeManager.withdrawAllMargin();
-      } catch (e) {
-        Logger.warn('ポジションクローズ中にエラーが発生しましたが、新規構築を続行します');
-      }
-
-      // STEP 2: 戦略規模の決定 (フルオート・バランス・モード)
-      Logger.info('--- [STEP 2] フルオート・バランス運用 (全資産最適化) ---');
       
-      // ポジション解除後の残高反映を確実にするため、少し待機
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const { suiBalance, usdcBalance } = await this.lpManager.checkBalance();
-      
-      // ガス代として 1.0 SUI を温存
-      const GAS_RESERVE_SUI = 1.0;
-      const usableSui = Math.max(0, suiBalance - GAS_RESERVE_SUI);
-      
-      // 全資産のドル価値を算出
-      const rawSuiValue = usableSui * currentPrice;
-      const totalEquity = usdcBalance + rawSuiValue;
-      
-      Logger.info(`🔎 資産評価詳細: SUI=${suiBalance.toFixed(4)} (運用可:${usableSui.toFixed(4)}), USDC=${usdcBalance.toFixed(2)}, Price=${currentPrice.toFixed(4)}`);
-      Logger.info(`🔎 評価額: SUI分=$${rawSuiValue.toFixed(2)}, USDC分=$${usdcBalance.toFixed(2)} → 合計=$${totalEquity.toFixed(2)}`);
-      
-      // 運用資金の決定 (全資産の 99% を活用し、1% は不測の誤差・ガス代保護として残す)
-      const totalCapital = totalEquity * 0.99;
-      
-      if (totalCapital < 1.0) {
-        throw new Error(`運用可能な資産が不足しています (総額: $${totalCapital.toFixed(2)})。最低 1.0 USDC 相当が必要です。`);
-      }
-
-      // ターゲット配分 (25:25:50)
-      const targetSuiValue = totalCapital * 0.25;
-      const swapStepAmount = targetSuiValue;           // ① 25% 分の SUI を構築目標
-      const lpUsdcAmount = totalCapital * 0.25;         // ② 25% を LP投入用
-      const marginAmount = totalCapital * 0.50;         // ③ 50% をヘッジ担保
-      
-      Logger.info(`📊 ポートフォリオ構成案: 総額 $${totalCapital.toFixed(2)} (安全マージン 1% 確保後)`);
-      Logger.info(`   - 構成比: SUI $${targetSuiValue.toFixed(2)}, USDC $${(totalCapital * 0.75).toFixed(2)}`);
-
-      // 資産の不均衡調整 (SUIが多すぎる場合は事前に売却して USDC を工面する)
-      const currentSuiValue = usableSui * currentPrice;
-      if (currentSuiValue > targetSuiValue + 0.1) {
-        // 余剰分の SUI を売却して USDC を確保
-        // スリッページとガス代を考慮し、少し多く（5%ほど）残し気味に売却する
-        const suiToSell = Math.max(0, (currentSuiValue - targetSuiValue) / currentPrice - 0.5);
-        if (suiToSell > 0.1) {
-          Logger.info(`🔄 資産の偏りを検知: 余剰な ${suiToSell.toFixed(4)} SUI を売却して USDC を確保します...`);
-          const sellRes = await this.lpManager.swapSuiToUsdc(suiToSell);
-          await this.tracker.recordEvent('資産調整(SUI売却)', `${suiToSell.toFixed(4)} SUI を売却して USDC 資金を確保`, currentPrice, sellRes.digest);
-          
-          // 残高反映を待つ
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-      }
-
-      // ① SUI購入 (25%)
-      // すでに十分な SUI がある場合はスキップ、足りない場合は買い足し
-      this.currentPhase = CyclePhase.SWAPPING;
-      const finalSuiBalance = (await this.lpManager.checkBalance()).suiBalance;
-      const finalUsableSui = Math.max(0, finalSuiBalance - GAS_RESERVE_SUI);
-      const finalSuiValue = finalUsableSui * currentPrice;
-
-      let actualSuiAmountForLp = finalUsableSui;
-
-      if (finalSuiValue < targetSuiValue - 0.1) {
-        const buyAmountUsdc = targetSuiValue - finalSuiValue;
-        Logger.info(`① ターゲットに不足する $${buyAmountUsdc.toFixed(2)} 分の SUI を購入中...`);
-        const swapRes = await this.lpManager.swapUsdcToSui(buyAmountUsdc);
-        actualSuiAmountForLp += (swapRes.amountOut || 0);
-        await this.tracker.recordEvent('SUI購入', `ターゲット比率(25%)に合わせるため ${swapRes.amountOut.toFixed(4)} SUI を購入`, currentPrice, swapRes.digest);
+      if (this.config.strategyMode === 'range_order') {
+        await this.executeRangeOrderStrategy(currentPrice);
       } else {
-        Logger.info(`① 資産構成チェック: すでに十分な SUI (${finalUsableSui.toFixed(4)}) を保有しているため購入をスキップします。`);
+        await this.executeBalancedStrategy(currentPrice);
       }
-
-      // ② LP投入 (25%)
-      await new Promise(r => setTimeout(r, 2000)); // RPC同期待ち
-      this.currentPhase = CyclePhase.ADDING_LP;
-      this.calculateOptimalRange(currentPrice); // 価格変動に基づきレンジ計算
-      Logger.info(`② 25%分 ($${lpUsdcAmount.toFixed(2)}) + SUI で LP を提供中...`);
-      const lpRes = await this.lpManager.addLiquidity(this.currentLowerBound, this.currentUpperBound, lpUsdcAmount);
-      await this.tracker.recordRebalance(currentPrice, 0, 0, lpRes.digest, 'LP提供完了', this.currentLowerBound, this.currentUpperBound, 'LP投入');
-
-      // ③ ヘッジ証拠金入金 (50%)
-      await new Promise(r => setTimeout(r, 2000)); // RPC同期待ち
-      this.currentPhase = CyclePhase.OPENING_HEDGE;
-      Logger.info(`③ 50%分 ($${marginAmount.toFixed(2)}) をヘッジ証拠金として入金中...`);
-      const depositRes = await this.hedgeManager.depositMargin(marginAmount);
-      await this.tracker.recordEvent('証拠金入金', `ヘッジ用担保 $${marginAmount.toFixed(2)} をBluefinへ入金`, currentPrice, depositRes.digest);
-
-      // ④ ヘッジショート構築 (LPのSUI数量に対する比率を適用)
-      await new Promise(r => setTimeout(r, 2000)); // RPC同期待ち
-      const hedgeSuiSize = actualSuiAmountForLp * this.config.hedgeRatio;
-      const hedgeUsdcValue = hedgeSuiSize * currentPrice;
-      Logger.info(`④ LP保有SUIの${(this.config.hedgeRatio * 100).toFixed(0)}% (${hedgeSuiSize.toFixed(4)} SUI) をショート中...`);
-      const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
-      await this.tracker.recordHedge('SHORT', 'デルタ中立化のためのショート開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
-
-      // 完了処理
-      this.currentPhase = CyclePhase.MONITORING;
-      this.lastRebalanceTime = Date.now();
-      
-      this.pnlEngine.recordLpEntry(currentPrice, lpUsdcAmount * 2); // LP総額 (~5 USDC)
-      this.pnlEngine.recordHedgeEntry(currentPrice, hedgeUsdcValue);
-
-      const msg = `✅ 戦略サイクル構築完了 (25/25/50)\n運用額: ${totalCapital} USDC\nレンジ: $${this.currentLowerBound.toFixed(4)} 〜 $${this.currentUpperBound.toFixed(4)}`;
-      Logger.success(msg);
-      this.notify(msg);
 
     } catch (e: any) {
       this.currentPhase = CyclePhase.IDLE;
-      Logger.error('サイクル実行中にエラーが発生しました', e);
+      Logger.error('戦略実行中に重大なエラーが発生しました', e);
       await this.tracker.recordEvent('エラー', `リバランス失敗: ${e.message}`, currentPrice);
-      this.notify(`❌ サイクルエラー: ${e.message}`);
+      this.notify(`❌ 戦略エラー: ${e.message}`);
       this.lastRebalanceTime = Date.now();
     }
+  }
+
+  /**
+   * [戦略A] バランス型デルタニュートラル (25/25/50)
+   * 既存の標準ロジック
+   */
+  private async executeBalancedStrategy(currentPrice: number) {
+    this.notify(`⚡ バランス型戦略サイクル開始 (価格: $${currentPrice.toFixed(4)})`);
+    Logger.box('Balanced Strategy Start', `Price: $${currentPrice.toFixed(4)} USDC/SUI`);
+
+    // STEP 1: 全決済
+    await this.closeAllPositions(currentPrice);
+
+    // STEP 2: 資産評価とターゲット計算
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    const { suiBalance, usdcBalance } = await this.lpManager.checkBalance();
+    const GAS_RESERVE_SUI = 1.0;
+    const usableSui = Math.max(0, suiBalance - GAS_RESERVE_SUI);
+    const totalEquity = usdcBalance + (usableSui * currentPrice);
+    const totalCapital = totalEquity * 0.99;
+
+    if (totalCapital < 1.0) throw new Error('運用可能資金が不足しています');
+
+    const targetSuiValue = totalCapital * 0.25;
+    const lpUsdcAmount = totalCapital * 0.25;
+    const marginAmount = totalCapital * 0.50;
+
+    // STEP 3: 資産の不均衡調整
+    const currentSuiValue = usableSui * currentPrice;
+    if (currentSuiValue > targetSuiValue + 0.1) {
+      const suiToSell = Math.max(0, (currentSuiValue - targetSuiValue) / currentPrice);
+      if (suiToSell > 0.1) {
+        const sellRes = await this.lpManager.swapSuiToUsdc(suiToSell);
+        await this.tracker.recordEvent('資産調整', `${suiToSell.toFixed(2)} SUIを売却: ${sellRes}`);
+      }
+    } else if (currentSuiValue < targetSuiValue - 0.1) {
+      const usdcToSell = targetSuiValue - currentSuiValue;
+      if (usdcToSell > 0.1) {
+        const buyRes = await this.lpManager.swapUsdcToSui(usdcToSell);
+        await this.tracker.recordEvent('資産調整', `${usdcToSell.toFixed(2)} USDCでSUIを購入: ${buyRes}`);
+      }
+    }
+    
+    // STEP 4: レンジ計算とLP提供
+    this.currentLowerBound = currentPrice * (1 - this.config.rangeWidth);
+    this.currentUpperBound = currentPrice * (1 + this.config.rangeWidth);
+    
+    Logger.info(`🎯 目標レンジ設定: $${this.currentLowerBound.toFixed(4)} 〜 $${this.currentUpperBound.toFixed(4)}`);
+    this.currentPhase = CyclePhase.ADDING_LP;
+
+    // targetSuiValue == lpUsdcAmount なので、lpUsdcAmount分のUSDC(と対になるSUI)を投入する
+    const lpRes = await this.lpManager.addLiquidity(this.currentLowerBound, this.currentUpperBound, lpUsdcAmount, true);
+    await this.tracker.recordRebalance(currentPrice, targetSuiValue, lpUsdcAmount, lpRes.digest, 'バランス型LP提供完了', this.currentLowerBound, this.currentUpperBound, 'BALANCED');
+
+    // STEP 5: ヘッジポジション構築
+    Logger.info("⏳ Indexer同期待機 (5秒)...");
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    this.currentPhase = CyclePhase.OPENING_HEDGE;
+    const hedgeRes = await this.hedgeManager.openHedge(marginAmount, currentPrice);
+    await this.tracker.recordHedge('SHORT', 'バランス型ヘッジ構築', currentPrice, marginAmount / currentPrice, hedgeRes.digest);
+
+    this.finalizeRebalance(currentPrice, targetSuiValue * 2, marginAmount, totalCapital);
+  }
+
+  /**
+   * [戦略B] 指値レンジ戦略 (Range Order)
+   */
+  private async executeRangeOrderStrategy(currentPrice: number) {
+    this.notify(`🎯 指値レンジ戦略サイクル開始 (価格: $${currentPrice.toFixed(4)})`);
+    Logger.box('Range Order Strategy Start', `Price: $${currentPrice.toFixed(4)} USDC/SUI`);
+
+    // STEP 1: 全決済
+    await this.closeAllPositions(currentPrice);
+
+    // STEP 2: 資産状況の確認
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    let { suiBalance, usdcBalance } = await this.lpManager.checkBalance();
+    const GAS_RESERVE_SUI = 1.0;
+    const usableSui = Math.max(0, suiBalance - GAS_RESERVE_SUI);
+    const suiValue = usableSui * currentPrice;
+    
+    // 戦略の向きを決定
+    let side = this.config.rangeOrderSide;
+    
+    // 向きが明示的に指定されているのに資産が足りない場合、スワップして補填する
+    if (side === 'above' && usdcBalance > 0.5) {
+      this.notify(`🔄 売り指値(above)に必要なSUIが不足しているため、USDCからスワップして補充します。`);
+      const swapRes = await this.lpManager.swapUsdcToSui(usdcBalance - 0.1); // ほぼ全額をSUIに
+      await this.tracker.recordEvent('資産変換', `売り指値準備のため ${usdcBalance.toFixed(2)} USDC を SUI に変換`, currentPrice, swapRes.digest);
+      await new Promise(r => setTimeout(r, 3000));
+      // 残高再取得
+      const updated = await this.lpManager.checkBalance();
+      suiBalance = updated.suiBalance;
+      usdcBalance = updated.usdcBalance;
+    } else if (side === 'below' && usableSui > 0.5) {
+      this.notify(`🔄 買い指値(below)に必要なUSDCが不足しているため、SUIからスワップして補充します。`);
+      const swapRes = await this.lpManager.swapSuiToUsdc(usableSui - 0.1); // ほぼ全額をUSDCに
+      await this.tracker.recordEvent('資産変換', `買い指値準備のため ${usableSui.toFixed(4)} SUI を USDC に変換`, currentPrice, swapRes.digest);
+      await new Promise(r => setTimeout(r, 3000));
+      // 残高再取得
+      const updated = await this.lpManager.checkBalance();
+      suiBalance = updated.suiBalance;
+      usdcBalance = updated.usdcBalance;
+    }
+
+    const usableSuiFinal = Math.max(0, suiBalance - GAS_RESERVE_SUI);
+    const suiValueFinal = usableSuiFinal * currentPrice;
+
+    const sideMsg = (side === 'above') 
+      ? '価格上昇待ち (Sell SUI / Receive USDC)' 
+      : '価格下落待ち (Buy SUI / Spend USDC)';
+    
+    Logger.info(`🔎 指値戦略選択: ${sideMsg}`);
+
+    // STEP 3: レンジの計算
+    const offset = currentPrice * this.config.rangeOrderOffsetPct;
+    const width = currentPrice * this.config.rangeOrderWidthPct;
+    
+    if (side === 'above') {
+      // 現在価格より上。投入資産は SUI。
+      this.currentLowerBound = currentPrice + offset;
+      this.currentUpperBound = this.currentLowerBound + width;
+    } else {
+      // 現在価格より下。投入資産は USDC。
+      this.currentUpperBound = currentPrice - offset;
+      this.currentLowerBound = this.currentUpperBound - width;
+    }
+
+    Logger.info(`🎯 指値ターゲット: $${this.currentLowerBound.toFixed(4)} 〜 $${this.currentUpperBound.toFixed(4)}`);
+
+    // STEP 4: LP投入 (スワップなし・片側入金)
+    this.currentPhase = CyclePhase.ADDING_LP;
+    
+    // 投入量の決定
+    let deployAmount: number;
+    let isUsdc: boolean;
+    
+    if (side === 'above') {
+      deployAmount = usableSuiFinal;
+      isUsdc = false;
+    } else {
+      deployAmount = Math.max(0, usdcBalance - 0.1); // 手数料用に少し残す
+      isUsdc = true;
+    }
+    
+    if (deployAmount <= 0.001) throw new Error(`${isUsdc ? 'USDC' : 'SUI'} 資産が不足しているため指値を置けません。`);
+
+    const lpRes = await this.lpManager.addLiquidity(this.currentLowerBound, this.currentUpperBound, deployAmount, isUsdc);
+    await this.tracker.recordRebalance(currentPrice, 0, 0, lpRes.digest, `指値(${side})設定完了`, this.currentLowerBound, this.currentUpperBound, 'RANGE_ORDER');
+
+    // STEP 5: ヘッジ (オプション)
+    if (this.config.rangeOrderHedgeEnabled) {
+      this.currentPhase = CyclePhase.OPENING_HEDGE;
+      // 必要に応じて実装
+    }
+
+    this.finalizeRebalance(currentPrice, isUsdc ? deployAmount : deployAmount * currentPrice, 0, isUsdc ? deployAmount : deployAmount * currentPrice);
+  }
+
+  /**
+   * ポジションの全クローズ共通処理
+   */
+  private async closeAllPositions(currentPrice: number) {
+    Logger.info('--- ポジションのクローズ ---');
+    try {
+      const removeRes = await this.lpManager.removeLiquidity();
+      if (removeRes.digest) await this.tracker.recordEvent('LP解除', 'リバランスのためLP解除', currentPrice, removeRes.digest);
+      
+      const hedgeRes = await this.hedgeManager.closeHedge(currentPrice);
+      if (hedgeRes.digest) await this.tracker.recordEvent('ヘッジ決済', 'リバランスのためヘッジ決済', currentPrice, hedgeRes.digest);
+
+      await this.hedgeManager.withdrawAllMargin();
+    } catch (e) {
+      Logger.warn('ポジションクローズ中に一部エラーが発生しました');
+    }
+  }
+
+  /**
+   * リバランス完了の共通処理
+   */
+  private finalizeRebalance(currentPrice: number, lpValue: number, hedgeValue: number, total: number) {
+    this.currentPhase = CyclePhase.MONITORING;
+    this.lastRebalanceTime = Date.now();
+    
+    this.pnlEngine.recordLpEntry(currentPrice, lpValue);
+    this.pnlEngine.recordHedgeEntry(currentPrice, hedgeValue);
+
+    const msg = `✅ 戦略構築完了 (${this.config.strategyMode})\nレンジ: $${this.currentLowerBound.toFixed(4)} 〜 $${this.currentUpperBound.toFixed(4)}`;
+    Logger.success(msg);
+    this.notify(msg);
   }
 
   // ===== メインループ ===== //
@@ -531,8 +604,9 @@ export class Strategy {
       this.priceHistoryForAnalysis.push(firstPrice);
       this.tracker.updateCurrentPrice(firstPrice);
       
-      Logger.box('Strategy Reset Triggered', `Forcing fresh 25/25/50 cycle at $${firstPrice.toFixed(4)}`);
-      this.tracker.recordEvent('戦略テスト開始', `10 USDC での新戦略 (25/25/50) の構築をゼロから開始します。`);
+      const strategyName = this.config.STRATEGY_MODE === 'range_order' ? '指値レンジ戦略 (Range Order)' : 'バランス型戦略 (25/25/50)';
+      Logger.box('Strategy Reset Triggered', `Starting ${strategyName} at $${firstPrice.toFixed(4)}`);
+      this.tracker.recordEvent('戦略テスト開始', `${this.config.TOTAL_OPERATIONAL_CAPITAL_USDC} USDC での ${strategyName} の構築を開始します。`);
       
       // 非同期でリバランスを開始 (1秒後)
       setTimeout(() => this.runRebalance(firstPrice), 1000);
@@ -643,22 +717,31 @@ export class Strategy {
           // === 追加: ヘッジポジションの自己修復ロジック ===
           const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
           if (!hedgeStatus.active && this.currentPhase === CyclePhase.MONITORING) {
-            Logger.warn('⚠️ [REPAIR] ヘッジポジションの欠損を検知しました。補完執行を開始します...');
-            
-            // 現在のスワップ実績（購入済みSUI量）から必要なヘッジサイズを算出
-            const totalSuiInLp = await this.lpManager.getSuiAmountInLp();
-            if (totalSuiInLp > 0) {
-              const hedgeSuiSize = totalSuiInLp * this.config.hedgeRatio;
-              const hedgeUsdcValue = hedgeSuiSize * currentPrice;
+            // 再試行のスパムを防止（10分間に1回まで）
+            const nowTime = Date.now();
+            if (!this.lastRepairAttemptTime || nowTime - this.lastRepairAttemptTime > 10 * 60 * 1000) {
+              this.lastRepairAttemptTime = nowTime;
+              Logger.warn('⚠️ [REPAIR] ヘッジポジションの欠損を検知しました。補完執行を開始します...');
               
-              this.notify(`🔧 ヘッジポジションの補完執行を開始します (サイズ: ${hedgeSuiSize.toFixed(4)} SUI)`);
-              
-              try {
-                const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
-                await this.tracker.recordHedge('SHORT', '【自己修復】欠落していたヘッジショートを補完開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
-                Logger.success('✅ [REPAIR] ヘッジポジションの補完が完了しました。');
-              } catch (e: any) {
-                Logger.error('[REPAIR] ヘッジ補完に失敗しました', e);
+              const totalSuiInLp = await this.lpManager.getSuiAmountInLp();
+              if (totalSuiInLp > 0) {
+                const hedgeSuiSize = totalSuiInLp * this.config.hedgeRatio;
+                const hedgeUsdcValue = hedgeSuiSize * currentPrice;
+                
+                // サイズが極端に小さい場合（Bluefinの最小ロット未満の可能性）は警告
+                if (hedgeSuiSize < 10) {
+                  Logger.warn(`⚠️ [REPAIR] ヘッジ数量 (${hedgeSuiSize.toFixed(2)} SUI) がBluefinの最小注文ロット (通常10 SUI) を下回るため、注文が取引所に弾かれる可能性があります。`);
+                }
+                
+                this.notify(`🔧 ヘッジ補完試行 (サイズ: ${hedgeSuiSize.toFixed(4)} SUI)`);
+                
+                try {
+                  const hedgeOpenRes = await this.hedgeManager.openHedge(hedgeUsdcValue, currentPrice);
+                  await this.tracker.recordHedge('SHORT', '【自己修復】欠落していたヘッジショートを補完開設', currentPrice, hedgeSuiSize, hedgeOpenRes.digest);
+                  Logger.success('✅ [REPAIR] 注文を送信しました。成立は次回照会で確認されます。');
+                } catch (e: any) {
+                  Logger.error('[REPAIR] ヘッジ補完でエラーが発生しました', e);
+                }
               }
             }
           }
@@ -697,10 +780,18 @@ export class Strategy {
     }
   }
 
+  private lastPnlDataSync = 0;
+
   /**
    * PnL/Delta/Gas情報をAPIに返す
    */
   async getPnlData(currentPrice: number) {
+    // 30秒に一度は最新のポジション状態を取引所から強制取得する（API経由のUI更新用）
+    if (Date.now() - this.lastPnlDataSync > 30000) {
+      await this.hedgeManager.syncPositionWithBluefin().catch(() => {});
+      this.lastPnlDataSync = Date.now();
+    }
+
     const balance = await this.lpManager.checkBalance();
     const trackerStats = this.tracker.getStats();
     
@@ -710,7 +801,7 @@ export class Strategy {
         botWalletBalanceSui: balance.suiBalance,
         botWalletBalanceUsdc: balance.usdcBalance,
       },
-      delta: this.pnlEngine.calculateDelta(config.hedgeRatio),
+      delta: this.pnlEngine.calculateDelta(this.config.hedgeRatio),
       gasStats: this.gasTracker.getStats(),
       hedge: this.hedgeManager.getStatus(currentPrice),
       rsi: this.calculateRSI(),
