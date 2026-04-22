@@ -180,7 +180,8 @@ export class SessionManager {
       gasTracker,
       pnlEngine,
       tracker,
-      sessionConfig
+      sessionConfig,
+      () => SessionManager.saveSessionState(targetSessionId)
     );
 
     // Strategyに秘密鍵を設定して初期化 (Bluefin等のセットアップを待機)
@@ -357,6 +358,7 @@ export class SessionManager {
         gas: session.gasTracker.serialize(),
         hedge: session.hedgeManager.serialize(),
         tracker: session.tracker.serialize(), // Trackerデータを追加
+        strategy: session.strategy.serialize(), // 戦略状態を追加
         botSecretKey: session.keypair.getSecretKey(),
         mnemonic: session.mnemonic,
         config: session.config,
@@ -393,6 +395,7 @@ export class SessionManager {
         gasTracker.restore(state.gas);
         hedgeManager.restore(state.hedge);
         if (state.tracker) components.tracker.restore(state.tracker); // Trackerデータを復元
+        if (state.strategy) components.strategy.restore(state.strategy); // 戦略状態を復元
         
         // 実行状態を復元
         if (state.isRunning) {

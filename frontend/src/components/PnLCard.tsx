@@ -25,7 +25,7 @@ interface PnLCardProps {
   gasStats: GasStats | null;
 }
 
-export const PnLCard: React.FC<PnLCardProps> = ({ pnl, gasStats }) => {
+export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
   if (!pnl) {
     return (
       <div className="glass-panel pnl-card">
@@ -145,4 +145,4 @@ export const PnLCard: React.FC<PnLCardProps> = ({ pnl, gasStats }) => {
       )}
     </div>
   );
-};
+});

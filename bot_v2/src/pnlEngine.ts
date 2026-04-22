@@ -14,9 +14,10 @@ export class PnlEngine {
   private totalFeesCollected: number = 0; // 累積手数料(USDC)
 
   // ヘッジ側
-  private hedgeEntryPrice: number = 0;    // ヘッジ（ショート）エントリー価格
+  private hedgeEntryPrice: number = 0;    // ヘッジエントリー価格
   private hedgeSize: number = 0;          // ヘッジサイズ($USDC建て)
   private hedgePnl: number = 0;           // ヘッジ累積PnL
+  private hedgeDirection: 'SHORT' | 'LONG' = 'SHORT'; // ヘッジ方向
   private simulatedFundingCost: number = 0; // シミュレーション: Funding Rate累積コスト
 
   // ガス
@@ -46,11 +47,13 @@ export class PnlEngine {
   /**
    * ヘッジポジションエントリーを記録
    */
-  recordHedgeEntry(entryPrice: number, sizeUsdc: number) {
+  recordHedgeEntry(entryPrice: number, sizeUsdc: number, direction: 'SHORT' | 'LONG' = 'SHORT') {
     this.hedgeEntryPrice = entryPrice;
     this.hedgeSize = sizeUsdc;
     this.hedgePnl = 0;
-    Logger.info(`📊 PnL: ヘッジエントリー記録 - 価格: $${entryPrice.toFixed(4)}, サイズ: $${sizeUsdc.toFixed(4)}`);
+    this.hedgeDirection = direction;
+    const dirLabel = direction === 'SHORT' ? 'ショート' : 'ロング';
+    Logger.info(`📊 PnL: ヘッジエントリー記録 - ${dirLabel} 価格: $${entryPrice.toFixed(4)}, サイズ: $${sizeUsdc.toFixed(4)}`);
   }
 
   /**
@@ -91,16 +94,20 @@ export class PnlEngine {
   }
 
   /**
-   * ヘッジ（ショート）PnLを計算
-   * 
-   * ショートなので価格下落 → 利益、価格上昇 → 損失
+   * ヘッジPnLを計算（ショート/ロング両対応）
    */
   calculateHedgePnl(currentPrice: number): number {
     if (this.hedgeEntryPrice <= 0 || this.hedgeSize <= 0) return 0;
 
-    // ショートPnL: サイズ × (エントリー価格 - 現在価格) / エントリー価格
-    const priceChange = (this.hedgeEntryPrice - currentPrice) / this.hedgeEntryPrice;
-    return this.hedgeSize * priceChange;
+    if (this.hedgeDirection === 'SHORT') {
+      // ショートPnL: 価格下落 → 利益
+      const priceChange = (this.hedgeEntryPrice - currentPrice) / this.hedgeEntryPrice;
+      return this.hedgeSize * priceChange;
+    } else {
+      // ロングPnL: 価格上昇 → 利益
+      const priceChange = (currentPrice - this.hedgeEntryPrice) / this.hedgeEntryPrice;
+      return this.hedgeSize * priceChange;
+    }
   }
 
   /**
@@ -252,6 +259,7 @@ export class PnlEngine {
       totalFeesCollected: this.totalFeesCollected,
       hedgeEntryPrice: this.hedgeEntryPrice,
       hedgeSize: this.hedgeSize,
+      hedgeDirection: this.hedgeDirection,
       totalGasCost: this.totalGasCost,
       dailySnapshots: this.dailySnapshots,
     };
@@ -268,8 +276,9 @@ export class PnlEngine {
     this.totalFeesCollected = data.totalFeesCollected || 0;
     this.hedgeEntryPrice = data.hedgeEntryPrice || 0;
     this.hedgeSize = data.hedgeSize || 0;
+    this.hedgeDirection = data.hedgeDirection || 'SHORT';
     this.totalGasCost = data.totalGasCost || 0;
     this.dailySnapshots = data.dailySnapshots || [];
-    Logger.info(`📊 PnL: 前回データ復元 - 累積手数料: $${this.totalFeesCollected.toFixed(4)}, ガス代: $${this.totalGasCost.toFixed(4)}`);
+    Logger.info(`📊 PnL: 前回データ復元 - 累積手数料: $${this.totalFeesCollected.toFixed(4)}, ガス代: $${this.totalGasCost.toFixed(4)}, ヘッジ方向: ${this.hedgeDirection}`);
   }
 }

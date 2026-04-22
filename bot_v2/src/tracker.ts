@@ -12,6 +12,13 @@ export interface TrackerData {
   currentPrice: number;
   positionSize: number;
   successfulRebalances: number;
+  balanceHistory: Array<{
+    timestamp: string;
+    suiBalance: number;
+    usdcBalance: number;
+    bluefinMargin: number;
+    totalValueUsdc: number;
+  }>;
   history: Array<{
     timestamp: string;
     price: number;
@@ -34,12 +41,15 @@ export class Tracker {
     currentPrice: 0,
     positionSize: 0,
     successfulRebalances: 0,
+    balanceHistory: [],
     history: [],
   };
 
   private filePath: string;
   private lastSaveTime: number = 0;
   private readonly SAVE_INTERVAL_MS = 60 * 1000; // 1分ごとに保存
+  private lastBalanceSnapshotTime: number = 0;
+  private readonly BALANCE_SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000; // 10分ごとに残高スナップショット
 
   constructor(private sessionId: string) {
     this.filePath = path.resolve(process.cwd(), `tracker_${this.sessionId}.json`);
@@ -49,6 +59,12 @@ export class Tracker {
     try {
       const content = await fs.readFile(this.filePath, 'utf-8');
       this.data = JSON.parse(content);
+      
+      // バランス履歴のマイグレーション
+      if (!this.data.balanceHistory) {
+        this.data.balanceHistory = [];
+      }
+      
       Logger.info(`Tracker initialized for session ${this.sessionId}`);
     } catch (e: any) {
       if (e.code === 'ENOENT') {
@@ -65,6 +81,35 @@ export class Tracker {
       await fs.writeFile(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
     } catch (e) {
       Logger.error(`Failed to save tracking data for ${this.sessionId}`, e);
+    }
+  }
+
+  /**
+   * 残高履歴を記録
+   */
+  async recordBalance(sui: number, usdc: number, bluefinMargin: number, totalValue: number, price: number) {
+    const now = Date.now();
+    
+    // インターバル判定 (または初回)
+    if (now - this.lastBalanceSnapshotTime >= this.BALANCE_SNAPSHOT_INTERVAL_MS || this.data.balanceHistory.length === 0) {
+      this.data.balanceHistory.push({
+        timestamp: new Date().toISOString(),
+        suiBalance: sui,
+        usdcBalance: usdc,
+        bluefinMargin: bluefinMargin,
+        totalValueUsdc: totalValue
+      });
+      
+      this.data.currentPrice = price;
+
+      // 履歴制限 (約1週間分 = 144 snapshot / day * 7 = 1008)
+      if (this.data.balanceHistory.length > 1000) {
+        this.data.balanceHistory.shift();
+      }
+
+      this.lastBalanceSnapshotTime = now;
+      await this.save();
+      Logger.info(`📈 資産スナップショットを記録しました: $${totalValue.toFixed(2)} (SUI: ${sui.toFixed(2)}, USDC: ${usdc.toFixed(2)}, Bluefin: ${bluefinMargin.toFixed(2)})`);
     }
   }
 
@@ -205,6 +250,11 @@ export class Tracker {
       positionSize: this.data.positionSize,
       priceChangePercent: priceChange.toFixed(2),
       winRate: winRate.toFixed(1),
+      balanceHistory: this.data.balanceHistory.map(b => ({
+        ...b,
+        time: new Date(b.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+        date: new Date(b.timestamp).toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' })
+      })),
       history: [...this.data.history].reverse().map(h => ({
         time: new Date(h.timestamp).toLocaleTimeString('ja-JP', { hour12: false }),
         date: new Date(h.timestamp).toLocaleDateString('ja-JP', { month: '2-digit', day: '2-digit' }),

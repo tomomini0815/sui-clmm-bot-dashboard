@@ -8,9 +8,10 @@ import '@mysten/dapp-kit/dist/index.css';
 
 const queryClient = new QueryClient();
 
+// @ts-ignore
 const { networkConfig } = createNetworkConfig({
-  mainnet: { url: 'https://fullnode.mainnet.sui.io:443' },
-  testnet: { url: 'https://fullnode.testnet.sui.io:443' },
+  mainnet: { url: 'https://fullnode.mainnet.sui.io:443' } as any,
+  testnet: { url: 'https://fullnode.testnet.sui.io:443' } as any,
 });
 
 createRoot(document.getElementById('root')!).render(

@@ -70,6 +70,12 @@ body {
   position: relative;
 }
 
+@media (max-width: 480px) {
+  .glass-panel {
+    padding: 16px;
+  }
+}
+
 /* ホバー効果はデスクトップのみ */
 @media (hover: hover) and (pointer: fine) {
   .glass-panel:hover {
@@ -139,6 +145,12 @@ button.primary-btn:active {
   padding: 48px 32px;
 }
 
+@media (max-width: 768px) {
+  .dashboard-container {
+    padding: 24px 16px;
+  }
+}
+
 .header {
   display: flex;
   justify-content: space-between;
@@ -147,28 +159,31 @@ button.primary-btn:active {
   padding-bottom: 20px;
   border-bottom: 1px solid var(--border-panel);
   gap: 16px;
+  position: relative;
 }
 
 .header h1 {
-  font-size: 2.2rem;
+  font-size: clamp(1.2rem, 5vw, 2.2rem);
   font-weight: 700;
   letter-spacing: -0.01em;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .header p {
-  font-size: 0.95rem;
+  font-size: clamp(0.75rem, 2.5vw, 0.95rem);
   margin-top: 6px;
   color: var(--text-muted);
   font-weight: 400;
+  white-space: nowrap;
 }
 
 .badge {
   background: rgba(63, 185, 80, 0.1);
   color: var(--success);
-  padding: 8px 14px;
+  padding: 6px 12px;
   border-radius: 20px;
-  font-size: 0.85rem;
+  font-size: clamp(0.65rem, 2vw, 0.85rem);
   font-weight: 600;
   border: 1px solid rgba(63, 185, 80, 0.25);
   backdrop-filter: blur(10px);
@@ -199,6 +214,49 @@ button.primary-btn:active {
   font-weight: 400;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+/* Connect Button Custom Styling */
+.sui-connect-wrapper button {
+  background: var(--accent) !important;
+  color: white !important;
+  border-radius: 12px !important;
+  font-family: 'Inter', sans-serif !important;
+  font-weight: 700 !important;
+  font-size: 0.9rem !important;
+  padding: 10px 20px !important;
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(88, 166, 255, 0.25) !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  text-transform: none !important;
+  height: auto !important;
+  line-height: normal !important;
+}
+
+.sui-connect-wrapper button:hover {
+  background: var(--accent-hover) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 6px 16px rgba(88, 166, 255, 0.35) !important;
+}
+
+/* Connected State Styling (Dropdown toggle) */
+.sui-connect-wrapper div[data-state] button {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border: 1px solid var(--border-panel) !important;
+  color: var(--text-main) !important;
+  box-shadow: none !important;
+}
+
+.sui-connect-wrapper div[data-state] button:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(88, 166, 255, 0.3) !important;
+}
+
 /* Sidebar & Main */
 .sidebar-aside {
   display: flex;
@@ -223,13 +281,25 @@ button.primary-btn:active {
 .dashboard-grid {
   display: grid;
   grid-template-columns: 1fr;
+  grid-template-areas: 
+    "sidebar"
+    "main";
   gap: 24px;
 }
 
 @media (min-width: 1024px) {
   .dashboard-grid {
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: 1fr 360px;
+    grid-template-areas: "main sidebar";
   }
+}
+
+.sidebar-aside {
+  grid-area: sidebar;
+}
+
+.main-content {
+  grid-area: main;
 }
 
 .stats-grid {
@@ -243,6 +313,13 @@ button.primary-btn:active {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 12px;
+  }
+}
+
+@media (max-width: 420px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
   }
 }
 
@@ -322,6 +399,15 @@ button.primary-btn:active {
   width: 100%;
   outline: none;
   -webkit-appearance: none;
+}
+
+/* Fix browser autofill background */
+.input-glass:-webkit-autofill,
+.input-glass:-webkit-autofill:hover, 
+.input-glass:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text-main);
+  -webkit-box-shadow: 0 0 0px 1000px #1c2128 inset;
+  transition: background-color 5000s ease-in-out 0s;
 }
 
 .input-glass:hover {
@@ -549,9 +635,15 @@ button.primary-btn:active {
 
 .pnl-metrics-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   gap: 8px;
   margin-bottom: 16px;
+}
+
+@media (max-width: 420px) {
+  .pnl-metrics-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .pnl-metric {
@@ -623,10 +715,48 @@ button.primary-btn:active {
 .pnl-positive { color: var(--success); font-weight: 600; }
 .pnl-negative { color: var(--danger); font-weight: 600; }
 
+.dashboard-container {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.dashboard-main-content {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 24px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .dashboard-main-content {
+    grid-template-columns: 1fr;
+  }
+}
+
+.price-chart-panel {
+  min-height: 400px !important;
+  flex: 1;
+}
+
+.balance-chart-container {
+  min-height: 200px !important;
+}
+
 .pnl-gas-stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
+}
+
+@media (max-width: 420px) {
+  .pnl-gas-stats {
+    grid-template-columns: 1fr;
+  }
 }
 
 .pnl-gas-stat {
@@ -1383,20 +1513,49 @@ button.primary-btn:active {
 }
 
 /* ============================================ */
-/* RESPONSIVE — Small Mobile (≤ 360px)           */
+/* RESPONSIVE — Mobile (≤ 480px)                 */
 /* ============================================ */
 
-@media (max-width: 360px) {
+@media (max-width: 480px) {
   .dashboard-container {
-    padding: 12px 8px;
+    padding: 16px 12px;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding-top: 24px; /* Space for the top-right badge */
+    padding-bottom: 12px;
+    margin-bottom: 24px;
+    position: relative;
+  }
+
+  .header-title-section {
+    padding-right: 0;
+    width: 100%;
+  }
+
+  .badge {
+    position: absolute;
+    top: 5px;
+    right: 4px;
+    margin: 0;
+    padding: 3px 10px;
+    font-size: 0.65rem;
+    z-index: 50;
+    pointer-events: none; /* Avoid blocking title clicks if they overlap slightly */
   }
 
   .header h1 {
-    font-size: 1.1rem;
+    font-size: clamp(1.1rem, 5vw, 1.3rem);
+    line-height: 1.1;
+    margin-top: 8px;
   }
 
   .header p {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .glass-panel {
@@ -1426,12 +1585,9 @@ button.primary-btn:active {
     font-size: 0.75rem;
   }
 
-  .pnl-metrics-row {
-    grid-template-columns: 1fr;
-  }
-
+  .pnl-metrics-row,
   .pnl-gas-stats {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) !important;
   }
 
   .wizard-card {

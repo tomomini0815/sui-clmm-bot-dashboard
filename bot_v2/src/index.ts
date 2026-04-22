@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { requestSuiFromFaucetV0, getFaucetHost } from '@mysten/sui/faucet';
-import { decodeSuiPrivateKey, encodeSuiPrivateKey } from '@mysten/sui/cryptography';
+import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import crypto from 'crypto';
 
 import { Logger } from './logger.js';
@@ -15,9 +15,9 @@ import { LpManager } from './lpManager.js';
 import { HedgeManager } from './hedgeManager.js';
 import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
-import { Strategy } from './strategy.js';
+import { Strategy, CyclePhase } from './strategy.js';
 import { Tracker } from './tracker.js';
-import { config, reloadConfig, updateConfigReference, BotConfig } from './config.js';
+import { config, BotConfig } from './config.js';
 import { SessionManager } from './sessionManager.js';
 
 // ES Module dir resolution
@@ -196,12 +196,12 @@ app.get('/api/sessions/active', (req, res) => {
   res.json({
     success: true,
     count: stats.length,
-    sessions: stats.map(s => ({
-      sessionId: s.sessionId,
-      botWalletAddress: s.botWalletAddress,
-      userWalletAddress: s.userWalletAddress,
-      isRunning: s.isRunning
-    }))
+    sessions: stats.map(session => ({
+        sessionId: session.sessionId,
+        walletAddress: session.walletAddress,
+        isRunning: session.isRunning,
+        createdAt: session.createdAt
+      }))
   });
 });
 
@@ -235,7 +235,9 @@ app.post('/api/config', async (req, res) => {
       telegramChatId, 
       rpcUrl, 
       poolObjectId, 
-      configMode 
+      configMode,
+      strategyMode,
+      backupPassword
     } = req.body;
     
     if (!sessionId) {
@@ -246,8 +248,6 @@ app.post('/api/config', async (req, res) => {
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
-
-    const oldStrategyMode = session.config.strategyMode;
 
     // セッション固有の設定を構築
     const newConfig: BotConfig = {
@@ -260,8 +260,31 @@ app.post('/api/config', async (req, res) => {
       telegramToken: telegramToken || session.config.telegramToken,
       telegramChatId: telegramChatId || session.config.telegramChatId,
       rpcUrl: rpcUrl || session.config.rpcUrl,
-      configMode: configMode || session.config.configMode
+      configMode: configMode || session.config.configMode,
+      backupPassword: (backupPassword !== undefined) ? backupPassword : session.config.backupPassword
     };
+
+    // グローバルなconfigオブジェクトも同期 (export-key endpointで使用)
+    if (newConfig.backupPassword) {
+      config.backupPassword = newConfig.backupPassword;
+      
+      // .env ファイルの更新
+      try {
+        const envPath = path.resolve(process.cwd(), '.env');
+        if (fs.existsSync(envPath)) {
+          let envContent = fs.readFileSync(envPath, 'utf8');
+          if (envContent.includes('BACKUP_PASSWORD=')) {
+            envContent = envContent.replace(/BACKUP_PASSWORD=.*/, `BACKUP_PASSWORD=${newConfig.backupPassword}`);
+          } else {
+            envContent += `\nBACKUP_PASSWORD=${newConfig.backupPassword}`;
+          }
+          fs.writeFileSync(envPath, envContent);
+          Logger.info('BACKUP_PASSWORD updated in .env file');
+        }
+      } catch (e) {
+        Logger.error('Failed to update .env file with new backup password', e);
+      }
+    }
 
     // セッションの設定を更新・反映
     refreshSessionComponents(sessionId, newConfig);
@@ -385,6 +408,7 @@ app.get('/api/stats', async (req, res) => {
       const currentPrice = prices[prices.length - 1].price;
       
       const deviation = Math.abs(shortMA - longMA) / longMA;
+      
       if (deviation < 0.02) {
         marketCondition = 'sideways';
       } else if (shortMA > longMA && currentPrice > shortMA) {
@@ -407,6 +431,7 @@ app.get('/api/stats', async (req, res) => {
     
     // 価格が未取得の場合は強制取得
     if (currentPrice <= 0) {
+      session.strategy.currentPhase = CyclePhase.IDLE;
       currentPrice = await session.priceMonitor.getCurrentPrice();
     }
 
@@ -418,7 +443,6 @@ app.get('/api/stats', async (req, res) => {
       data: {
         ...stats,
         isRunning: session.strategy.isRunning,
-        currentPhase: session.strategy.currentPhase,
         ...pnlData,
         botWalletAddress: session.botWalletAddress,
         userWalletAddress: session.walletAddress,
@@ -439,7 +463,33 @@ app.get('/api/stats', async (req, res) => {
         dailySnapshots: pnlData?.dailySnapshots || [],
         pnl: pnlData?.pnl || null,
         delta: pnlData?.delta || null,
+
+        // === 仕様書準拠: 安全ゲート状態 ===
+        safetyGates: {
+          drawdownPct: (() => {
+            const totalValue = session.config.totalOperationalCapitalUsdc + (pnlData?.pnl?.netPnl ?? 0);
+            const peak = Math.max(session.config.totalOperationalCapitalUsdc, totalValue);
+            return peak > 0 ? ((peak - totalValue) / peak) * 100 : 0;
+          })(),
+          marginRatio: pnlData?.hedge?.active
+            ? (pnlData.hedge.marginBalance / (pnlData.hedge.size || 1)) * 100
+            : 999,
+          priceDataAge: session.priceMonitor.getPriceDataAge?.() ?? 0,
+          consecutiveErrors: (session.strategy as any).consecutiveErrors ?? 0,
+          isEmergency: session.strategy.isEmergencyStopped,
+        },
+
+        // === 1時間サマリー ===
+        hourlySummary: (session.strategy as any).lastHourlySummary ?? null,
+
+        // === EMA・TWAP (Phase B/C判断用) ===
+        trendInfo: (() => {
+          try {
+            return session.priceMonitor.evaluateTrend?.() ?? null;
+          } catch { return null; }
+        })(),
       }
+
     });
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });

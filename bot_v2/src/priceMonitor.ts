@@ -10,7 +10,7 @@ const PYTH_HERMES_URL = 'https://hermes.pyth.network';
 export class PriceMonitor {
   private sdk!: ReturnType<typeof initCetusSDK>;
   private poolObjectId!: string;
-  private priceHistory: { time: string, price: number }[] = [];
+  private priceHistory: { time: string; price: number; timestamp: number }[] = [];
 
   // コイン情報（pool取得時に動的にセット）
   private decimalsA: number = 6;
@@ -18,6 +18,9 @@ export class PriceMonitor {
   private coinTypeA: string = '';
   private coinTypeB: string = '';
   private isInitialized: boolean = false;
+
+  // 最終価格取得タイムスタンプ (安全ゲート用)
+  private lastPriceTimestamp: number = 0;
 
   constructor(private config: BotConfig = globalConfig) {
     this.refreshConfig();
@@ -53,7 +56,6 @@ export class PriceMonitor {
         this.coinTypeA = pool.coinTypeA;
         this.coinTypeB = pool.coinTypeB;
         
-        // メタデータを取得してDecimalを確定させる
         const coinAMeta = await this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA });
         const coinBMeta = await this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB });
         
@@ -80,6 +82,15 @@ export class PriceMonitor {
 
   getPriceHistory() {
     return this.priceHistory;
+  }
+
+  /**
+   * 最終価格取得からの経過時間（秒）を返す
+   * 安全ゲート: 60秒超えでPAUSE
+   */
+  getPriceDataAge(): number {
+    if (this.lastPriceTimestamp === 0) return 999;
+    return (Date.now() - this.lastPriceTimestamp) / 1000;
   }
 
   private async fetchWithTimeout(url: string, timeout = 10000): Promise<Response> {
@@ -126,7 +137,6 @@ export class PriceMonitor {
 
       const sqrtPriceBN = new BN(pool.current_sqrt_price.toString());
       
-      // USDC の判定（Native USDC: 0xdba3... または Testnet の COIN_A）
       const isAUsdc = this.coinTypeA.includes('dba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7') || 
                       this.coinTypeA.toLowerCase().includes('usdc') || 
                       this.coinTypeA.toLowerCase().includes('coin_a');
@@ -137,19 +147,13 @@ export class PriceMonitor {
       
       let price: number;
       
-      // 1 unit of A in terms of B
       const result = TickMath.sqrtPriceX64ToPrice(sqrtPriceBN, this.decimalsA, this.decimalsB).toNumber();
       
       if (isAUsdc) {
-        // A=USDC, B=SUI. result = SUI quantity for 1 USDC.
-        // Price (USDC/SUI) = 1 / result
         price = 1 / result;
       } else if (isBUsdc) {
-        // A=SUI, B=USDC. result = USDC quantity for 1 SUI.
-        // Price (USDC/SUI) = result
         price = result;
       } else {
-        // Fallback: Assume B is USDC if it has 6 decimals, else A
         if (this.decimalsB === 6) {
           price = result;
         } else {
@@ -160,7 +164,6 @@ export class PriceMonitor {
       // Pyth Oracle チェック
       const pythPrice = await this.getPythPrice();
       if (pythPrice > 0) {
-        // 乖離チェック（5%以上離れていればPythを採用 または 警告）
         const diff = Math.abs(price - pythPrice) / pythPrice;
         if (diff > 0.05) {
           Logger.warn(`Price Divergence: Pool=$${price.toFixed(4)}, Pyth=$${pythPrice.toFixed(4)}. Using Pyth.`);
@@ -182,11 +185,13 @@ export class PriceMonitor {
         }
       }
 
-      this.priceHistory.push({ time: timeStr, price: Number(price.toFixed(4)) });
-      if (this.priceHistory.length > 120) { // 履歴保持を120件に拡張
+      const entry = { time: timeStr, price: Number(price.toFixed(4)), timestamp: Date.now() };
+      this.priceHistory.push(entry);
+      if (this.priceHistory.length > 240) { // 2時間分 (30秒間隔)
         this.priceHistory.shift();
       }
 
+      this.lastPriceTimestamp = Date.now();
       return price;
     } catch (error) {
       Logger.error('Failed to fetch current price', error);
@@ -196,13 +201,128 @@ export class PriceMonitor {
   }
 
   /**
+   * 指定ウィンドウ（ミリ秒）の時間加重平均価格(TWAP)を計算
+   * Phase B/Cでのnew_center計算に使用
+   */
+  fetchTWAP(windowMs: number = 5 * 60 * 1000): number {
+    const now = Date.now();
+    const cutoff = now - windowMs;
+    const relevant = this.priceHistory.filter(p => p.timestamp >= cutoff);
+    
+    if (relevant.length === 0) {
+      // フォールバック: 最新価格
+      const last = this.priceHistory[this.priceHistory.length - 1];
+      return last ? last.price : 0;
+    }
+    
+    // 単純平均（データ点数が少ない場合は近似として許容）
+    const sum = relevant.reduce((acc, p) => acc + p.price, 0);
+    const twap = sum / relevant.length;
+    Logger.info(`📊 TWAP(${windowMs / 60000}min): $${twap.toFixed(4)} (${relevant.length} samples)`);
+    return twap;
+  }
+
+  /**
+   * 過去24時間のATR（平均真の値幅）計算
+   * レンジ計算: lower = price × (1 - ATR/price × 2.0)
+   */
+  calculateATR24h(): number {
+    const window24h = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const cutoff = now - window24h;
+    const relevant = this.priceHistory.filter(p => p.timestamp >= cutoff);
+    
+    if (relevant.length < 2) {
+      // 履歴不足: デフォルト5%ボラティリティで代替
+      const lastPrice = this.priceHistory[this.priceHistory.length - 1]?.price || 3.0;
+      Logger.info(`⚠️ ATR24h: 履歴不足 (${relevant.length}件) → デフォルト5%使用`);
+      return lastPrice * 0.05;
+    }
+    
+    // 各期間の値幅を計算してその平均をATRとする
+    let totalRange = 0;
+    for (let i = 1; i < relevant.length; i++) {
+      totalRange += Math.abs(relevant[i].price - relevant[i - 1].price);
+    }
+    
+    const atr = totalRange / (relevant.length - 1);
+    Logger.info(`📏 ATR24h: $${atr.toFixed(4)} (${relevant.length} samples)`);
+    return atr;
+  }
+
+  /**
+   * EMA（指数移動平均）計算
+   * @param period EMA期間（20または50）
+   * @returns EMA値
+   */
+  getEMA(period: number): number {
+    const prices = this.priceHistory.map(p => p.price);
+    if (prices.length < period) {
+      // 履歴不足: 単純平均で代替
+      const sum = prices.reduce((a, b) => a + b, 0);
+      return prices.length > 0 ? sum / prices.length : 0;
+    }
+    
+    const k = 2 / (period + 1);
+    let ema = prices.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    
+    for (let i = period; i < prices.length; i++) {
+      ema = prices[i] * k + ema * (1 - k);
+    }
+    
+    return ema;
+  }
+
+  /**
+   * EMA20 と EMA50 を使ったトレンド判定
+   * Phase B: EMA20 > EMA50 確認後にロング許可
+   * Phase C: EMA20 < EMA50 確認後にショート許可
+   */
+  evaluateTrend(): { trend: 'uptrend' | 'downtrend' | 'sideways'; ema20: number; ema50: number } {
+    const ema20 = this.getEMA(20);
+    const ema50 = this.getEMA(50);
+    const currentPrice = this.priceHistory[this.priceHistory.length - 1]?.price || 0;
+    
+    if (ema20 === 0 || ema50 === 0 || this.priceHistory.length < 20) {
+      return { trend: 'sideways', ema20, ema50 };
+    }
+    
+    const deviation = Math.abs(ema20 - ema50) / ema50;
+    
+    let trend: 'uptrend' | 'downtrend' | 'sideways';
+    if (deviation < 0.015) {
+      trend = 'sideways';
+    } else if (ema20 > ema50 && currentPrice > ema20) {
+      trend = 'uptrend';
+    } else if (ema20 < ema50 && currentPrice < ema20) {
+      trend = 'downtrend';
+    } else {
+      trend = 'sideways';
+    }
+    
+    Logger.info(`📊 Trend: ${trend} (EMA20=$${ema20.toFixed(4)}, EMA50=$${ema50.toFixed(4)})`);
+    return { trend, ema20, ema50 };
+  }
+
+  /**
    * 履歴データから過去の推移を復元する
    */
-  restoreHistory(prices: { time: string, price: number }[]) {
+  restoreHistory(prices: { time: string; price: number; timestamp?: number }[]) {
     if (!prices || prices.length === 0) return;
     
-    // 重複を避けつつ、最新の120件を保持
-    this.priceHistory = [...prices].slice(-120);
+    // timestampがない場合は推定（現在から逆算）
+    const now = Date.now();
+    const interval = 30000; // 30秒
+    this.priceHistory = [...prices].slice(-240).map((p, i, arr) => ({
+      time: p.time,
+      price: p.price,
+      timestamp: p.timestamp || (now - (arr.length - 1 - i) * interval)
+    }));
+    
+    if (this.priceHistory.length > 0) {
+      this.lastPriceTimestamp = this.priceHistory[this.priceHistory.length - 1].timestamp;
+    }
+    
     Logger.info(`📈 PriceMonitor: 価格履歴 ${this.priceHistory.length} 件を復元しました`);
   }
 

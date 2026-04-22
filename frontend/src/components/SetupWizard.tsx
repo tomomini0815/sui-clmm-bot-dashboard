@@ -86,7 +86,9 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({
           }}>
             {!isRestoring ? (
               <>
-                <ConnectButton />
+                <div className="sui-connect-wrapper">
+                  <ConnectButton />
+                </div>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center' }}>
                   {currentAccount ? (
                     <span className="animate-pulse" style={{ color: 'var(--neon-cetus)', fontWeight: 600 }}>

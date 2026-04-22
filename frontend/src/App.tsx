@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet } from 'lucide-react';
 import { StatCard } from './components/StatCard';
 import { PriceChart } from './components/PriceChart';
-import { ConfigPanel } from './components/ConfigPanel';
+import { BalanceChart } from './components/BalanceChart';
 import { SettingsModal } from './components/SettingsModal';
 import { ActivityLog } from './components/ActivityLog';
 import { SetupWizard } from './components/SetupWizard';
@@ -12,11 +12,12 @@ import { DeltaGauge } from './components/DeltaGauge';
 import { BotWalletCard } from './components/BotWalletCard';
 import { StrategyVisualizer } from './components/StrategyVisualizer';
 import { HedgePerfChart } from './components/HedgePerfChart';
-import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
+import { SafetyGauge } from './components/SafetyGauge';
+import { HourlySummaryCard } from './components/HourlySummaryCard';
+import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 
 function App() {
   const currentAccount = useCurrentAccount();
-  const { mutate: signAndExecute } = useSignAndExecuteTransaction();
   
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -85,7 +86,14 @@ function App() {
     totalRebalances: 0,
     activityLogs: [] as any[],
     currentRange: { lower: 0, upper: 0 },
-    config: { lpAmountUsdc: 0.10, rangeWidth: 0.05, hedgeRatio: 0.5, configMode: 'auto' },
+    config: { 
+      lpAmountUsdc: 0.10, 
+      rangeWidth: 0.05, 
+      hedgeRatio: 0.5, 
+      configMode: 'auto' as 'auto' | 'manual',
+      strategyMode: 'balanced' as 'balanced' | 'range_order',
+      totalOperationalCapitalUsdc: 0
+    },
     currentPrice: 0,
     entryPrice: 0,
     positionSize: 0,
@@ -94,13 +102,17 @@ function App() {
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
     pythPrice: null as number | null,
-    // 新データ
     pnl: null as any,
     delta: null as any,
     gasStats: null as any,
     hedge: null as any,
     indicators: null as any,
     currentPhase: '',
+    network: 'mainnet' as 'mainnet' | 'testnet',
+    balanceHistory: [] as any[],
+    // 安全ゲート・1時間サマリー
+    safetyGates: null as any,
+    hourlySummary: null as any,
   });
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
@@ -118,41 +130,52 @@ function App() {
         if (result.success) {
           // アドレスの同期を強化
           if (result.data.botWalletAddress && result.data.botWalletAddress !== botWalletAddress) {
-            console.log(`[SYNC] Bot Wallet Address forced to: ${result.data.botWalletAddress}`);
             setBotWalletAddress(result.data.botWalletAddress);
           }
           
-          console.log('[DEBUG] API Stats Data:', result.data);
           setStats(result.data);
           setIsBotActive(result.data.isRunning);
 
-          const poolHistory = (result.data.priceHistory || []).map((p: any) => ({
-            time: p.time,
-            poolPrice: p.price,
-            pythPrice: p.pythPrice || null
-          }));
+          // データの徹底洗浄：数値であることを保証
+          const poolHistory = (result.data.priceHistory || [])
+            .map((p: any) => ({
+              time: String(p.time || ''),
+              poolPrice: Number(p.price) || 0,
+              pythPrice: p.pythPrice ? Number(p.pythPrice) : null
+            }))
+            .filter((p: any) => p.time && p.poolPrice > 0);
+
           const latestPool = poolHistory.length > 0 ? poolHistory[poolHistory.length - 1] : null;
-          const latestPyth: number | null = result.data.pythPrice ?? null;
+          const latestPyth: number | null = result.data.pythPrice ? Number(result.data.pythPrice) : null;
 
           if (latestPool) {
-            // 全体の統計を更新（フェーズ情報もここに含まれる）
-            setStats(result.data);
-
             setCombinedHistory(prev => {
-              const exists = prev.find(e => e.time === latestPool.time);
-              if (exists) {
-                return prev.map(e =>
-                  e.time === latestPool.time
-                    ? { ...e, poolPrice: latestPool.poolPrice, pythPrice: latestPyth ?? e.pythPrice }
-                    : e
-                );
+              const lastEntry = prev.length > 0 ? prev[prev.length - 1] : null;
+              
+              // 全く同じデータなら更新しない
+              if (lastEntry && 
+                  lastEntry.time === latestPool.time && 
+                  Math.abs(lastEntry.poolPrice - latestPool.poolPrice) < 0.00001 && 
+                  lastEntry.pythPrice === latestPyth) {
+                return prev;
               }
-              const newEntry = {
+
+              const existsIndex = prev.findIndex(e => e.time === latestPool.time);
+              if (existsIndex > -1) {
+                const updated = [...prev];
+                updated[existsIndex] = {
+                  ...prev[existsIndex],
+                  poolPrice: latestPool.poolPrice,
+                  pythPrice: latestPyth ?? prev[existsIndex].pythPrice
+                };
+                return updated;
+              }
+              
+              const updated = [...prev, {
                 time: latestPool.time,
                 poolPrice: latestPool.poolPrice,
                 pythPrice: latestPyth,
-              };
-              const updated = [...prev, newEntry];
+              }];
               return updated.length > 120 ? updated.slice(-120) : updated;
             });
           }
@@ -237,9 +260,9 @@ function App() {
         setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode } }));
         // ボットが稼働中の場合はリバランスがトリガーされる旨を通知
         if (isBotActive) {
-          alert(`🚀 戦略を ${mode === 'balanced' ? 'バランス型' : '指値レンジ型'} に切り替えました。即座にリバランスが実行されます。`);
+          alert(`🚀 戦略を ${mode === 'balanced' ? 'デルタニュートラル方向反転型' : '指値レンジ型'} に切り替えました。即座にリバランスが実行されます。`);
         } else {
-          alert(`✅ 戦略を ${mode === 'balanced' ? 'バランス型' : '指値レンジ型'} に設定しました。`);
+          alert(`✅ 戦略を ${mode === 'balanced' ? 'デルタニュートラル方向反転型' : '指値レンジ型'} に設定しました。`);
         }
       }
     } catch (e) {
@@ -290,7 +313,8 @@ function App() {
             )}
           </p>
         </div>
-        <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
+        <div className="header-actions">
+          <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
           display: 'flex',
           alignItems: 'center',
           gap: '8px',
@@ -313,12 +337,15 @@ function App() {
                   <span style={{ color: 'var(--border-panel)', margin: '0 4px' }}>|</span>
                   <span style={{ color: 'var(--accent)', fontWeight: '600' }}>
                     工程: {
-                      stats.currentPhase === 'SWAPPING' ? 'スワップ中' :
-                      stats.currentPhase === 'ADDING_LP' ? 'LP投入中' :
-                      stats.currentPhase === 'OPENING_HEDGE' ? 'ヘッジ構築中' :
-                      stats.currentPhase === 'MONITORING' ? '運用監視中' :
-                      stats.currentPhase === 'REBALANCING' ? 'リバランス中' : 
-                      stats.currentPhase === 'IDLE' ? '待機中' : stats.currentPhase
+                      stats.currentPhase === 'スワップ中' ? 'スワップ中' :
+                      stats.currentPhase === 'LP投入中' ? 'LP投入中' :
+                      stats.currentPhase === 'ヘッジ注文中' ? 'ヘッジ構築中' :
+                      stats.currentPhase === 'ヘッジ決済中' ? 'ヘッジ決済中' :
+                      stats.currentPhase === 'LP解除中' ? 'LP解除中' :
+                      stats.currentPhase === 'ヘッジ方向反転中' ? '方向反転中' :
+                      stats.currentPhase === '運用中 (監視)' ? '運用監視中' :
+                      stats.currentPhase === 'リバランス中' ? 'リバランス中' : 
+                      stats.currentPhase === '待機中' ? '待機中' : stats.currentPhase
                     }
                   </span>
                 </>
@@ -331,39 +358,13 @@ function App() {
             </>
           )}
         </div>
+          <div className="sui-connect-wrapper">
+            <ConnectButton />
+          </div>
+        </div>
       </header>
 
       <div className="dashboard-grid">
-        <aside className="sidebar-aside">
-          <ConfigPanel
-            isBotActive={isBotActive}
-            onToggleBot={toggleBotState}
-            onOpenSettings={() => setIsSettingsOpen(true)}
-            onOpenWizard={() => setIsWizardOpen(true)}
-            onOpenHelp={() => setIsHelpOpen(true)}
-            config={stats.config}
-            onUpdateCapital={handleUpdateCapital}
-            onUpdateStrategyMode={handleUpdateStrategyMode}
-          />
-
-          {/* 戦略配分の視覚化 */}
-          <StrategyVisualizer totalCapital={stats.config?.totalOperationalCapitalUsdc || stats.positionSize || stats.config?.lpAmountUsdc || 0} />
-
-          {/* 専用ウォレットカード */}
-          <BotWalletCard 
-            botAddress={botWalletAddress}
-            suiBalance={stats.pnl?.botWalletBalanceSui || 0}
-            usdcBalance={stats.pnl?.botWalletBalanceUsdc || 0}
-            onRefresh={() => {/* fetchStats will run shortly */}}
-          />
-
-          {/* PnLカード */}
-          <PnLCard pnl={stats.pnl} gasStats={stats.gasStats} />
-
-          {/* デルタゲージ */}
-          <DeltaGauge delta={stats.delta} hedge={stats.hedge} indicators={stats.indicators} />
-        </aside>
-
         <main className="main-content">
           <div className="stats-grid stats-grid-main">
             <StatCard
@@ -374,11 +375,11 @@ function App() {
               subtitle={`手数料: $${stats.pnl?.fees?.toFixed(4) || '0.0000'}`}
               change={apr !== 0 ? `APR ${apr.toFixed(1)}%` : undefined}
             />
-            <StatCard title="リバランス回数" value={stats.totalRebalances.toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime}`} />
-            <StatCard title="勝率" value={`${stats.winRate}%`} trend={parseFloat(stats.winRate) >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
-            <StatCard title="ポジション規模" value={`${stats.positionSize || stats.config.lpAmountUsdc} USDC`} icon={<Wallet size={18} />} subtitle="運用資金" />
+            <StatCard title="リバランス回数" value={(stats.totalRebalances ?? 0).toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime || '0分'}`} />
+            <StatCard title="勝率" value={`${stats.winRate ?? '0'}%`} trend={parseFloat(stats.winRate ?? '0') >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
+            <StatCard title="ポジション規模" value={`${stats.positionSize || stats.config?.lpAmountUsdc || 0} USDC`} icon={<Wallet size={18} />} subtitle="運用資金" />
             <StatCard title="Bot状態" value={isBotActive ? "運用中" : "停止中"} icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} subtitle={isBotActive ? "手数料収集中" : "Startで開始"} />
-            <StatCard title="市場状況" value={getMarketConditionText(stats.marketCondition).split(' ')[0]} icon={<BarChart3 size={18} />} subtitle={getMarketConditionText(stats.marketCondition).split(' ').slice(1).join(' ')} />
+            <StatCard title="市場状況" value={getMarketConditionText(stats.marketCondition || 'sideways').split(' ')[0]} icon={<BarChart3 size={18} />} subtitle={getMarketConditionText(stats.marketCondition || 'sideways').split(' ').slice(1).join(' ')} />
           </div>
 
           {/* 市場分析パネル（メインエリアに移動） */}
@@ -426,11 +427,14 @@ function App() {
             </div>
           </div>
 
-          <PriceChart
-            data={combinedHistory}
-            lowerBound={stats.currentRange.lower}
-            upperBound={stats.currentRange.upper}
-          />
+          <div className="main-charts-section">
+            <PriceChart 
+              data={combinedHistory} 
+              lowerBound={stats.currentRange?.lower || 0}
+              upperBound={stats.currentRange?.upper || 0}
+            />
+            <BalanceChart data={stats.balanceHistory || []} />
+          </div>
 
           <HedgePerfChart
             data={combinedHistory.map(h => ({ time: h.time, poolPrice: h.poolPrice, entryPrice: stats.hedge?.entryPrice }))}
@@ -441,6 +445,49 @@ function App() {
 
           <ActivityLog logs={stats.activityLogs} />
         </main>
+
+        <aside className="sidebar-aside">
+          {/* 運用管理 & ウォレット (Section B) - トップに移動 */}
+          <BotWalletCard 
+            botAddress={botWalletAddress}
+            suiBalance={stats.pnl?.botWalletBalanceSui || 0}
+            usdcBalance={stats.pnl?.botWalletBalanceUsdc || 0}
+            onRefresh={() => {/* fetchStats handles this */}}
+            isBotActive={isBotActive}
+            onToggleBot={toggleBotState}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenWizard={() => setIsWizardOpen(true)}
+            onOpenHelp={() => setIsHelpOpen(true)}
+            config={stats.config}
+            onUpdateCapital={handleUpdateCapital}
+          />
+
+          {/* 安全ゲートパネル */}
+          <SafetyGauge
+            drawdownPct={stats.safetyGates?.drawdownPct ?? 0}
+            marginRatio={stats.safetyGates?.marginRatio ?? 999}
+            priceDataAge={stats.safetyGates?.priceDataAge ?? 0}
+            consecutiveErrors={stats.safetyGates?.consecutiveErrors ?? 0}
+            isEmergency={stats.safetyGates?.isEmergency ?? false}
+          />
+
+          {/* 1時間サマリー */}
+          <HourlySummaryCard summary={stats.hourlySummary} />
+
+          {/* 戦略設定 & 資金配分 (Section A) */}
+          <StrategyVisualizer 
+            totalCapital={stats.config?.totalOperationalCapitalUsdc || stats.positionSize || stats.config?.lpAmountUsdc || 0} 
+            config={stats.config}
+            hedge={stats.hedge}
+            onUpdateStrategyMode={handleUpdateStrategyMode}
+          />
+
+          {/* PnLカード */}
+          <PnLCard pnl={stats.pnl} gasStats={stats.gasStats} />
+
+          {/* デルタゲージ */}
+          <DeltaGauge delta={stats.delta} hedge={stats.hedge} indicators={stats.indicators} />
+        </aside>
       </div>
 
       <SettingsModal

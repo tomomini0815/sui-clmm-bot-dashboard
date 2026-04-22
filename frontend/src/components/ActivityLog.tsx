@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Activity, ArrowRightLeft, DollarSign, Clock, TrendingUp, BarChart3, Play, Square, AlertTriangle } from 'lucide-react';
 
 interface LogEntry {
@@ -16,26 +16,32 @@ interface ActivityLogProps {
   logs: LogEntry[];
 }
 
-export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
+export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
   // 統計情報の計算 (リバランスサイクルに関連するアクションを網羅)
-  const totalRebalances = logs.filter(log => 
-    log.action.includes('リバランス') || 
-    log.action.includes('LP提供') || 
-    log.action.includes('LP投入') || 
-    log.action.includes('資産調整') ||
-    log.action.includes('Rebalance')
-  ).length;
-  
-  const totalFeesCollected = logs.reduce((sum, log) => {
-    const fee = log.fee ? parseFloat(log.fee) : 0;
-    return sum + (isNaN(fee) ? 0 : fee);
-  }, 0);
+  const stats = useMemo(() => {
+    const rebalances = logs.filter(log => 
+      log.action.includes('リバランス') || 
+      log.action.includes('LP提供') || 
+      log.action.includes('LP投入') || 
+      log.action.includes('資産調整') ||
+      log.action.includes('Rebalance')
+    );
 
-  const successfulRebalances = logs.filter(log =>
-    log.status.includes('+') || (log.status === '完了' && !log.action.includes('失敗'))
-  ).length;
-  
-  const successRate = totalRebalances > 0 ? (successfulRebalances / totalRebalances * 100).toFixed(1) : '0';
+    const fees = logs.reduce((sum, log) => {
+      const fee = log.fee ? parseFloat(log.fee) : 0;
+      return sum + (isNaN(fee) ? 0 : fee);
+    }, 0);
+
+    const successful = logs.filter(log =>
+      log.status.includes('+') || (log.status === '完了' && !log.action.includes('失敗'))
+    );
+
+    const totalRebalances = rebalances.length;
+    const totalFeesCollected = fees;
+    const successRate = totalRebalances > 0 ? (successful.length / totalRebalances * 100).toFixed(1) : '0';
+
+    return { totalRebalances, totalFeesCollected, successRate };
+  }, [logs]);
 
   return (
     <div className="glass-panel activity-log-panel" style={{ 
@@ -86,7 +92,7 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
           }}>
             <ArrowRightLeft size={14} color="var(--accent)" />
             <span style={{ color: 'var(--text-muted)' }}>リバランス: </span>
-            <strong style={{ color: 'var(--accent)' }}>{totalRebalances}回</strong>
+            <strong style={{ color: 'var(--accent)' }}>{stats.totalRebalances}回</strong>
           </div>
           <div style={{
             background: 'rgba(63, 185, 80, 0.1)',
@@ -100,29 +106,29 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
           }}>
             <DollarSign size={14} color="var(--success)" />
             <span style={{ color: 'var(--text-muted)' }}>手数料合計: </span>
-            <strong style={{ color: 'var(--success)' }}>{totalFeesCollected.toFixed(4)} USDC</strong>
+            <strong style={{ color: 'var(--success)' }}>{stats.totalFeesCollected.toFixed(4)} USDC</strong>
           </div>
           <div style={{
-            background: totalRebalances > 0 && parseFloat(successRate) >= 80 ? 'rgba(63, 185, 80, 0.1)' : 'rgba(210, 153, 34, 0.1)',
+            background: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'rgba(63, 185, 80, 0.1)' : 'rgba(210, 153, 34, 0.1)',
             padding: '6px 12px',
             borderRadius: '8px',
-            border: totalRebalances > 0 && parseFloat(successRate) >= 80 ? '1px solid rgba(63, 185, 80, 0.2)' : '1px solid rgba(210, 153, 34, 0.2)',
+            border: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? '1px solid rgba(63, 185, 80, 0.2)' : '1px solid rgba(210, 153, 34, 0.2)',
             fontSize: '0.8rem',
             display: 'flex',
             alignItems: 'center',
             gap: '6px'
           }}>
-            <TrendingUp size={14} color={totalRebalances > 0 && parseFloat(successRate) >= 80 ? 'var(--success)' : 'var(--warning)'} />
+            <TrendingUp size={14} color={stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'} />
             <span style={{ color: 'var(--text-muted)' }}>成功率: </span>
             <strong style={{ 
-              color: totalRebalances > 0 && parseFloat(successRate) >= 80 ? 'var(--success)' : 'var(--warning)'
-            }}>{successRate}%</strong>
+              color: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'
+            }}>{stats.successRate}%</strong>
           </div>
         </div>
       </div>
       
-      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto' }}>
-        <table className="log-table">
+      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto', position: 'relative' }}>
+        <table className="log-table" style={{ minWidth: '850px' }}>
           <thead>
             <tr>
               <th style={{ width: '90px' }}>
@@ -140,8 +146,16 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
               <th style={{ width: '110px' }}>実行価格</th>
               <th style={{ width: '160px' }}>設定レンジ</th>
               <th style={{ width: '100px' }}>手数料</th>
-              <th>詳細</th>
-              <th style={{ width: '110px', textAlign: 'right' }}>ステータス</th>
+              <th style={{ minWidth: '150px' }}>詳細</th>
+              <th style={{ 
+                width: '110px', 
+                textAlign: 'right', 
+                position: 'sticky', 
+                right: 0, 
+                background: 'var(--bg-panel)',
+                zIndex: 2,
+                boxShadow: '-10px 0 10px -5px rgba(0,0,0,0.3)'
+              }}>ステータス</th>
             </tr>
           </thead>
           <tbody>
@@ -158,6 +172,10 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                   return { icon: <Play size={14} color="var(--success)" />, bg: 'rgba(63, 185, 80, 0.1)', color: 'var(--success)' };
                 } else if (action.includes('停止') || action === 'Bot停止') {
                   return { icon: <Square size={14} color="var(--text-muted)" />, bg: 'rgba(139, 148, 158, 0.1)', color: 'var(--text-muted)' };
+                } else if (action === 'DeltaAdjust') {
+                  return { icon: <Activity size={14} color="#f59e0b" />, bg: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' };
+                } else if (action === '1hサマリー') {
+                  return { icon: <BarChart3 size={14} color="#a855f7" />, bg: 'rgba(168, 85, 247, 0.1)', color: '#a855f7' };
                 } else {
                   return { icon: <Activity size={14} color="var(--accent)" />, bg: 'rgba(88, 166, 255, 0.1)', color: 'var(--accent)' };
                 }
@@ -233,7 +251,37 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                     )}
                   </td>
                   <td style={{ color: 'var(--text-muted)', lineHeight: 1.6, fontSize: '0.85rem' }}>
-                    <div>{log.details || '-'}</div>
+                    {(() => {
+                      if (!log.details) return <div>-</div>;
+                      try {
+                        const parsed = JSON.parse(log.details);
+                        if (log.action === 'DeltaAdjust') {
+                          return (
+                            <div style={{ background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '6px', fontSize: '0.8rem' }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                <div><span style={{opacity: 0.6}}>ドリフト:</span> <strong style={{color:'var(--accent)'}}>{parsed.delta_before} → {parsed.delta_after}</strong></div>
+                                <div><span style={{opacity: 0.6}}>ヘッジ:</span> {parsed.hedge_direction} ${parsed.hedge_usd}</div>
+                                <div style={{gridColumn: '1 / -1'}}><span style={{opacity: 0.6}}>Funding:</span> {parsed.funding_rate_hourly}%/h</div>
+                              </div>
+                            </div>
+                          );
+                        } else if (log.action === '1hサマリー') {
+                          return (
+                            <div style={{ background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '6px', fontSize: '0.8rem' }}>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                <div><span style={{opacity: 0.6}}>純利益:</span> <strong style={{color: parsed.net_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}}>${parsed.net_pnl}</strong></div>
+                                <div><span style={{opacity: 0.6}}>LP手数料:</span> ${parsed.lp_fee_earned}</div>
+                                <div><span style={{opacity: 0.6}}>HedgePnL:</span> <span style={{color: parsed.hedge_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}}>${parsed.hedge_pnl}</span></div>
+                                <div><span style={{opacity: 0.6}}>リバランス:</span> {parsed.rebalance_count}回</div>
+                              </div>
+                            </div>
+                          );
+                        }
+                        return <div>{log.details}</div>;
+                      } catch {
+                        return <div>{log.details}</div>;
+                      }
+                    })()}
                     {log.txDigest && (
                       <div style={{ marginTop: '6px' }}>
                         <a 
@@ -253,19 +301,20 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                             borderRadius: '6px',
                             transition: 'all 0.2s'
                           }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.2)';
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = 'rgba(88, 166, 255, 0.1)';
-                          }}
                         >
                           🔗 エクスプローラー
                         </a>
                       </div>
                     )}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td style={{ 
+                    textAlign: 'right',
+                    position: 'sticky',
+                    right: 0,
+                    background: 'var(--bg-panel)',
+                    zIndex: 1,
+                    boxShadow: '-10px 0 10px -5px rgba(0,0,0,0.3)'
+                  }}>
                     <span style={{
                       display: 'inline-block',
                       padding: '5px 10px',
@@ -286,7 +335,8 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
                         ? '1px solid rgba(63, 185, 80, 0.25)'
                         : log.status === '失敗'
                           ? '1px solid rgba(248, 81, 73, 0.25)'
-                          : '1px solid rgba(88, 166, 255, 0.25)'
+                          : '1px solid rgba(88, 166, 255, 0.25)',
+                      whiteSpace: 'nowrap'
                     }}>
                       {log.status}
                     </span>
@@ -322,4 +372,4 @@ export const ActivityLog: React.FC<ActivityLogProps> = ({ logs }) => {
       </div>
     </div>
   );
-};
+});

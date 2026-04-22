@@ -1,19 +1,53 @@
 import React, { useState } from 'react';
-import { Wallet, Copy, Check } from 'lucide-react';
+import { Copy, Check, Settings, Edit3, Play, Square } from 'lucide-react';
 
 interface BotWalletCardProps {
   botAddress: string;
   suiBalance: number;
   usdcBalance: number;
   onRefresh: () => void;
+  isBotActive: boolean;
+  onToggleBot: () => void;
+  onOpenSettings: () => void;
+  onOpenWizard: () => void;
+  onOpenHelp: () => void;
+  config?: { lpAmountUsdc: number; rangeWidth: number; configMode?: 'auto' | 'manual'; strategyMode?: 'balanced' | 'range_order' };
+  onUpdateCapital: (amount: number) => void;
 }
 
-export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBalance, usdcBalance, onRefresh }) => {
+export const BotWalletCard: React.FC<BotWalletCardProps> = ({ 
+  botAddress, 
+  suiBalance, 
+  usdcBalance, 
+  isBotActive,
+  onToggleBot,
+  onOpenSettings,
+  config,
+  onUpdateCapital
+}) => {
   const [copied, setCopied] = useState(false);
+  const [isEditingCapital, setIsEditingCapital] = useState(false);
+  const [capitalInput, setCapitalInput] = useState('');
   
-  // 固定アドレス判定
+  const handleEditCapital = () => {
+    setCapitalInput(String(config?.lpAmountUsdc || 0));
+    setIsEditingCapital(true);
+  };
+
+  const handleSaveCapital = () => {
+    const val = parseFloat(capitalInput);
+    if (!isNaN(val) && val > 0) {
+      onUpdateCapital(val);
+      setIsEditingCapital(false);
+    }
+  };
+
+  const handleCancelCapital = () => {
+    setIsEditingCapital(false);
+    setCapitalInput('');
+  };
+  
   const isFixedAddress = botAddress.toLowerCase() === '0xc17e3ef45cfb8ff6f0d5e55669b148fc27e615e2bde27109ccf3e952d1215559'.toLowerCase();
-  
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(botAddress);
@@ -21,95 +55,159 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({ botAddress, suiBal
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const needsSui = suiBalance < 0.05;
-  const needsUsdc = usdcBalance < 0.01;
-
   return (
-    <div className="card-premium" style={{ marginBottom: '24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <div style={{ 
-            background: 'rgba(88, 166, 255, 0.1)', 
-            padding: '8px', 
-            borderRadius: '10px',
-            color: 'var(--accent)'
-          }}>
-            <Wallet size={20} />
-          </div>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0 }}>専用運用ウォレット</h3>
-        </div>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          {isFixedAddress && (
-            <div style={{ 
-              background: 'rgba(88, 166, 255, 0.2)', 
-              color: 'var(--accent)',
-              padding: '4px 8px',
-              borderRadius: '6px',
-              fontSize: '0.65rem',
-              fontWeight: 800,
-              border: '1px solid var(--accent)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em'
-            }}>
-              MASTER FIXED
-            </div>
-          )}
-          <div style={{ 
-            background: needsSui ? 'rgba(255, 71, 87, 0.1)' : 'rgba(46, 213, 115, 0.1)',
-            color: needsSui ? '#ff4757' : '#2ed573',
-            padding: '4px 12px',
-            borderRadius: '20px',
-            fontSize: '0.75rem',
-            fontWeight: 600
-          }}>
-            {needsSui ? '入金が必要です' : '運用可能'}
-          </div>
-        </div>
-      </div>
-
-      <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.5 }}>
-        このセッション専用のウォレットです。ボットが自動運用するためには、このアドレスに少額の資金を移動してください。
-      </p>
-
-      {/* アドレス表示・コピー */}
-      <div style={{ 
-        background: 'rgba(255, 255, 255, 0.03)', 
-        padding: '12px', 
-        borderRadius: '12px', 
-        display: 'flex', 
-        alignItems: 'center', 
-        justifyContent: 'space-between',
-        marginBottom: '20px',
-        border: '1px solid rgba(255, 255, 255, 0.05)'
+    <div className="glass-panel" style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column' }}>
+      {/* 1. Header: Bot Management + Settings Button */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        paddingBottom: '16px', borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+        marginBottom: '20px', gap: '8px', flexWrap: 'wrap'
       }}>
-        <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.8rem', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-          {botAddress}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: '130px' }}>
+          <div style={{
+            background: 'rgba(88, 166, 255, 0.15)', padding: '6px', borderRadius: '8px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+          }}>
+            <Settings size={18} color="var(--accent)" />
+          </div>
+          <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0, whiteSpace: 'nowrap' }}>Bot管理</h3>
         </div>
-        <button 
-          onClick={copyToClipboard}
-          className="btn-icon"
-          title="コピー"
+        <button
+          onClick={onOpenSettings}
+          style={{
+            background: 'rgba(88, 166, 255, 0.1)', border: '1px solid rgba(88, 166, 255, 0.25)',
+            borderRadius: '6px', padding: '5px 10px', color: 'var(--text-main)',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+            fontSize: '0.8rem', fontWeight: 500, whiteSpace: 'nowrap'
+          }}
         >
-          {copied ? <Check size={14} color="#2ed573" /> : <Copy size={14} />}
+          <Edit3 size={14} /> 設定
         </button>
       </div>
 
-      {/* 残高表示 */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
-        <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '12px', borderRadius: '12px' }}>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI 残高</div>
-          <div style={{ fontSize: '1rem', fontWeight: 700, color: needsSui ? '#ff4757' : 'inherit' }}>
-            {suiBalance.toFixed(4)} <span style={{ fontSize: '0.7rem', fontWeight: 400 }}>SUI</span>
-          </div>
+      {/* 2. Wallet Connectivity Indicator & Address */}
+      <div style={{ marginBottom: '20px' }}>
+         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+             <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#2ed573', boxShadow: '0 0 6px #2ed573' }} />
+             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#2ed573' }}>運用用ウォレット</span>
+           </div>
+           {isFixedAddress && (
+             <span style={{ fontSize: '0.6rem', color: 'var(--accent)', fontWeight: 800, background: 'rgba(88, 166, 255, 0.1)', padding: '2px 6px', borderRadius: '4px' }}>MASTER</span>
+           )}
+         </div>
+         <div style={{ 
+           background: 'rgba(255, 255, 255, 0.03)', 
+           padding: '10px', 
+           borderRadius: '8px', 
+           display: 'flex', 
+           alignItems: 'center', 
+           gap: '8px',
+           border: '1px solid rgba(255, 255, 255, 0.05)'
+         }}>
+           <div style={{ 
+             fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'monospace', 
+             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 
+           }}>
+             {botAddress}
+           </div>
+           <button 
+             onClick={copyToClipboard}
+             style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', flexShrink: 0 }}
+           >
+             {copied ? <Check size={14} color="#2ed573" /> : <Copy size={14} />}
+           </button>
+         </div>
+      </div>
+
+      {/* 3. Operational Capital Setting */}
+      <div style={{ 
+        background: 'rgba(255, 255, 255, 0.03)', 
+        borderRadius: '12px', 
+        padding: '16px',
+        border: '1px solid rgba(255, 255, 255, 0.05)',
+        marginBottom: '20px'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>運用資金</span>
+          {!isEditingCapital ? (
+            <button onClick={handleEditCapital} style={{ background: 'transparent', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600 }}>変更</button>
+          ) : (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleSaveCapital} style={{ background: 'transparent', border: 'none', color: '#2ed573', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600 }}>保存</button>
+              <button onClick={handleCancelCapital} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600 }}>戻る</button>
+            </div>
+          )}
         </div>
-        <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '12px', borderRadius: '12px' }}>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC 残高</div>
-          <div style={{ fontSize: '1rem', fontWeight: 700 }}>
-            {usdcBalance.toFixed(2)} <span style={{ fontSize: '0.7rem', fontWeight: 400 }}>USDC</span>
+
+        {isEditingCapital ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input 
+              type="number"
+              value={capitalInput}
+              onChange={(e) => setCapitalInput(e.target.value)}
+              style={{ 
+                background: 'rgba(0,0,0,0.2)', border: '1px solid var(--accent)', color: 'white', 
+                borderRadius: '6px', padding: '8px 12px', fontSize: '1rem', width: '100%', outline: 'none'
+              }}
+              autoFocus
+            />
           </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px' }}>
+            <span style={{ fontSize: '1.5rem', fontWeight: 800, color: 'white' }}>{config?.lpAmountUsdc || 0}</span>
+            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)' }}>USDC</span>
+          </div>
+        )}
+      </div>
+
+      {/* 4. Wallet Balance Summary (Compact) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI Balance</div>
+          <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>{suiBalance.toFixed(2)} <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>SUI</span></div>
+        </div>
+        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC Balance</div>
+          <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>${usdcBalance.toFixed(2)}</div>
         </div>
       </div>
 
+      {/* 5. Bot Execution Control (Start/Stop) - Moved to bottom */}
+      <div style={{ marginTop: 'auto', paddingTop: '10px' }}>
+        <button
+          onClick={onToggleBot}
+          style={{
+            width: '100%',
+            padding: '12px',
+            borderRadius: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+            background: isBotActive ? 'rgba(248, 81, 73, 0.15)' : 'var(--accent)',
+            color: isBotActive ? 'var(--danger)' : 'white',
+            fontWeight: 700,
+            fontSize: '1rem',
+            boxShadow: isBotActive ? 'none' : '0 4px 12px rgba(88, 166, 255, 0.3)',
+            border: isBotActive ? '1px solid rgba(248, 81, 73, 0.3)' : 'none'
+          }}
+        >
+          {isBotActive ? (
+            <>
+              <Square size={18} fill="currentColor" />
+              Botを停止する
+            </>
+          ) : (
+            <>
+              <Play size={18} fill="currentColor" />
+              Botを開始する
+            </>
+          )}
+        </button>
+      </div>
     </div>
   );
 };

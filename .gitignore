@@ -48,3 +48,5 @@ bot_v2/session_state_*.json
 bot_v2/tracker_*.json
 bot_v2/scratch/
 bot_v2/dist/
+bot_v2/logs/
+logs/

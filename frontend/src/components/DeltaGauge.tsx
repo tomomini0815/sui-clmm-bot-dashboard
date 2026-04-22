@@ -1,5 +1,5 @@
 import React from 'react';
-import { Shield, AlertTriangle, Activity } from 'lucide-react';
+import { Shield, Activity } from 'lucide-react';
 
 interface DeltaData {
   current: number;
@@ -32,7 +32,7 @@ interface DeltaGaugeProps {
   indicators: Indicators | null;
 }
 
-export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators }) => {
+export const DeltaGauge = React.memo<DeltaGaugeProps>(({ delta, hedge, indicators }) => {
   if (!delta) {
     return (
       <div className="glass-panel delta-gauge">
@@ -89,11 +89,7 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
     ? Math.min(100, (hedge.marginBalance / (hedge.maintenanceMargin || 1)) * 100) 
     : 0;
   
-  const getMarginHealthColor = (health: number) => {
-    if (health > 120) return 'var(--success)';
-    if (health > 105) return '#f59e0b';
-    return 'var(--danger)';
-  };
+
 
   return (
     <div className="glass-panel delta-gauge">
@@ -104,22 +100,47 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
 
       {/* デルタゲージ */}
       <div className="delta-gauge-container">
-        <div className="delta-gauge-labels">
-          <span>ショート (-1.0)</span>
-          <span style={{ color: 'var(--success)', fontWeight: 600 }}>ニュートラル (0)</span>
-          <span>ロング (+1.0)</span>
+        <div className="delta-gauge-labels" style={{ fontSize: '0.65rem', padding: '0 4px' }}>
+          <span>Short (-1.0)</span>
+          <span style={{ color: 'var(--success)', fontWeight: 600 }}>Neutral</span>
+          <span>Long (+1.0)</span>
         </div>
         <div className="delta-gauge-track">
+          {/* 10% ドリフト許容ゾーン */}
+          <div style={{
+            position: 'absolute',
+            left: '45%',
+            width: '10%',
+            height: '100%',
+            background: 'rgba(255, 255, 255, 0.05)',
+            borderLeft: '1px dashed rgba(255, 255, 255, 0.4)',
+            borderRight: '1px dashed rgba(255, 255, 255, 0.4)',
+            zIndex: 1
+          }} title="許容ドリフト範囲 (±10%)" />
+          
+          {/* -10% ドリフトラインのラベル */}
+          <div style={{
+            position: 'absolute', left: '45%', top: '-18px', transform: 'translateX(-50%)',
+            fontSize: '0.6rem', color: 'var(--text-muted)', zIndex: 1
+          }}>-10%</div>
+          
+          {/* +10% ドリフトラインのラベル */}
+          <div style={{
+            position: 'absolute', left: '55%', top: '-18px', transform: 'translateX(-50%)',
+            fontSize: '0.6rem', color: 'var(--text-muted)', zIndex: 1
+          }}>+10%</div>
+
           <div
             className="delta-gauge-needle"
             style={{
               left: `${gaugePosition}%`,
               background: getDeltaColor(),
               boxShadow: `0 0 12px ${getDeltaColor()}`,
+              zIndex: 2
             }}
           />
           {/* 中央マーカー */}
-          <div className="delta-gauge-center" />
+          <div className="delta-gauge-center" style={{ zIndex: 2 }} />
         </div>
         <div className="delta-gauge-value" style={{ color: getDeltaColor() }}>
           Δ = {deltaPercent >= 0 ? '+' : ''}{deltaPercent.toFixed(3)}
@@ -252,4 +273,4 @@ export const DeltaGauge: React.FC<DeltaGaugeProps> = ({ delta, hedge, indicators
       )}
     </div>
   );
-};
+});

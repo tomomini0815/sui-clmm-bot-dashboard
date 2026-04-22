@@ -9,7 +9,7 @@ interface StatCardProps {
   change?: string; // 変化率表示用
 }
 
-export const StatCard: React.FC<StatCardProps> = ({ title, value, subtitle, icon, trend, change }) => {
+export const StatCard = React.memo<StatCardProps>(({ title, value, subtitle, icon, trend, change }) => {
   const valueColor = trend === 'up' ? 'var(--success)' : trend === 'down' ? 'var(--danger)' : 'var(--text-main)';
   const trendIcon = trend === 'up' ? '↑' : trend === 'down' ? '↓' : '→';
   
@@ -45,10 +45,14 @@ export const StatCard: React.FC<StatCardProps> = ({ title, value, subtitle, icon
       
       <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
         <span style={{ 
-          fontSize: '1.8rem', 
+          fontSize: 'clamp(1.2rem, 5vw, 1.6rem)', 
           fontWeight: 700, 
           color: valueColor,
-          lineHeight: 1
+          lineHeight: 1,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          maxWidth: '100%'
         }}>
           {value}
         </span>
@@ -79,4 +83,4 @@ export const StatCard: React.FC<StatCardProps> = ({ title, value, subtitle, icon
       )}
     </div>
   );
-};
+});

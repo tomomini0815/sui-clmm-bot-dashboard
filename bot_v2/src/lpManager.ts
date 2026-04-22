@@ -17,6 +17,8 @@ export class LpManager {
 
   // 動的プール情報
   private isInitialized: boolean = false;
+  public currentPositionNft: string | null = null;
+  private currentAmountA: number = 0;
   private decimalsA: number = 6;
   private decimalsB: number = 9;
   private coinTypeA: string = '';
@@ -122,17 +124,42 @@ export class LpManager {
   }
 
   private async getActivePositionId(): Promise<string | null> {
-    const sdk = this.getSdkWithSender();
+    // 1. キャッシュがあればそれを返す
+    if (this.currentPositionNft) return this.currentPositionNft;
+
+    // 2. キャッシュがない場合、ウォレット全体をスキャンしてこのプールのPosition NFTを探す
     const poolId = this.priceMonitor.getPoolId();
 
     try {
-      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
-      if (positionList && positionList.length > 0) {
-        const targetPos = positionList.find(p => p.pool === poolId);
-        return targetPos ? targetPos.pos_object_id : null;
+      Logger.info(`LpManager: Deep-scanning wallet for any Cetus position belonging to pool ${poolId}...`);
+      const objects = await this.suiClient.getOwnedObjects({
+        owner: this.walletAddress,
+        options: { showType: true, showContent: true }
+      });
+
+      // Broad filter: package IDに依存せず 'position::Position' を含むすべてのタイプをチェック
+      // かつ、流動性 (liquidity) が 0 より大きいものだけを有効なポジションとする
+      const poolPositionNfts = objects.data.filter(o => {
+        const type = o.data?.type || '';
+        const fields = (o.data?.content as any)?.fields;
+        const liquidity = parseInt(fields?.liquidity || '0');
+        return type.includes('position::Position') && fields?.pool === poolId && liquidity > 0;
+      });
+
+      if (poolPositionNfts.length > 0) {
+        const foundNft = poolPositionNfts[0];
+        const liquid = parseInt((foundNft.data!.content as any).fields.liquidity || '0');
+        
+        if (liquid > 100) { // 極小の塵を除外
+          Logger.success(`LpManager: Found active position ${foundNft.data!.objectId} with liquidity ${liquid}`);
+          this.currentPositionNft = foundNft.data!.objectId;
+          return this.currentPositionNft;
+        } else {
+          Logger.info(`LpManager: Ignoring empty/dust position ${foundNft.data!.objectId} (liquidity: ${liquid})`);
+        }
       }
     } catch (e) {
-      Logger.error('Error fetching position list', e);
+      Logger.error('LpManager: Failed to perform deep scan of wallet for Cetus positions', e);
     }
     return null;
   }
@@ -160,8 +187,9 @@ export class LpManager {
       
       if (!position) return 0;
 
-      // USDCがCoinAの場合、SUIはCoinB。逆ならSUIはCoinA。
-      const suiAmountRaw = this.usdcIsA ? position.coinAmountB : position.coinAmountA;
+      // 型定義の齟齬を避けるため as any を使用
+      const anyPos = position as any;
+      const suiAmountRaw = this.usdcIsA ? anyPos.coinAmountB : anyPos.coinAmountA;
       
       // getPositionList から取得できる値はすでに decimal 調整後の文字列または数値である場合が多いが、
       // SDKの仕様に合わせて安全に数値変換
@@ -273,7 +301,7 @@ export class LpManager {
 
       // --- 残高ガードロジック ---
       const balances = await this.checkBalance();
-      const GAS_RESERVE = 1.0; // ガス代温存
+      const GAS_RESERVE = 0.2; // ガス代温存 (少額対応のため引き下げ)
       const safeSuiBalance = Math.max(0, balances.suiBalance - GAS_RESERVE);
       
       const amountA_Needed = new Decimal(estResult.coinAmountA.toString()).div(Math.pow(10, this.decimalsA));
@@ -283,13 +311,17 @@ export class LpManager {
       const suiNeeded = this.usdcIsA ? amountB_Needed : amountA_Needed;
       
       let scale = 1.0;
-      if (suiNeeded.toNumber() > safeSuiBalance) {
-        scale = Math.min(scale, safeSuiBalance / suiNeeded.toNumber());
-        Logger.warn(`⚠️ SUI残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。`);
+      // max_amountに1.03倍(+3.0%バッファ)を指定するため、必要な残高も1.03倍で評価
+      const suiNeededMax = suiNeeded.toNumber() * 1.03;
+      const usdcNeededMax = usdcNeeded.toNumber() * 1.03;
+
+      if (suiNeededMax > safeSuiBalance) {
+        scale = Math.min(scale, safeSuiBalance / suiNeededMax);
+        Logger.warn(`⚠️ SUI残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。(Slippage考慮済み)`);
       }
-      if (usdcNeeded.toNumber() > balances.usdcBalance) {
-        scale = Math.min(scale, balances.usdcBalance / usdcNeeded.toNumber());
-        Logger.warn(`⚠️ USDC残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。`);
+      if (usdcNeededMax > balances.usdcBalance) {
+        scale = Math.min(scale, balances.usdcBalance / usdcNeededMax);
+        Logger.warn(`⚠️ USDC残高不足を検知: LP投入量を ${ (scale * 100).toFixed(1) }% に縮小して調整します。(Slippage考慮済み)`);
       }
 
       // 最終的な流動性と数量（ガード適用後）
@@ -312,9 +344,9 @@ export class LpManager {
         tick_lower:         lowerTick,
         tick_upper:         upperTick,
         delta_liquidity:    finalLiquidity.toString(),
-        // 0.5% のバッファを追加して端数不足による MoveAbort を防ぐ
-        max_amount_a:       new BN(finalAmountA.muln(1005).divn(1000)).toString(),
-        max_amount_b:       new BN(finalAmountB.muln(1005).divn(1000)).toString(),
+        // 3.0% のバッファを追加して端数不足による MoveAbort を防ぐ (スリッページ対策を強化)
+        max_amount_a:       new BN(finalAmountA.muln(1030).divn(1000)).toString(),
+        max_amount_b:       new BN(finalAmountB.muln(1030).divn(1000)).toString(),
         collect_fee:        false,
         rewarder_coin_types:[],
         pos_id:             '',

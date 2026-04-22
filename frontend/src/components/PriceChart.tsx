@@ -33,7 +33,7 @@ interface PriceChartProps {
   upperBound: number;
 }
 
-export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperBound }) => {
+export const PriceChart = React.memo<PriceChartProps>(({ data, lowerBound, upperBound }) => {
   const currentPoolPrice = data.length > 0 ? data[data.length - 1].poolPrice : 0;
   const firstPoolPrice = data.length > 1 ? data[0].poolPrice : currentPoolPrice;
   const priceChange = firstPoolPrice > 0 ? ((currentPoolPrice - firstPoolPrice) / firstPoolPrice * 100) : 0;
@@ -201,4 +201,4 @@ export const PriceChart: React.FC<PriceChartProps> = ({ data, lowerBound, upperB
       </div>
     </div>
   );
-};
+});
