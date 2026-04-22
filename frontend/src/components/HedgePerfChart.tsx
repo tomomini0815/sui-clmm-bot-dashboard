@@ -35,7 +35,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
   const pnlPercent = entryPrice > 0 ? ((entryPrice - currentPrice) / entryPrice * 100) : 0;
   
   return (
-    <div className="glass-panel" style={{ marginTop: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
         <div>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>

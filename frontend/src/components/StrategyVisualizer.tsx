@@ -25,7 +25,7 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
   const isLong = hedgeDirection === 'LONG';
 
   return (
-    <div className="glass-panel" style={{ marginBottom: '24px' }}>
+    <div className="glass-panel" style={{ }}>
       {/* 運用戦略エンジン */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

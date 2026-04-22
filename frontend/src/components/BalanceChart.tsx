@@ -82,94 +82,73 @@ export const BalanceChart = React.memo<BalanceChartProps>(({ data }) => {
   const totalChangePercent = initialTotal > 0 ? (totalChange / initialTotal) * 100 : 0;
 
   return (
-    <div className="glass-panel balance-chart-container" style={{ marginBottom: '24px', padding: '16px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div 
-          onClick={() => setIsExpanded(!isExpanded)}
-          style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
-        >
-          <div style={{ 
-            background: 'rgba(46, 213, 115, 0.1)', 
-            padding: '8px', 
-            borderRadius: '10px',
-            color: '#2ed573'
-          }}>
-            <TrendingUp size={20} />
-          </div>
-          <div>
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0 }}>資産残高推移</h3>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0 }}>
-               {isExpanded ? 'Wallet + Bluefin + LP 合計換算' : `$${currentTotal.toFixed(2)}`}
-            </p>
-          </div>
+    <div className="glass-panel balance-chart-container" style={{ 
+      padding: isExpanded ? '20px' : '10px 16px', 
+      transition: 'all 0.3s ease'
+    }}>
+      <div style={{ 
+        display: 'flex', 
+        justifyContent: 'space-between', 
+        alignItems: 'center',
+        cursor: 'pointer' 
+      }} onClick={() => setIsExpanded(!isExpanded)}>
+        
+        {/* 左側: タイトル */}
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <h3 style={{ fontSize: '0.9rem', fontWeight: 700, margin: 0, color: 'var(--text-main)', whiteSpace: 'nowrap' }}>資産残高推移</h3>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '12px' }}>
-          {/* レンジセレクター (プレミアムスタイル) */}
-          {isExpanded && (
-            <div style={{ 
-              display: 'flex', 
-              background: 'rgba(255, 255, 255, 0.05)', 
-              borderRadius: '8px', 
-              padding: '2px',
-              border: '1px solid rgba(255, 255, 255, 0.08)'
-            }}>
-              {(['1D', '1W', '1M', 'ALL'] as const).map(range => (
-                <button
-                  key={range}
-                  onClick={(e) => { e.stopPropagation(); setTimeRange(range); }}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: '0.7rem',
-                    fontWeight: 600,
-                    borderRadius: '6px',
-                    background: timeRange === range ? 'var(--accent)' : 'transparent',
-                    color: timeRange === range ? 'white' : 'var(--text-muted)',
-                    border: 'none',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                  }}
-                >
-                  {range === 'ALL' ? '全期間' : range === '1D' ? '1日' : range === '1W' ? '1週間' : '1ヶ月'}
-                </button>
-              ))}
-            </div>
-          )}
+        {/* 右側: 期間選択 ＋ 資産情報 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          {/* レンジセレクター (右側に移動) */}
+          <div style={{ 
+            display: 'flex', 
+            background: 'rgba(255, 255, 255, 0.05)', 
+            borderRadius: '8px', 
+            padding: '2px',
+            border: '1px solid rgba(255, 255, 255, 0.08)'
+          }}>
+            {(['1D', '1W', '1M', 'ALL'] as const).map(range => (
+              <button
+                key={range}
+                onClick={(e) => { e.stopPropagation(); setTimeRange(range); }}
+                style={{
+                  padding: '4px 10px',
+                  fontSize: '0.7rem',
+                  fontWeight: 600,
+                  borderRadius: '6px',
+                  background: timeRange === range ? 'var(--accent)' : 'transparent',
+                  color: timeRange === range ? 'white' : 'var(--text-muted)',
+                  border: 'none',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                {range === 'ALL' ? '全期間' : range === '1D' ? '1日' : range === '1W' ? '1週間' : '1ヶ月'}
+              </button>
+            ))}
+          </div>
 
-          <div 
-            onClick={() => setIsExpanded(!isExpanded)}
-            style={{ textAlign: 'right', display: 'flex', gap: '12px', alignItems: 'center', cursor: 'pointer' }}
-          >
-            {!isExpanded && (
-               <div style={{ 
-                 fontSize: '0.85rem', 
-                 fontWeight: 600, 
-                 color: totalChange >= 0 ? 'var(--success)' : 'var(--danger)',
-               }}>
-                 {totalChange >= 0 ? '+' : ''}{totalChangePercent.toFixed(2)}%
-               </div>
-            )}
-            {isExpanded && (
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                  ${currentTotal.toFixed(2)}
-                </div>
-                <div style={{ 
-                  fontSize: '0.75rem', 
-                  fontWeight: 600, 
-                  color: totalChange >= 0 ? 'var(--success)' : 'var(--danger)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'flex-end',
-                  gap: '4px'
-                }}>
-                  {totalChange >= 0 ? '+' : ''}{totalChange.toFixed(2)} ({totalChangePercent.toFixed(2)}%)
-                </div>
-              </div>
-            )}
-            <div style={{ color: 'var(--text-muted)' }}>
-              {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ 
+              fontSize: isExpanded ? '1.2rem' : '1.4rem', 
+              fontWeight: 800, 
+              color: 'var(--text-main)',
+              lineHeight: 1 
+            }}>
+              ${currentTotal.toFixed(2)}
             </div>
+            <div style={{ 
+              fontSize: '0.75rem', 
+              fontWeight: 600, 
+              color: totalChange >= 0 ? 'var(--success)' : 'var(--danger)',
+              marginTop: '2px'
+            }}>
+              {totalChange >= 0 ? '+' : ''}{totalChange.toFixed(2)} ({totalChangePercent.toFixed(2)}%)
+            </div>
+          </div>
+          <div style={{ color: 'var(--text-muted)' }}>
+            {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
           </div>
         </div>
       </div>

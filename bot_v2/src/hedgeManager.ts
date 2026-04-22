@@ -407,8 +407,12 @@ export class HedgeManager {
       this.lastFundingTime = Date.now();
 
       const digest = (response as any).hash || (response as any).digest || 'success';
+      
+      // ガス代を概算記録
+      const gasCostUsdc = this.gasTracker.recordGas(null, currentPrice, 'hedge');
+
       Logger.success(`✅ Bluefin: ${directionLabel} opened: ${digest}`);
-      return { digest };
+      return { digest, gasCostUsdc };
     } catch (e: any) {
       const errorDetail = e.response?.data || e.message;
       Logger.error(`❌ Bluefin Order Failed: ${JSON.stringify(errorDetail)}`);

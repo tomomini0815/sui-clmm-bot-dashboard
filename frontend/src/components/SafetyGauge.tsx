@@ -42,7 +42,6 @@ export function SafetyGauge({
         border: '1px solid rgba(255, 59, 48, 0.6)',
         background: 'rgba(255, 59, 48, 0.1)',
         padding: '16px',
-        marginBottom: '16px',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--danger)' }}>
           <ShieldAlert size={20} />
@@ -97,7 +96,7 @@ export function SafetyGauge({
   const allSafe = !drawdownDanger && !marginDanger && !ageDanger && !errorDanger;
 
   return (
-    <div className="glass-panel" style={{ padding: '16px', marginBottom: '16px' }}>
+    <div className="glass-panel" style={{ padding: '16px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
         <h3 style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
           <ShieldAlert size={15} color="var(--accent)" />

@@ -515,8 +515,12 @@ export class LpManager {
     const usdcAmountBN = new BN(Math.floor(amountUsdc * Math.pow(10, this.usdcDecimals)).toString());
     const res = await this.executeSwap(this.usdcIsA, usdcAmountBN);
     
+    // ガス代を計算して追加
+    const currentPrice = await this.priceMonitor.getCurrentPrice();
+    const gasCostUsdc = this.gasTracker.recordGas(null, currentPrice, 'swap'); 
+    
     Logger.stopSpin(`Swap complete! Digest: ${res.digest}`);
-    return res;
+    return { ...res, gasCostUsdc };
   }
 
   /**
@@ -529,8 +533,12 @@ export class LpManager {
     const suiAmountBN = new BN(Math.floor(amountSui * 1e9).toString());
     const res = await this.executeSwap(!this.usdcIsA, suiAmountBN);
     
+    // ガス代を計算して追加
+    const currentPrice = await this.priceMonitor.getCurrentPrice();
+    const gasCostUsdc = this.gasTracker.recordGas(null, currentPrice, 'swap');
+
     Logger.stopSpin(`Swap complete! Digest: ${res.digest}`);
-    return res;
+    return { ...res, gasCostUsdc };
   }
 
   private async executeSwap(a2b: boolean, amountInBN: BN): Promise<{ digest: string; amountOut: number }> {

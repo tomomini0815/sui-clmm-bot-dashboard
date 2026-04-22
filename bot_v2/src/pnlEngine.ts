@@ -147,6 +147,12 @@ export class PnlEngine {
 
     const netPnl = lpPnl + hedgePnl + this.totalFeesCollected - this.totalGasCost + fundingCost;
 
+    // デバッグログ: 更新が止まっている場合に原因を特定するため
+    if (Math.abs(currentPrice - this.lpEntryPrice) > 0.000001) {
+       // 価格が動いているのにPnLが変わらないかチェック
+    }
+    Logger.info(`📊 [DEBUG PNL] Price: ${currentPrice.toFixed(4)}, Entry: ${this.lpEntryPrice.toFixed(4)}, LP PnL: ${lpPnl.toFixed(4)}, Net: ${netPnl.toFixed(4)}`);
+
     // 経過時間
     const elapsedMs = this.lpEntryTime > 0 ? Date.now() - this.lpEntryTime : 0;
     const elapsedHours = elapsedMs / (1000 * 60 * 60);

@@ -56,7 +56,7 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
   };
 
   return (
-    <div className="glass-panel" style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column' }}>
+    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
       {/* 1. Header: Bot Management + Settings Button */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',

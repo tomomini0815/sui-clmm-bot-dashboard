@@ -17,7 +17,7 @@ interface HourlySummaryCardProps {
 export function HourlySummaryCard({ summary }: HourlySummaryCardProps) {
   if (!summary) {
     return (
-      <div className="glass-panel" style={{ padding: '16px', marginBottom: '16px' }}>
+      <div className="glass-panel" style={{ padding: '16px' }}>
         <h3 style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
           <BarChart3 size={15} color="var(--accent)" />
           1時間サマリー
@@ -66,7 +66,7 @@ export function HourlySummaryCard({ summary }: HourlySummaryCardProps) {
   ];
 
   return (
-    <div className="glass-panel" style={{ padding: '16px', marginBottom: '16px' }}>
+    <div className="glass-panel" style={{ padding: '16px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
         <h3 style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
           <BarChart3 size={15} color="var(--accent)" />

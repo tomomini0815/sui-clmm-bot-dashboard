@@ -936,7 +936,7 @@ export class Strategy {
     this.currentUpperBound = upperBound;
 
     await this.tracker.recordRebalance(
-      currentPrice, 0, usdcAmount, lpRes.digest,
+      currentPrice, 0, 0, lpRes.digest, // 手数料ではなく0を記録
       `LP構築完了 [$${lowerBound.toFixed(4)}, $${upperBound.toFixed(4)}]`,
       this.currentLowerBound, this.currentUpperBound, 'DELTA_NEUTRAL_FLIP'
     );
@@ -1427,9 +1427,10 @@ export class Strategy {
     const balance = await this.lpManager.checkBalance();
     const trackerStats = this.tracker.getStats();
     
+    const pnlResult = this.pnlEngine.calculateNetPnl(currentPrice);
     return {
       pnl: {
-        ...this.pnlEngine.calculateNetPnl(currentPrice),
+        ...pnlResult,
         botWalletBalanceSui: balance.suiBalance,
         botWalletBalanceUsdc: balance.usdcBalance,
       },

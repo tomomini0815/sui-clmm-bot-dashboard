@@ -45,7 +45,6 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
 
   return (
     <div className="glass-panel activity-log-panel" style={{ 
-      marginTop: '24px',
       display: 'flex',
       flexDirection: 'column',
       gap: '18px',
