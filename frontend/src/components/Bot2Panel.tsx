@@ -39,7 +39,7 @@ export function Bot2Panel({ bot2 }: Bot2PanelProps) {
   const rebalances = bot2?.tracker?.rebalanceCount ?? 0;
 
   return (
-    <div className="panel bot2-panel">
+    <div className="glass-panel bot2-panel">
       {/* ヘッダー */}
       <div className="bot2-header">
         <div className="bot2-title-row">

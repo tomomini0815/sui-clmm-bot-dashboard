@@ -1623,9 +1623,7 @@ button.primary-btn:active {
 .bot2-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  background: rgba(88, 166, 255, 0.03); /* Subtle blue tint to differentiate */
-  border: 1px solid rgba(88, 166, 255, 0.2);
+  gap: 20px;
 }
 
 .bot2-header {
@@ -1639,6 +1637,9 @@ button.primary-btn:active {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 4px;
 }
 
 .bot2-icon {
@@ -1646,10 +1647,10 @@ button.primary-btn:active {
   align-items: center;
   justify-content: center;
   background: rgba(88, 166, 255, 0.15);
-  color: #58a6ff;
-  border-radius: 6px;
-  width: 24px;
-  height: 24px;
+  color: var(--accent);
+  border-radius: 8px;
+  width: 28px;
+  height: 28px;
 }
 
 .bot2-title {
@@ -1684,10 +1685,12 @@ button.primary-btn:active {
 }
 
 .bot2-phase {
-  font-size: 0.75rem;
-  color: #58a6ff;
+  font-size: 0.8rem;
+  color: var(--text-muted);
   font-weight: 500;
-  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .bot2-message {
@@ -1702,10 +1705,11 @@ button.primary-btn:active {
 .bot2-price-section {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 12px;
-  border-radius: 8px;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 16px;
+  border-radius: 12px;
 }
 
 .bot2-price-row {
@@ -1806,10 +1810,11 @@ button.primary-btn:active {
 .bot2-stat {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  background: rgba(0, 0, 0, 0.2);
-  padding: 10px;
-  border-radius: 8px;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 12px;
+  border-radius: 10px;
 }
 
 .bot2-stat-icon {
@@ -1854,11 +1859,17 @@ button.primary-btn:active {
 .bot2-activity-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 0.8rem;
-  background: rgba(0, 0, 0, 0.15);
-  padding: 6px 10px;
-  border-radius: 6px;
+  gap: 12px;
+  font-size: 0.85rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.bot2-activity-row:hover {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .bot2-activity-time {
