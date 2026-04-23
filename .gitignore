@@ -49,4 +49,6 @@ bot_v2/tracker_*.json
 bot_v2/scratch/
 bot_v2/dist/
 bot_v2/logs/
+bot_v2/config/
+bot_v2/scripts/
 logs/

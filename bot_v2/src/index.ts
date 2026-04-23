@@ -19,6 +19,7 @@ import { Strategy, CyclePhase } from './strategy.js';
 import { Tracker } from './tracker.js';
 import { config, BotConfig } from './config.js';
 import { SessionManager } from './sessionManager.js';
+import { globalTxQueue } from './walletTxQueue.js';
 
 // ES Module dir resolution
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -108,11 +109,122 @@ async function bootstrap() {
       }
     }
 
+    // ===== Bot2 (DEEP/SUI) マルチボット起動 =====
+    await bootstrapBot2();
+
     Logger.success('Bootstrap complete. API server is ready with Auto-Resume.');
   } catch (error) {
     Logger.error('Bootstrap failed.', error);
   }
 }
+
+/**
+ * Bot2 (DEEP/SUI) の起動
+ * config/bot2.json が存在し、status が 'READY' の場合のみ起動する。
+ * Bot1とはプールIDが異なるため、Cetusポジションは独立して管理される。
+ * トランザクションは globalTxQueue を経由して必ず直列化される。
+ *
+ * Note: SessionManager.createSession は master private key を検出すると
+ *       必ず master-0xc17e3e に集約してしまうため、
+ *       Bot2のコンポーネントを直接構築して個別に管理する。
+ */
+async function bootstrapBot2() {
+  const bot2ConfigPath = path.join(process.cwd(), 'config', 'bot2.json');
+  if (!fs.existsSync(bot2ConfigPath)) {
+    Logger.info('[Bot2] config/bot2.json が見つかりません。Bot2は起動しません。');
+    return;
+  }
+
+  let bot2Config: any;
+  try {
+    bot2Config = JSON.parse(fs.readFileSync(bot2ConfigPath, 'utf8'));
+  } catch (e) {
+    Logger.error('[Bot2] config/bot2.json の読み込みに失敗しました', e);
+    return;
+  }
+
+  if (bot2Config.status !== 'READY') {
+    Logger.info(`[Bot2] status = '${bot2Config.status}' のため起動をスキップします。`);
+    Logger.info('[Bot2] 起動するには config/bot2.json の status を "READY" に変更してください。');
+    return;
+  }
+
+  if (!bot2Config.poolObjectId || bot2Config.poolObjectId === 'PENDING_DEEP_SUI_POOL_ID') {
+    Logger.warn('[Bot2] poolObjectId が未設定です。Bot2の起動をスキップします。');
+    return;
+  }
+
+  // Bot1のマスターセッションを取得
+  const masterStats = SessionManager.getAllSessionsStats();
+  if (masterStats.length === 0) {
+    Logger.error('[Bot2] Bot1が起動していません。Bot2の起動をスキップします。');
+    return;
+  }
+  const masterSession = SessionManager.getSession(masterStats[0].sessionId);
+  if (!masterSession) {
+    Logger.error('[Bot2] Bot1のセッションオブジェクトが取得できません。');
+    return;
+  }
+
+  Logger.info('[Bot2] DEEP/SUI Bot を起動します...');
+
+  // Bot1との実行タイミングをずらす
+  const offsetMs = (bot2Config.executionOffsetSeconds || 15) * 1000;
+  Logger.info(`[Bot2] Bot1との時差実行: ${offsetMs / 1000}秒後に起動`);
+  await new Promise(resolve => setTimeout(resolve, offsetMs));
+
+  try {
+    // ===== Bot2コンポーネントを直接構築 =====
+    // Bot1と異なる点: poolObjectIdのみ異なる（同一ウォレット・同一キーペア）
+    const bot2SessionConfig: BotConfig = {
+      ...masterSession.config,
+      lpAmountUsdc:                bot2Config.maxCapitalUsdc ?? 3.0,
+      totalOperationalCapitalUsdc: bot2Config.maxCapitalUsdc ?? 3.0,
+      hedgeMode:                   (bot2Config.hedgeEnabled ? 'bluefin' : 'none') as any,
+    };
+
+    // Bot2専用のPriceMonitor（別プールID）
+    process.env.POOL_OBJECT_ID = bot2Config.poolObjectId;
+    const bot2PriceMonitor = new PriceMonitor(bot2SessionConfig);
+    delete process.env.POOL_OBJECT_ID; // 環境変数をすぐ元に戻す
+
+    const bot2GasTracker = new GasTracker();
+    const bot2Tracker    = new Tracker('bot2-deep-sui');
+    await bot2Tracker.init();
+    const bot2PnlEngine  = new PnlEngine();
+
+    // LpManager は globalTxQueue を共有（Bot1と競合ゼロ）
+    const bot2LpManager  = new LpManager(bot2PriceMonitor, bot2GasTracker, bot2Tracker, bot2SessionConfig, globalTxQueue);
+    bot2LpManager.setKeypair(masterSession.keypair); // Bot1と同じキーペア
+
+    const bot2HedgeManager = new HedgeManager(bot2Config.hedgeEnabled ? 'bluefin' : undefined);
+
+    const bot2Strategy = new Strategy(
+      bot2PriceMonitor,
+      bot2LpManager,
+      bot2HedgeManager,
+      bot2GasTracker,
+      bot2PnlEngine,
+      bot2Tracker,
+      bot2SessionConfig,
+      () => {} // Bot2は独自のセッション保存なし（シンプル化）
+    );
+    await bot2Strategy.setPrivateKey(masterSession.keypair.getSecretKey());
+
+    // ===== Bot2を自動起動 =====
+    Logger.success('[Bot2] コンポーネント構築完了。戦略を開始します...');
+    await bot2Strategy.start();
+
+    Logger.success('[Bot2] ✅ DEEP/SUI Bot 起動完了！');
+    Logger.info(`[Bot2] プール: ${bot2Config.poolObjectId.slice(0, 20)}...`);
+    Logger.info(`[Bot2] 最大資金: ${bot2Config.maxCapitalUsdc} USDC`);
+    Logger.info('[Bot2] TxQueue: globalTxQueue (Bot1と共有) - 競合ゼロ保証');
+
+  } catch (err) {
+    Logger.error('[Bot2] 起動に失敗しました', err);
+  }
+}
+
 
 // ============== API ENDPOINTS (MULTI-USER) ============== //
 

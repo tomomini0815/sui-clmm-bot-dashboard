@@ -9,6 +9,7 @@ import { Logger } from './logger.js';
 import { PriceMonitor } from './priceMonitor.js';
 import { GasTracker } from './gasTracker.js';
 import { Tracker } from './tracker.js';
+import { globalTxQueue, WalletTxQueue } from './walletTxQueue.js';
 
 export class LpManager {
   private keypair!: Ed25519Keypair;
@@ -26,13 +27,18 @@ export class LpManager {
   private usdcDecimals: number = 6;
   private usdcIsA: boolean = true;
 
+  // ウォレットTxキュー（複数Bot間で共有して直列化）
+  private txQueue: WalletTxQueue = globalTxQueue;
+
   constructor(
     private priceMonitor: PriceMonitor,
     private gasTracker: GasTracker,
     private tracker: Tracker,
-    private config: BotConfig = globalConfig
+    private config: BotConfig = globalConfig,
+    txQueue?: WalletTxQueue
   ) {
     this.suiClient = new SuiClient({ url: this.config.rpcUrl });
+    if (txQueue) this.txQueue = txQueue;
     // constructorでは初期化せず、明示的にsetKeypairを呼ぶまで待機
   }
 
@@ -352,11 +358,14 @@ export class LpManager {
         pos_id:             '',
       });
 
-      const response = await this.suiClient.signAndExecuteTransaction({
-        transaction: txPayload as any,
-        signer: this.keypair,
-        options: { showEffects: true, showEvents: true },
-      });
+      const response = await this.txQueue.execute(
+        () => this.suiClient.signAndExecuteTransaction({
+          transaction: txPayload as any,
+          signer: this.keypair,
+          options: { showEffects: true, showEvents: true },
+        }),
+        'addLiquidity'
+      );
 
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
@@ -417,11 +426,14 @@ export class LpManager {
             rewarder_coin_types: [],
           });
 
-          const response = await this.suiClient.signAndExecuteTransaction({
-            transaction: txPayload as any,
-            signer: this.keypair,
-            options: { showEffects: true },
-          });
+          const response = await this.txQueue.execute(
+            () => this.suiClient.signAndExecuteTransaction({
+              transaction: txPayload as any,
+              signer: this.keypair,
+              options: { showEffects: true },
+            }),
+            'forceClose'
+          );
 
           if (response.effects?.status?.status === 'success') {
             Logger.success(`  ✓ ポジション ${pos.pos_object_id} を正常に回収しました。`);
@@ -467,11 +479,14 @@ export class LpManager {
         coinTypeB:  pool.coinTypeB,
       });
 
-      const response = await this.suiClient.signAndExecuteTransaction({
-        transaction: txPayload as any,
-        signer: this.keypair,
-        options: { showEffects: true, showEvents: true },
-      });
+      const response = await this.txQueue.execute(
+        () => this.suiClient.signAndExecuteTransaction({
+          transaction: txPayload as any,
+          signer: this.keypair,
+          options: { showEffects: true, showEvents: true },
+        }),
+        'collectFees'
+      );
 
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
@@ -583,11 +598,14 @@ export class LpManager {
         amount_limit: amountLimit.toString(),
       });
 
-      const response = await this.suiClient.signAndExecuteTransaction({
-        transaction: txPayload as any,
-        signer: this.keypair,
-        options: { showEffects: true, showEvents: true },
-      });
+      const response = await this.txQueue.execute(
+        () => this.suiClient.signAndExecuteTransaction({
+          transaction: txPayload as any,
+          signer: this.keypair,
+          options: { showEffects: true, showEvents: true },
+        }),
+        'swap'
+      );
 
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`Swap TX failed: ${response.effects?.status?.error}`);
