@@ -48,13 +48,16 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
       display: 'flex',
       flexDirection: 'column',
       gap: '18px',
+      flex: 1,
+      minHeight: 0
     }}>
       <div style={{ 
         display: 'flex', 
         justifyContent: 'space-between', 
         alignItems: 'center',
         flexWrap: 'wrap',
-        gap: '12px'
+        gap: '12px',
+        flexShrink: 0
       }}>
         <h2 style={{ 
           fontSize: '1.1rem', 
@@ -126,7 +129,7 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
         </div>
       </div>
       
-      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto', position: 'relative' }}>
+      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto', overflowY: 'auto', position: 'relative', flex: 1, minHeight: 0 }}>
         <table className="log-table" style={{ minWidth: '850px' }}>
           <thead>
             <tr>
@@ -151,8 +154,9 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
                 textAlign: 'right', 
                 position: 'sticky', 
                 right: 0, 
+                top: 0,
                 background: 'var(--bg-panel)',
-                zIndex: 2,
+                zIndex: 20,
                 boxShadow: '-10px 0 10px -5px rgba(0,0,0,0.3)'
               }}>ステータス</th>
             </tr>

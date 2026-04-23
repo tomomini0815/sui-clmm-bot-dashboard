@@ -276,6 +276,7 @@ button.primary-btn:active {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  height: 100%;
 }
 
 /* Stats Grid */
@@ -466,6 +467,10 @@ button.primary-btn:active {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-panel);
 }
 
 .log-table td {
