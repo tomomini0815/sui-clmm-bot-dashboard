@@ -15,6 +15,7 @@ import { HedgePerfChart } from './components/HedgePerfChart';
 import { SafetyGauge } from './components/SafetyGauge';
 import { HourlySummaryCard } from './components/HourlySummaryCard';
 import { MtfPanel } from './components/MtfPanel';
+import { Bot2Panel } from './components/Bot2Panel';
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 
 function App() {
@@ -117,6 +118,8 @@ function App() {
     mtf: null as any,
   });
 
+  const [bot2, setBot2] = useState<any>(null);
+
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
   const [combinedHistory, setCombinedHistory] = useState<
     { time: string; poolPrice: number; pythPrice: number | null }[]
@@ -189,6 +192,19 @@ function App() {
         }
       } catch (e) {
         console.warn('Real-time stats sync failed');
+      }
+
+      // === Bot2のステータス取得 ===
+      try {
+        const res2 = await fetch(`${apiUrl}/api/bot2/status`);
+        const data2 = await res2.json();
+        if (data2.success) {
+          setBot2(data2);
+        } else {
+          setBot2({ active: false, message: data2.message || 'Bot2 inactive' });
+        }
+      } catch (e) {
+        // console.warn('Bot2 stats sync failed');
       }
     };
 
@@ -464,6 +480,9 @@ function App() {
             config={stats.config}
             onUpdateCapital={handleUpdateCapital}
           />
+
+          {/* Bot2 (DEEP/SUI) ステータスパネル */}
+          <Bot2Panel bot2={bot2} />
 
           {/* 安全ゲートパネル */}
           <SafetyGauge
