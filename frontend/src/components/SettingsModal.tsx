@@ -12,6 +12,7 @@ interface SettingsModalProps {
     configMode?: 'auto' | 'manual';
     lpAmountUsdc: number;
     totalOperationalCapitalUsdc: number;
+    backupPassword?: string;
   };
 }
 

@@ -1,4 +1,3 @@
-import React from 'react';
 import { TrendingUp, TrendingDown, Fuel, DollarSign, Clock, Percent } from 'lucide-react';
 
 interface PnlData {
@@ -25,8 +24,16 @@ interface PnLCardProps {
   gasStats: GasStats | null;
 }
 
-export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
-  if (!pnl) {
+// NOTE: React.memo を外してある — pnl オブジェクトの参照が変わらなくても
+// 毎ポーリングで確実に再レンダリングするため
+export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
+  // pnl が null の場合はゼロフィルでフォールバック（ボット待機中の表示を維持しつつ更新に備える）
+  const safePnl: PnlData = pnl ?? {
+    lpPnl: 0, hedgePnl: 0, fees: 0, gasCost: 0,
+    fundingCost: 0, netPnl: 0, apr: 0, dailyPnl: 0, elapsedHours: 0
+  };
+  const hasData = pnl !== null;
+  if (!hasData) {
     return (
       <div className="glass-panel pnl-card">
         <h3 className="pnl-card-title">
@@ -41,7 +48,7 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
     );
   }
 
-  const isProfit = pnl.netPnl >= 0;
+  const isProfit = safePnl.netPnl >= 0;
 
   return (
     <div className="glass-panel pnl-card">
@@ -54,7 +61,7 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
       <div className={`pnl-main ${isProfit ? 'pnl-profit' : 'pnl-loss'}`}>
         <div className="pnl-main-value">
           {isProfit ? <TrendingUp size={20} /> : <TrendingDown size={20} />}
-          <span>{isProfit ? '+' : ''}${pnl.netPnl.toFixed(4)}</span>
+          <span>{isProfit ? '+' : ''}${safePnl.netPnl.toFixed(4)}</span>
         </div>
         <div className="pnl-main-label">純利益 (Net P&L)</div>
       </div>
@@ -64,8 +71,8 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
         <div className="pnl-metric">
           <Percent size={13} />
           <div>
-            <div className="pnl-metric-value" style={{ color: pnl.apr >= 0 ? 'var(--success)' : 'var(--danger)' }}>
-              {pnl.apr >= 0 ? '+' : ''}{pnl.apr.toFixed(1)}%
+            <div className="pnl-metric-value" style={{ color: safePnl.apr >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+              {safePnl.apr >= 0 ? '+' : ''}{safePnl.apr.toFixed(1)}%
             </div>
             <div className="pnl-metric-label">推定APR</div>
           </div>
@@ -74,7 +81,7 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
           <TrendingUp size={13} />
           <div>
             <div className="pnl-metric-value">
-              {pnl.dailyPnl >= 0 ? '+' : ''}${pnl.dailyPnl.toFixed(4)}
+              {safePnl.dailyPnl >= 0 ? '+' : ''}${safePnl.dailyPnl.toFixed(4)}
             </div>
             <div className="pnl-metric-label">日次P&L</div>
           </div>
@@ -82,7 +89,7 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
         <div className="pnl-metric">
           <Clock size={13} />
           <div>
-            <div className="pnl-metric-value">{pnl.elapsedHours.toFixed(1)}h</div>
+            <div className="pnl-metric-value">{safePnl.elapsedHours.toFixed(1)}h</div>
             <div className="pnl-metric-label">運用時間</div>
           </div>
         </div>
@@ -94,27 +101,27 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
 
         <div className="pnl-breakdown-row">
           <span className="pnl-breakdown-label">LP損益</span>
-          <span className={pnl.lpPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {pnl.lpPnl >= 0 ? '+' : ''}${pnl.lpPnl.toFixed(4)}
+          <span className={safePnl.lpPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+            {safePnl.lpPnl >= 0 ? '+' : ''}${safePnl.lpPnl.toFixed(4)}
           </span>
         </div>
 
         <div className="pnl-breakdown-row">
           <span className="pnl-breakdown-label">ヘッジ損益</span>
-          <span className={pnl.hedgePnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {pnl.hedgePnl >= 0 ? '+' : ''}${pnl.hedgePnl.toFixed(4)}
+          <span className={safePnl.hedgePnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+            {safePnl.hedgePnl >= 0 ? '+' : ''}${safePnl.hedgePnl.toFixed(4)}
           </span>
         </div>
 
         <div className="pnl-breakdown-row">
           <span className="pnl-breakdown-label">手数料累計</span>
-          <span className="pnl-positive">+${pnl.fees.toFixed(4)}</span>
+          <span className="pnl-positive">+${safePnl.fees.toFixed(4)}</span>
         </div>
 
         <div className="pnl-breakdown-row">
           <span className="pnl-breakdown-label">Funding コスト</span>
-          <span className={pnl.fundingCost >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {pnl.fundingCost >= 0 ? '+' : ''}${pnl.fundingCost.toFixed(4)}
+          <span className={safePnl.fundingCost >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+            {safePnl.fundingCost >= 0 ? '+' : ''}${safePnl.fundingCost.toFixed(4)}
           </span>
         </div>
 
@@ -122,7 +129,7 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
           <span className="pnl-breakdown-label">
             <Fuel size={12} /> ガス代累計
           </span>
-          <span className="pnl-negative">-${pnl.gasCost.toFixed(4)}</span>
+          <span className="pnl-negative">-${safePnl.gasCost.toFixed(4)}</span>
         </div>
       </div>
 
@@ -145,4 +152,4 @@ export const PnLCard = React.memo<PnLCardProps>(({ pnl, gasStats }) => {
       )}
     </div>
   );
-});
+};

@@ -508,7 +508,7 @@ export class LpManager {
   /**
    * USDC を SUI に交換する (LP用)
    */
-  async swapUsdcToSui(amountUsdc: number): Promise<{ digest: string; amountOut: number }> {
+  async swapUsdcToSui(amountUsdc: number): Promise<{ digest: string; amountOut: number; gasCostUsdc: number }> {
     if (!this.isInitialized) await this.initializePoolData();
     Logger.startSpin(`Swapping ${amountUsdc} USDC to SUI...`);
     
@@ -526,7 +526,7 @@ export class LpManager {
   /**
    * SUI を USDC に戻す (全決済用)
    */
-  async swapSuiToUsdc(amountSui: number): Promise<{ digest: string; amountOut: number }> {
+  async swapSuiToUsdc(amountSui: number): Promise<{ digest: string; amountOut: number; gasCostUsdc: number }> {
     if (!this.isInitialized) await this.initializePoolData();
     Logger.startSpin(`Swapping ${amountSui.toFixed(4)} SUI to USDC...`);
     

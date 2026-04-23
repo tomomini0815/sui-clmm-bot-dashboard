@@ -8,7 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts';
-import { Wallet, TrendingUp, ChevronDown, ChevronUp } from 'lucide-react';
+import { Wallet, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface BalanceHistoryItem {
   timestamp: string;

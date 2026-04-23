@@ -7,6 +7,7 @@ interface HedgePerfChartProps {
   currentPrice: number;
   entryPrice: number;
   active: boolean;
+  direction?: 'SHORT' | 'LONG' | 'NONE' | string;
 }
 
 const CustomTooltip = ({ active, payload, label }: any) => {
@@ -31,23 +32,94 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   );
 };
 
-export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPrice, entryPrice, active }) => {
-  const pnlPercent = entryPrice > 0 ? ((entryPrice - currentPrice) / entryPrice * 100) : 0;
-  
+export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({
+  data, currentPrice, entryPrice, active, direction = 'SHORT'
+}) => {
+  const isLong   = direction === 'LONG';
+  const isShort  = direction === 'SHORT';
+  const isNone   = !isLong && !isShort;
+
+  // SHORT: 価格下落 → 利益
+  // LONG : 価格上昇 → 利益
+  const rawPnlPct = entryPrice > 0
+    ? isLong
+      ? (currentPrice - entryPrice) / entryPrice * 100
+      : (entryPrice - currentPrice) / entryPrice * 100
+    : 0;
+  const pnlPercent = rawPnlPct;
+
+  // 色設定
+  const entryLineColor = isLong ? '#3fb950' : '#ff4d4d';    // LONG=緑 / SHORT=赤
+  const priceLineColorProfit  = isLong ? 'var(--success)' : 'var(--success)';
+  const priceLineColorLoss    = isLong ? 'var(--danger)'  : 'var(--danger)';
+
+  // 価格が利益方向かどうか
+  const isInProfit = isLong
+    ? currentPrice > entryPrice
+    : currentPrice < entryPrice;
+
+  const priceLineColor = isInProfit ? priceLineColorProfit : priceLineColorLoss;
+  const areaFill       = isInProfit
+    ? 'rgba(63, 185, 80, 0.1)'
+    : 'rgba(248, 81, 73, 0.1)';
+
+  // タイトル・説明文
+  const titleLabel = isNone
+    ? 'ヘッジパフォーマンス'
+    : `ヘッジパフォーマンス (${isLong ? 'ロング' : 'ショート'}ポジション)`;
+
+  const descLabel = isNone
+    ? 'ヘッジポジション待機中'
+    : isLong
+    ? '価格上昇時にLPの評価損をカバーします'
+    : '価格下落時にLPの評価損をカバーします';
+
+  const entryLabel = isLong ? 'LONG ENTRY' : 'SHORT ENTRY';
+
+  const legendText = isNone
+    ? 'ヘッジポジションが開かれると詳細が表示されます。'
+    : isLong
+    ? `${isLong ? '緑' : '赤'}点線：建玉価格（ロングエントリー）を基準に、SUI価格が上がるほど利益が発生します。`
+    : '赤点線：建玉価格（ショートエントリー）を基準に、SUI価格が下がるほど利益が発生します。';
+
   return (
     <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* ヘッダー */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
         <div>
           <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ShieldCheck size={20} color="var(--accent)" />
-            ヘッジパフォーマンス (ショートポジション)
+            <ShieldCheck size={20} color={isLong ? 'var(--success)' : 'var(--accent)'} />
+            {titleLabel}
           </h2>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-             価格下落時にLPの評価損をカバーします
+            {descLabel}
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '10px' }}>
+        {/* ポジション方向バッジ */}
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          {!isNone && (
+            <div style={{
+              padding: '4px 12px',
+              borderRadius: '20px',
+              fontSize: '0.78rem',
+              fontWeight: 700,
+              letterSpacing: '0.06em',
+              background: isLong
+                ? 'rgba(63, 185, 80, 0.15)'
+                : 'rgba(248, 81, 73, 0.15)',
+              border: `1px solid ${isLong ? 'rgba(63, 185, 80, 0.4)' : 'rgba(248, 81, 73, 0.4)'}`,
+              color: isLong ? 'var(--success)' : 'var(--danger)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px'
+            }}>
+              {isLong ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
+              {isLong ? 'LONG' : 'SHORT'}
+            </div>
+          )}
+
+          {/* 建玉価格 */}
           <div style={{
             background: 'rgba(255, 255, 255, 0.05)',
             padding: '8px 14px', borderRadius: '8px',
@@ -57,6 +129,8 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
             <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginBottom: '2px' }}>建玉価格</div>
             <div style={{ fontWeight: 700, fontSize: '1rem' }}>{entryPrice > 0 ? entryPrice.toFixed(4) : '-'}</div>
           </div>
+
+          {/* ヘッジ損益 */}
           <div style={{
             background: pnlPercent >= 0 ? 'rgba(63, 185, 80, 0.1)' : 'rgba(248, 81, 73, 0.1)',
             padding: '8px 14px', borderRadius: '8px',
@@ -64,9 +138,9 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
             textAlign: 'right'
           }}>
             <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginBottom: '2px' }}>ヘッジ損益</div>
-            <div style={{ 
-              fontWeight: 700, 
-              fontSize: '1rem', 
+            <div style={{
+              fontWeight: 700,
+              fontSize: '1rem',
               color: pnlPercent >= 0 ? 'var(--success)' : 'var(--danger)',
               display: 'flex',
               alignItems: 'center',
@@ -80,6 +154,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
         </div>
       </div>
 
+      {/* チャート */}
       <div style={{ height: '220px', width: '100%', position: 'relative' }}>
         {(!active && entryPrice <= 0) || data.length === 0 ? (
           <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', opacity: 0.6 }}>
@@ -89,7 +164,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data} margin={{ top: 5, right: 30, left: 10, bottom: 0 }}>
               <XAxis dataKey="time" hide />
-              <YAxis 
+              <YAxis
                 domain={[
                   (dataMin: number) => Number((Math.min(dataMin, entryPrice) * 0.99).toFixed(4)),
                   (dataMax: number) => Number((Math.max(dataMax, entryPrice) * 1.01).toFixed(4)),
@@ -97,33 +172,50 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
                 hide
               />
               <Tooltip content={<CustomTooltip />} />
-              
-              <ReferenceLine 
-                y={entryPrice} 
-                stroke="#ff4d4d" 
-                strokeDasharray="3 3" 
+
+              {/* エントリー価格の基準線 */}
+              <ReferenceLine
+                y={entryPrice}
+                stroke={entryLineColor}
+                strokeDasharray="3 3"
                 strokeWidth={2}
-                label={{ 
-                  value: 'SHORT ENTRY', 
-                  position: 'insideTopRight', 
-                  fill: '#ff4d4d', 
+                label={{
+                  value: entryLabel,
+                  position: 'insideTopRight',
+                  fill: entryLineColor,
                   fontSize: 11,
                   fontWeight: 800
                 }}
               />
 
+              {/* 現在価格の水平線 */}
+              {currentPrice > 0 && (
+                <ReferenceLine
+                  y={currentPrice}
+                  stroke="rgba(255,255,255,0.3)"
+                  strokeDasharray="2 4"
+                  strokeWidth={1}
+                  label={{
+                    value: 'NOW',
+                    position: 'insideBottomRight',
+                    fill: 'rgba(255,255,255,0.45)',
+                    fontSize: 10,
+                  }}
+                />
+              )}
+
               <Area
                 type="monotone"
                 dataKey="poolPrice"
                 stroke="none"
-                fill={currentPrice < entryPrice ? 'rgba(63, 185, 80, 0.1)' : 'rgba(248, 81, 73, 0.1)'}
+                fill={areaFill}
               />
 
               <Line
                 type="monotone"
                 dataKey="poolPrice"
                 name="SUI価格"
-                stroke={currentPrice < entryPrice ? 'var(--success)' : 'var(--danger)'}
+                stroke={priceLineColor}
                 strokeWidth={2}
                 dot={false}
                 activeDot={{ r: 4 }}
@@ -133,18 +225,19 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({ data, currentPri
         )}
       </div>
 
-      <div style={{ 
-        fontSize: '0.8rem', 
-        color: 'var(--text-muted)', 
-        background: 'rgba(255, 255, 255, 0.03)', 
-        padding: '10px 14px', 
+      {/* 凡例 */}
+      <div style={{
+        fontSize: '0.8rem',
+        color: 'var(--text-muted)',
+        background: 'rgba(255, 255, 255, 0.03)',
+        padding: '10px 14px',
         borderRadius: '8px',
         display: 'flex',
         alignItems: 'center',
         gap: '10px'
       }}>
-        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff4d4d' }}></div>
-        <span>赤点線：建玉価格（ショートエントリー）を基準に、SUI価格が下がるほど利益が発生します。</span>
+        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: entryLineColor, flexShrink: 0 }}></div>
+        <span>{legendText}</span>
       </div>
     </div>
   );

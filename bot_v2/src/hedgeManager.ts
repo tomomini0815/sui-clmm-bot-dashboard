@@ -347,14 +347,14 @@ export class HedgeManager {
   /**
    * ポジションを開く（ショートまたはロング）
    */
-  async openHedge(amountUsdc: number, currentPrice: number, side: 'SHORT' | 'LONG' = 'SHORT'): Promise<{ digest: string }> {
+  async openHedge(amountUsdc: number, currentPrice: number, side: 'SHORT' | 'LONG' = 'SHORT'): Promise<{ digest: string; gasCostUsdc: number }> {
     if (this.mode === 'simulate') {
       this.hasPosition = true;
       this.currentAmount = amountUsdc;
       this.entryPrice = currentPrice;
       this.hedgeDirection = side;
       this.lastFundingTime = Date.now();
-      return { digest: 'simulated' };
+      return { digest: 'simulated', gasCostUsdc: 0 };
     }
 
     if (!this.bluefinClient) throw new Error('Bluefin client not initialized');
@@ -408,11 +408,8 @@ export class HedgeManager {
 
       const digest = (response as any).hash || (response as any).digest || 'success';
       
-      // ガス代を概算記録
-      const gasCostUsdc = this.gasTracker.recordGas(null, currentPrice, 'hedge');
-
       Logger.success(`✅ Bluefin: ${directionLabel} opened: ${digest}`);
-      return { digest, gasCostUsdc };
+      return { digest, gasCostUsdc: 0 }; // ガス記録はstrategy.ts側で実施
     } catch (e: any) {
       const errorDetail = e.response?.data || e.message;
       Logger.error(`❌ Bluefin Order Failed: ${JSON.stringify(errorDetail)}`);

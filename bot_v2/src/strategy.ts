@@ -105,6 +105,20 @@ export class Strategy {
   // Cetus tick_spacing (SUI/USDC標準プール)
   private readonly TICK_SPACING = 2;
 
+  // ===== MTF/レジーム最終状態キャッシュ (ダッシュボード表示用) =====
+  public lastMtfState: {
+    direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+    mtfScore: number;
+    fundingBias: number;
+    totalScore: number;
+    details: string;
+    fundingArbitrage: boolean;
+    currentFundingRate: number;
+    regime: 'LOW_VOL' | 'HIGH_VOL';
+    hedgeRatio: number;
+    updatedAt: number; // timestamp
+  } | null = null;
+
   constructor(
     public priceMonitor: PriceMonitor,
     public lpManager: LpManager,
@@ -276,6 +290,196 @@ export class Strategy {
     } else {
       return 'downtrend';
     }
+  }
+
+  // ===== MTF + Funding Rate ヘッジシグナル ===== //
+
+  /**
+   * マルチタイムフレーム（5分・15分・30分）+ Funding Rate による
+   * ヘッジ方向の総合スコアを計算する。
+   *
+   * 採点方式:
+   *   各TF: 短期MA > 長期MA → +1点(上昇), 短期MA < 長期MA → -1点(下落)
+   *   Funding Rate > +0.0005/h → -1点(LONG過熱=SHORTバイアス)
+   *   Funding Rate < -0.0005/h → +1点(SHORT過熱=LONGバイアス)
+   *
+   *   合計 >= +2 → LONG推奨
+   *   合計 <= -2 → SHORT推奨
+   *   それ以外   → NEUTRAL（エントリー見送り）
+   *
+   * ※ モニタリング間隔 ~3秒を前提としたエントリー数:
+   *   5分  = 100エントリー
+   *   15分 = 300エントリー
+   *   30分 = 600エントリー
+   */
+  private async getMtfHedgeSignal(): Promise<{
+    direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+    mtfScore: number;
+    fundingBias: number;
+    totalScore: number;
+    details: string;
+    fundingArbitrage: boolean;
+    currentFundingRate: number;
+  }> {
+    const prices = this.priceHistoryForAnalysis;
+    const len = prices.length;
+
+    // --- MTFスコア計算 ---
+    // MA計算ヘルパー
+    const ma = (window: number): number => {
+      const slice = prices.slice(-window);
+      return slice.reduce((a, b) => a + b, 0) / slice.length;
+    };
+
+    // 各タイムフレームのトレンド判定
+    // TF設定: [短期窓, 長期窓, 必要な最小エントリー数]
+    const timeframes: Array<[number, number, number, string]> = [
+      [20,  100, 100,  '5分'],
+      [60,  300, 300,  '15分'],
+      [120, 600, 600,  '30分'],
+    ];
+
+    let mtfScore = 0;
+    const tfDetails: string[] = [];
+
+    for (const [shortWin, longWin, minLen, label] of timeframes) {
+      if (len < minLen) {
+        tfDetails.push(`${label}:待機(${len}/${minLen})`);
+        continue; // データ不足はスキップ（スコアに加算しない）
+      }
+      const shortMa = ma(shortWin);
+      const longMa  = ma(longWin);
+      const bias = shortMa > longMa ? +1 : -1;
+      mtfScore += bias;
+      tfDetails.push(`${label}:${bias > 0 ? '↑' : '↓'}(${(shortMa).toFixed(4)}/${(longMa).toFixed(4)})`);
+    }
+
+    // --- Funding Rate バイアス & アービトラージ判定 ---
+    // 市場研究の知見: 高Funding時のSHORTは「コスト」ではなく「収益源」になる
+    // SUI Funding Rate > 0.10%/h（年率8.76%相当）の時はダブル収益モード
+    let fundingBias = 0;
+    let fundingLabel = 'N/A';
+    let fundingArbitrage = false; // Funding Rate アービトラージモードフラグ
+    let currentFundingRate = 0;
+    try {
+      currentFundingRate = await this.hedgeManager.getFundingRate();
+      // fundingRate は1時間あたりの値（例: 0.0001 = 0.01%/h）
+
+      if (currentFundingRate > 0.0010) {
+        // 🔥 アービトラージモード: Funding > 0.10%/h
+        // LP手数料 + Funding受取 = ダブル収益 → SHORTを強く推奨
+        fundingBias = -2; // 通常の-1より強いバイアス
+        fundingArbitrage = true;
+        fundingLabel = `${(currentFundingRate * 100).toFixed(4)}%/h(🔥ARB-SHORT)`;
+        Logger.info(`[MTF] 🔥 Funding Rate アービトラージ発動: ${(currentFundingRate * 100).toFixed(4)}%/h → SHORT強制推奨`);
+      } else if (currentFundingRate > 0.0005) {
+        // ロング過熱 → SHORTバイアス
+        fundingBias = -1;
+        fundingLabel = `${(currentFundingRate * 100).toFixed(4)}%/h(SHORT優勢)`;
+      } else if (currentFundingRate < -0.0005) {
+        // ショート過熱 → LONGバイアス
+        fundingBias = +1;
+        fundingLabel = `${(currentFundingRate * 100).toFixed(4)}%/h(LONG優勢)`;
+      } else {
+        fundingLabel = `${(currentFundingRate * 100).toFixed(4)}%/h(中立)`;
+      }
+    } catch (e) {
+      Logger.warn('[MTF] Funding Rate 取得失敗 — バイアスなしで継続');
+    }
+
+    const totalScore = mtfScore + fundingBias;
+
+    // --- 方向決定 ---
+    // アービトラージモード時はスコアに関わらずSHORTを強制
+    let direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+    if (fundingArbitrage) {
+      direction = 'SHORT'; // Funding収益目的でSHORT確定
+    } else if (totalScore >= 2) {
+      direction = 'LONG';
+    } else if (totalScore <= -2) {
+      direction = 'SHORT';
+    } else {
+      direction = 'NEUTRAL';
+    }
+
+    const details = `[MTF] ${tfDetails.join(' | ')} | Funding:${fundingLabel} | MTF:${mtfScore} Bias:${fundingBias} Total:${totalScore} → ${direction}`;
+    Logger.info(details);
+
+    // ダッシュボード表示用にキャッシュ保存
+    const regime = this.getVolatilityRegime();
+    const hedgeRatio = this.calculateOptimalHedgeRatio(regime);
+    this.lastMtfState = {
+      direction, mtfScore, fundingBias, totalScore, details,
+      fundingArbitrage, currentFundingRate,
+      regime, hedgeRatio,
+      updatedAt: Date.now(),
+    };
+
+    return { direction, mtfScore, fundingBias, totalScore, details, fundingArbitrage, currentFundingRate };
+  }
+
+  // ===== ボラティリティレジーム & ダイナミックヘッジ比率 ===== //
+
+  /**
+   * ボラティリティレジームを判定する
+   *
+   * 学術研究・DeFiプロトコル（Panoptic, Uniswap v3 実装事例）より:
+   *   低ボラ時にヘッジするとFunding Rateコストで赤字になる事例多数。
+   *   高ボラ時にヘッジしないとIL（Impermanent Loss）が膨らむ。
+   *
+   * ATR/price（ボラティリティ率）を基準に判定:
+   *   < 1.5%  → LOW_VOL  : LP手数料収集モード（ヘッジ最小化）
+   *   >= 1.5% → HIGH_VOL : デルタニュートラル防御モード（ヘッジ強化）
+   */
+  private getVolatilityRegime(): 'LOW_VOL' | 'HIGH_VOL' {
+    const atr = this.priceMonitor.calculateATR24h();
+    const prices = this.priceHistoryForAnalysis;
+    const currentPrice = prices.length > 0 ? prices[prices.length - 1] : 0;
+
+    if (currentPrice <= 0) return 'HIGH_VOL'; // 安全側にフォールバック
+
+    const atrRatio = atr / currentPrice; // 例: 0.015 = 1.5%
+    const regime: 'LOW_VOL' | 'HIGH_VOL' = atrRatio < 0.015 ? 'LOW_VOL' : 'HIGH_VOL';
+
+    Logger.info(`[REGIME] ATR=$${atr.toFixed(4)} (${(atrRatio * 100).toFixed(2)}%) → ${regime}`);
+    return regime;
+  }
+
+  /**
+   * ボラティリティに応じた最適ヘッジ比率を計算する
+   *
+   * バックテスト研究の知見:
+   *   「50〜70%のパーシャルヘッジが最高シャープレシオ」
+   *   100%ヘッジはFunding Rateコストが手数料収入を侵食する
+   *
+   *   低ボラ  (< 2%/day) : 50% — コスト最小化、手数料収入重視
+   *   中ボラ  (2〜5%/day): 65% — リスクとコストのバランス
+   *   高ボラ  (> 5%/day) : 80% — ILリスク最大化対応、防御優先
+   *
+   * @returns 最適ヘッジ比率（0.5〜0.8）
+   */
+  private calculateOptimalHedgeRatio(regime: 'LOW_VOL' | 'HIGH_VOL'): number {
+    const vol = this.calculateVolatility(); // 標準偏差/平均（小数）
+    // 年率換算: vol_daily ≈ vol_per_interval × sqrt(intervals_per_day)
+    // モニタリング間隔3秒 → 1日28800回 → √28800 ≈ 169.7
+    const dailyVol = vol * Math.sqrt(28800) * 100; // パーセント表示
+
+    let optimalRatio: number;
+    if (dailyVol < 2.0) {
+      optimalRatio = 0.50; // 低ボラ: コスト最小
+    } else if (dailyVol < 5.0) {
+      optimalRatio = 0.65; // 中ボラ: バランス
+    } else {
+      optimalRatio = 0.80; // 高ボラ: 防御最大化
+    }
+
+    // LOW_VOLレジームでは全体的に10%下げてコスト削減
+    if (regime === 'LOW_VOL') {
+      optimalRatio = Math.max(0.40, optimalRatio - 0.10);
+    }
+
+    Logger.info(`[HEDGE_RATIO] DailyVol≈${dailyVol.toFixed(2)}%, Regime=${regime} → 最適ヘッジ比率: ${(optimalRatio * 100).toFixed(0)}%`);
+    return optimalRatio;
   }
 
   // ===== レンジ計算 ===== //
@@ -482,8 +686,16 @@ export class Strategy {
   }
 
   /**
-   * Deltaドリフト補正
-   * 仕様書: 10%以上ズレたら adjust_bluefin_position
+   * Deltaドリフト補正（レジーム適応型）
+   *
+   * 市場研究の知見（バックテスト）:
+   *   「閾値ベースのリバランスは定期リバランスより優位」
+   *   「高Funding時はリバランスを抑制してポジション維持優先」
+   *
+   * 動的閾値:
+   *   HIGH_VOL レジーム            : ±10%（頻繁補正でIL最小化）
+   *   LOW_VOL + 通常Funding        : ±15%（中程度）
+   *   LOW_VOL + 高Funding(ARB)     : ±20%（ガス節約、ポジション維持優先）
    */
   private async checkAndAdjustDelta(currentPrice: number): Promise<void> {
     if (this.currentLowerBound <= 0 || this.currentLpValueUsdc <= 0) return;
@@ -499,8 +711,30 @@ export class Strategy {
     // 1時間サマリー用deltaエラー記録
     this.hourlyStats.deltaErrors.push(Math.abs(delta - 0.5));
 
-    if (driftPct > 0.10) {
-      Logger.warn(`⚡ DeltaDrift: ${(driftPct*100).toFixed(1)}% > 10% → 調整 ($${currentHedgeUsd.toFixed(2)} → $${newHedgeUsd.toFixed(2)})`);
+    // --- レジーム適応型ドリフト閾値 ---
+    const regime = this.getVolatilityRegime();
+    let driftThreshold = 0.10; // デフォルト: HIGH_VOL
+    let thresholdReason = 'HIGH_VOL(10%)';
+
+    if (regime === 'LOW_VOL') {
+      try {
+        const fundingRate = await this.hedgeManager.getFundingRate();
+        if (fundingRate > 0.0010) {
+          // 高Funding アービトラージ中: リバランスを抑制してガス節約
+          driftThreshold = 0.20;
+          thresholdReason = `LOW_VOL+ARB(20%, funding=${(fundingRate*100).toFixed(4)}%/h)`;
+        } else {
+          driftThreshold = 0.15;
+          thresholdReason = 'LOW_VOL(15%)';
+        }
+      } catch {
+        driftThreshold = 0.15;
+        thresholdReason = 'LOW_VOL(15%, funding取得失敗)';
+      }
+    }
+
+    if (driftPct > driftThreshold) {
+      Logger.warn(`⚡ DeltaDrift: ${(driftPct*100).toFixed(1)}% > ${(driftThreshold*100).toFixed(0)}% [${thresholdReason}] → 調整 ($${currentHedgeUsd.toFixed(2)} → $${newHedgeUsd.toFixed(2)})`);
       this.notify(`⚡ Deltaドリフト補正: $${currentHedgeUsd.toFixed(2)} → $${newHedgeUsd.toFixed(2)}`);
       
       const direction = this.hedgeDirection !== 'NONE' ? this.hedgeDirection : 'SHORT';
@@ -515,6 +749,8 @@ export class Strategy {
           ts: new Date().toISOString(),
           action: 'HEDGE_ADJUST',
           trigger: 'Δドリフト',
+          regime,
+          drift_threshold: driftThreshold,
           delta_before: Number((currentHedgeUsd / (this.currentLpValueUsdc || 1)).toFixed(4)),
           delta_after: Number(delta.toFixed(4)),
           hedge_direction: direction,
@@ -525,9 +761,10 @@ export class Strategy {
         await this.tracker.recordEvent('DeltaAdjust', JSON.stringify(logEntry), currentPrice);
       }
     } else {
-      Logger.info(`✅ DeltaDrift: ${(driftPct*100).toFixed(1)}% < 10% → OK`);
+      Logger.info(`✅ DeltaDrift: ${(driftPct*100).toFixed(1)}% < ${(driftThreshold*100).toFixed(0)}% [${thresholdReason}] → OK`);
     }
   }
+
 
   /**
    * 1時間サマリーを生成してログ出力
@@ -793,8 +1030,8 @@ export class Strategy {
    * 資本の50%をSUIに → USDC+SUIでLP → Bluefinでショート
    */
   private async executeInitialEntry(currentPrice: number) {
-    this.notify(`🚀 デルタニュートラル戦略: 初期構築開始 (ショート) 価格: $${currentPrice.toFixed(4)}`);
-    Logger.box('Delta-Neutral Flip: Initial Entry (SHORT)', `Price: $${currentPrice.toFixed(4)}`);
+    this.notify(`🚀 デルタニュートラル戦略: 初期構築開始 価格: $${currentPrice.toFixed(4)}`);
+    Logger.box('Delta-Neutral Flip: Initial Entry', `Price: $${currentPrice.toFixed(4)}`);
 
     // STEP 0: 取引所との同期を先に行う
     await this.hedgeManager.syncPositionWithBluefin().catch(e => {
@@ -819,12 +1056,38 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: Bluefinショートヘッジ
-    await this.buildHedgePosition(currentPrice, hedgeNotional, 'SHORT');
+    // STEP 4: レジーム判定 + MTF シグナルでヘッジ比率・方向を決定
+    const regime = this.getVolatilityRegime();
+    const optimalRatio = this.calculateOptimalHedgeRatio(regime);
+    // 動的ヘッジ比率をconfigに一時適用（evaluateAndBalanceの計算後なので再計算）
+    const adjustedHedgeNotional = hedgeNotional * (optimalRatio / this.config.hedgeRatio);
 
-    this.hedgeDirection = 'SHORT';
-    this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'SHORT');
+    const mtfSignal = await this.getMtfHedgeSignal();
+
+    // アービトラージモード通知
+    if (mtfSignal.fundingArbitrage) {
+      this.notify(`🔥 Funding Rate ARBモード発動! ${(mtfSignal.currentFundingRate * 100).toFixed(4)}%/h → LP手数料+Funding受取のダブル収益を狙います`);
+    }
+
+    // データ不足（30分未満稼働）の場合はSHORTをデフォルトとして使用
+    const hedgeDir = mtfSignal.direction === 'NEUTRAL'
+      ? 'SHORT' // 初回はSHORTで安全側を優先
+      : mtfSignal.direction;
+
+    if (mtfSignal.direction === 'NEUTRAL') {
+      Logger.warn(`[MTF] 初回エントリー: シグナル中立 → デフォルトSHORTで開始 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
+      this.notify(`📊 MTF: 初回はデフォルトSHORT (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+    } else {
+      Logger.info(`[MTF] 初回エントリー: ${hedgeDir}を採用 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
+      this.notify(`📊 MTF確認 → ${hedgeDir} (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+    }
+
+    await this.buildHedgePosition(currentPrice, adjustedHedgeNotional, hedgeDir);
+
+    this.hedgeDirection = hedgeDir;
+    this.finalizeRebalance(currentPrice, lpValue, adjustedHedgeNotional, totalCapital, hedgeDir);
   }
+
 
   /**
    * [上方向逸脱 → ロング反転]
@@ -862,11 +1125,23 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: Bluefinロングヘッジ (上昇トレンドフォロー)
-    await this.buildHedgePosition(currentPrice, hedgeNotional, 'LONG');
-
-    this.hedgeDirection = 'LONG';
-    this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'LONG');
+    // STEP 4: MTF + Funding Rate でLONG方向を確認してからヘッジ
+    const mtfSignalLong = await this.getMtfHedgeSignal();
+    if (mtfSignalLong.direction === 'LONG' || mtfSignalLong.direction === 'NEUTRAL') {
+      // LONG or NEUTRAL(データ不足): 逸脱方向に従ってLONG実行
+      Logger.info(`[MTF] LONG反転: スコア=${mtfSignalLong.totalScore} → LONGヘッジを開設`);
+      this.notify(`📈 MTF確認済みLONG反転 (スコア: ${mtfSignalLong.totalScore})`);
+      await this.buildHedgePosition(currentPrice, hedgeNotional, 'LONG');
+      this.hedgeDirection = 'LONG';
+      this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'LONG');
+    } else {
+      // MTFがSHORTを示している → 上抜けは偽シグナルの可能性が高い
+      Logger.warn(`[MTF] LONG反転キャンセル: MTFスコア=${mtfSignalLong.totalScore} がSHORTを示唆 → ヘッジなしでLP維持`);
+      this.notify(`⚠️ MTF: 上抜けだがSHORTシグナル → ヘッジ見送り (スコア: ${mtfSignalLong.totalScore})\n${mtfSignalLong.details}`);
+      // LPは既に構築済みなので手数料収集を継続。ヘッジ方向はNONEに設定。
+      this.hedgeDirection = 'NONE';
+      this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
+    }
   }
 
   /**
@@ -905,11 +1180,23 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: Bluefinショートヘッジ (下落トレンドフォロー)
-    await this.buildHedgePosition(currentPrice, hedgeNotional, 'SHORT');
-
-    this.hedgeDirection = 'SHORT';
-    this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'SHORT');
+    // STEP 4: MTF + Funding Rate でSHORT方向を確認してからヘッジ
+    const mtfSignalShort = await this.getMtfHedgeSignal();
+    if (mtfSignalShort.direction === 'SHORT' || mtfSignalShort.direction === 'NEUTRAL') {
+      // SHORT or NEUTRAL(データ不足): 逸脱方向に従ってSHORT実行
+      Logger.info(`[MTF] SHORT反転: スコア=${mtfSignalShort.totalScore} → SHORTヘッジを開設`);
+      this.notify(`📉 MTF確認済みSHORT反転 (スコア: ${mtfSignalShort.totalScore})`);
+      await this.buildHedgePosition(currentPrice, hedgeNotional, 'SHORT');
+      this.hedgeDirection = 'SHORT';
+      this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'SHORT');
+    } else {
+      // MTFがLONGを示している → 下抜けは偽シグナルの可能性が高い
+      Logger.warn(`[MTF] SHORT反転キャンセル: MTFスコア=${mtfSignalShort.totalScore} がLONGを示唆 → ヘッジなしでLP維持`);
+      this.notify(`⚠️ MTF: 下抜けだがLONGシグナル → ヘッジ見送り (スコア: ${mtfSignalShort.totalScore})\n${mtfSignalShort.details}`);
+      // LPは既に構築済みなので手数料収集を継続。ヘッジ方向はNONEに設定。
+      this.hedgeDirection = 'NONE';
+      this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
+    }
   }
 
   // ========================================
@@ -1198,11 +1485,21 @@ export class Strategy {
           Logger.info('🔄 [PERSISTENCE] 既存のレンジ情報を検出しました。全決済をスキップし、直接監視に移行します。');
           
           // PnLエンジンのエントリー価格が未設定（0）の場合、現在の価格をエントリー点として記録
-          const pnl = this.pnlEngine.calculateNetPnl(firstPrice);
-          if (pnl.netPnl === 0) {
-            Logger.info('📊 [PNL FIX] 既存ポジションのエントリー情報を現在の価格で初期化します');
-            this.pnlEngine.recordLpEntry(firstPrice, this.config.lpAmountUsdc);
-            this.pnlEngine.recordHedgeEntry(firstPrice, this.config.lpAmountUsdc * this.config.hedgeRatio, this.hedgeDirection !== 'NONE' ? this.hedgeDirection as 'SHORT' | 'LONG' : 'SHORT');
+          // ※ netPnl === 0 では手数料が既に存在する場合に誤検知するため lpEntryPrice で判定
+          const pnlState = this.pnlEngine.serialize();
+          if (!pnlState.lpEntryPrice || pnlState.lpEntryPrice <= 0) {
+            Logger.info('📊 [PNL FIX] lpEntryPriceが未設定 → 現在の価格で初期化します');
+            // LP資本はtotalOperationalCapitalの50%をLP側に投入する設計
+            const estimatedLpValue = this.config.totalOperationalCapitalUsdc * 0.5;
+            const estimatedHedgeValue = estimatedLpValue * this.config.hedgeRatio;
+            this.pnlEngine.recordLpEntry(firstPrice, estimatedLpValue);
+            this.pnlEngine.recordHedgeEntry(
+              firstPrice,
+              estimatedHedgeValue,
+              this.hedgeDirection !== 'NONE' ? this.hedgeDirection as 'SHORT' | 'LONG' : 'SHORT'
+            );
+          } else {
+            Logger.info(`📊 [PNL OK] 前回のエントリー価格を維持: $${pnlState.lpEntryPrice.toFixed(4)}`);
           }
           
           this.currentPhase = CyclePhase.MONITORING;
@@ -1424,6 +1721,37 @@ export class Strategy {
       this.lastPnlDataSync = Date.now();
     }
 
+    // ===== PnLエンジン自動復旧ガード =====
+    // lpEntryPrice が 0 のままで、かつレンジまたはヘッジが存在する場合は強制初期化。
+    // これによりセッション再起動後やセッションファイル未保存時でも損益計算が機能する。
+    const pnlState = this.pnlEngine.serialize();
+    if (!pnlState.lpEntryPrice || pnlState.lpEntryPrice <= 0) {
+      const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
+      const hasPosition = this.currentLowerBound > 0 || hedgeStatus.active;
+      
+      if (hasPosition && currentPrice > 0) {
+        // ヘッジのエントリー価格を優先、なければ現在価格で代用
+        const recoveryEntryPrice = (hedgeStatus.active && hedgeStatus.entryPrice > 0)
+          ? hedgeStatus.entryPrice
+          : currentPrice;
+
+        // LP価値: 総運用資本の50%と推定
+        const estimatedLpValue = this.config.totalOperationalCapitalUsdc * 0.5;
+        // ヘッジサイズ: 実際のサイズがあればそれを使用、なければ推定値
+        const estimatedHedgeValue = (hedgeStatus.active && hedgeStatus.size > 0)
+          ? hedgeStatus.size
+          : estimatedLpValue * this.config.hedgeRatio;
+
+        const hedgeDir = (this.hedgeDirection !== 'NONE' && this.hedgeDirection)
+          ? this.hedgeDirection as 'SHORT' | 'LONG'
+          : (hedgeStatus.direction === 'LONG' ? 'LONG' : 'SHORT');
+
+        Logger.warn(`[PNL_RECOVERY] lpEntryPrice=0を検知。自動復旧: entry=$${recoveryEntryPrice.toFixed(4)}, LP=$${estimatedLpValue.toFixed(2)}, hedge=$${estimatedHedgeValue.toFixed(2)}, dir=${hedgeDir}`);
+        this.pnlEngine.recordLpEntry(recoveryEntryPrice, estimatedLpValue);
+        this.pnlEngine.recordHedgeEntry(recoveryEntryPrice, estimatedHedgeValue, hedgeDir);
+      }
+    }
+
     const balance = await this.lpManager.checkBalance();
     const trackerStats = this.tracker.getStats();
     
@@ -1442,7 +1770,9 @@ export class Strategy {
       trend: this.detectTrend(),
       dailySnapshots: this.pnlEngine.getDailySnapshots(),
       currentPhase: this.currentPhase,
+      mtf: this.lastMtfState, // 追加: MTF/レジーム状態
       ...trackerStats, // trackerからの統計（履歴含む）を追加
     };
   }
+
 }

@@ -14,6 +14,7 @@ import { StrategyVisualizer } from './components/StrategyVisualizer';
 import { HedgePerfChart } from './components/HedgePerfChart';
 import { SafetyGauge } from './components/SafetyGauge';
 import { HourlySummaryCard } from './components/HourlySummaryCard';
+import { MtfPanel } from './components/MtfPanel';
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 
 function App() {
@@ -113,6 +114,7 @@ function App() {
     // 安全ゲート・1時間サマリー
     safetyGates: null as any,
     hourlySummary: null as any,
+    mtf: null as any,
   });
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
@@ -441,6 +443,7 @@ function App() {
             currentPrice={stats.currentPrice}
             entryPrice={stats.hedge?.entryPrice || 0}
             active={stats.hedge?.active || false}
+            direction={stats.hedge?.direction || 'SHORT'}
           />
 
           <ActivityLog logs={stats.activityLogs} />
@@ -473,6 +476,9 @@ function App() {
 
           {/* 1時間サマリー */}
           <HourlySummaryCard summary={stats.hourlySummary} />
+
+          {/* MTF分析パネル (新機能) */}
+          <MtfPanel mtf={stats.mtf} />
 
           {/* 戦略設定 & 資金配分 (Section A) */}
           <StrategyVisualizer 
