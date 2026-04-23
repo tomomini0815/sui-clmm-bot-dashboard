@@ -129,7 +129,14 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
         </div>
       </div>
       
-      <div className="activity-log-table-wrapper" style={{ overflowX: 'auto', overflowY: 'auto', position: 'relative', flex: 1, minHeight: 0 }}>
+      <div className="activity-log-table-wrapper" style={{ 
+        overflowX: 'auto', 
+        overflowY: 'auto', 
+        position: 'relative', 
+        flex: 1, 
+        height: 0,
+        minHeight: '200px'
+      }}>
         <table className="log-table" style={{ minWidth: '850px' }}>
           <thead>
             <tr>

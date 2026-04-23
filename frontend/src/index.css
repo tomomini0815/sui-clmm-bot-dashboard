@@ -277,6 +277,7 @@ button.primary-btn:active {
   flex-direction: column;
   gap: 24px;
   height: 100%;
+  min-height: 0;
 }
 
 /* Stats Grid */
@@ -743,7 +744,6 @@ button.primary-btn:active {
   display: grid;
   grid-template-columns: 1fr 340px;
   gap: 24px;
-  align-items: start;
 }
 
 @media (max-width: 1100px) {
