@@ -446,12 +446,12 @@ function App() {
           </div>
 
           <div className="main-charts-section">
+            <BalanceChart data={stats.balanceHistory || []} />
             <PriceChart 
               data={combinedHistory} 
               lowerBound={stats.currentRange?.lower || 0}
               upperBound={stats.currentRange?.upper || 0}
             />
-            <BalanceChart data={stats.balanceHistory || []} />
           </div>
 
           <HedgePerfChart

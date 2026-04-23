@@ -83,7 +83,7 @@ export const BalanceChart = React.memo<BalanceChartProps>(({ data }) => {
 
   return (
     <div className="glass-panel balance-chart-container" style={{ 
-      padding: isExpanded ? '20px' : '10px 16px', 
+      padding: '24px', 
       transition: 'all 0.3s ease'
     }}>
       <div style={{ 
