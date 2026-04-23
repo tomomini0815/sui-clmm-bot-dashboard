@@ -130,11 +130,9 @@ export function Bot2Panel({ bot2 }: Bot2PanelProps) {
               <div className="bot2-activity-title">最近の動作</div>
               {bot2.tracker.history.slice(-3).reverse().map((h: any, i: number) => (
                 <div key={i} className="bot2-activity-row">
-                  <span className="bot2-activity-time">
-                    {new Date(h.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
+                  <span className="bot2-activity-time">{h.time || '—'}</span>
                   <span className="bot2-activity-action">{h.action}</span>
-                  {h.pnl !== 0 && (
+                  {typeof h.pnl === 'number' && h.pnl !== 0 && (
                     <span className={`bot2-activity-pnl ${h.pnl >= 0 ? 'positive' : 'negative'}`}>
                       {h.pnl >= 0 ? '+' : ''}{h.pnl.toFixed(4)}
                     </span>
