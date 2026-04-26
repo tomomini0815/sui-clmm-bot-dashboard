@@ -58,12 +58,13 @@ export const StatCard = React.memo<StatCardProps>(({ title, value, subtitle, ico
         </span>
         {change && (
           <span style={{ 
-            fontSize: '0.9rem', 
+            fontSize: '0.75rem', 
             color: valueColor,
-            fontWeight: 600,
+            fontWeight: 500,
             background: trend === 'up' ? 'rgba(63, 185, 80, 0.15)' : trend === 'down' ? 'rgba(248, 81, 73, 0.15)' : 'transparent',
-            padding: '3px 8px',
-            borderRadius: '6px'
+            padding: '2px 6px',
+            borderRadius: '6px',
+            lineHeight: 1.4
           }}>
             {trendIcon} {change}
           </span>

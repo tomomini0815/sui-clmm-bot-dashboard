@@ -43,11 +43,12 @@ export interface BotConfig {
   totalOperationalCapitalUsdc: number; // 総運用資金 (USDC)
 
   // === 指値レンジ戦略 (Range Order) 設定 ===
-  strategyMode: 'balanced' | 'range_order';
+  strategyMode: 'balanced' | 'range_order' | 'bluefin_grid';
   rangeOrderSide: 'above' | 'below';
   rangeOrderOffsetPct: number;      // 現在価格からのオフセット (%)
   rangeOrderWidthPct: number;       // レンジ幅 (%)
   rangeOrderHedgeEnabled: boolean;  // デルタヘッジを有効にするか（指値注文中は通常false）
+  hedgeEnabled: boolean;           // 全体的なヘッジの有効・無効
 }
 
 function loadConfig(): BotConfig {
@@ -79,6 +80,7 @@ function loadConfig(): BotConfig {
     RANGE_ORDER_OFFSET_PCT,
     RANGE_ORDER_WIDTH_PCT,
     RANGE_ORDER_HEDGE_ENABLED,
+    HEDGE_ENABLED,
   } = process.env;
 
   if (!PRIVATE_KEY || PRIVATE_KEY === 'your_private_key_here') {
@@ -118,6 +120,7 @@ function loadConfig(): BotConfig {
     rangeOrderOffsetPct: parseFloat(RANGE_ORDER_OFFSET_PCT || '0.005'), // デフォルト 0.5%
     rangeOrderWidthPct: parseFloat(RANGE_ORDER_WIDTH_PCT || '0.001'),  // デフォルト 0.1%
     rangeOrderHedgeEnabled: RANGE_ORDER_HEDGE_ENABLED === 'true',     // 指値レンジではデフォルト false
+    hedgeEnabled: HEDGE_ENABLED !== 'false',                         // デフォルトは true
   };
 }
 

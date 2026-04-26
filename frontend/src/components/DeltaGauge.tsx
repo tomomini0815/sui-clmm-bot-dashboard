@@ -101,9 +101,9 @@ export const DeltaGauge = React.memo<DeltaGaugeProps>(({ delta, hedge, indicator
       {/* デルタゲージ */}
       <div className="delta-gauge-container">
         <div className="delta-gauge-labels" style={{ fontSize: '0.65rem', padding: '0 4px' }}>
-          <span>Short (-1.0)</span>
-          <span style={{ color: 'var(--success)', fontWeight: 600 }}>Neutral</span>
-          <span>Long (+1.0)</span>
+          <span>ショート (-1.0)</span>
+          <span style={{ color: 'var(--success)', fontWeight: 600 }}>ニュートラル</span>
+          <span>ロング (+1.0)</span>
         </div>
         <div className="delta-gauge-track">
           {/* 10% ドリフト許容ゾーン */}
@@ -157,7 +157,7 @@ export const DeltaGauge = React.memo<DeltaGaugeProps>(({ delta, hedge, indicator
             <span className={`hedge-badge ${hedge.active ? 'hedge-active' : 'hedge-inactive'}`}>
               {hedge.active ? '稼働中' : '未稼働'}
             </span>
-            <span className="hedge-mode-badge">{hedge.mode === 'simulate' ? 'SIM' : 'LIVE'}</span>
+            <span className="hedge-mode-badge">{hedge.mode === 'simulate' ? 'シミュレーション' : '本番'}</span>
           </div>
 
           {hedge.active && (

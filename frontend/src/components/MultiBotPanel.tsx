@@ -19,11 +19,12 @@ interface Bot2Status {
   message?: string;
 }
 
-interface Bot2PanelProps {
-  bot2: Bot2Status | null;
+interface MultiBotPanelProps {
+  title: string;
+  bot: Bot2Status | null;
 }
 
-export function Bot2Panel({ bot2 }: Bot2PanelProps) {
+export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
   const isActive = bot2?.active === true;
 
   const rangeInPct = bot2?.currentRange && bot2.currentPrice
@@ -46,14 +47,14 @@ export function Bot2Panel({ bot2 }: Bot2PanelProps) {
           <div className="bot2-icon">
             <Zap size={16} />
           </div>
-          <h3 className="bot2-title">Bot2 — DEEP/SUI</h3>
+          <h3 className="bot2-title">{title}</h3>
           <div className={`bot2-status-badge ${isActive ? 'active' : 'inactive'}`}>
             <Circle size={7} fill="currentColor" />
             {isActive ? '稼働中' : '停止中'}
           </div>
         </div>
         {bot2?.phase && (
-          <div className="bot2-phase">Phase: {bot2.phase}</div>
+          <div className="bot2-phase">現在の工程: {bot2.phase}</div>
         )}
         {!isActive && bot2?.message && (
           <p className="bot2-message">{bot2.message}</p>

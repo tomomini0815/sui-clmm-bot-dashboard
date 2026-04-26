@@ -35,6 +35,7 @@ export enum CyclePhase {
   MONITORING = '運用中 (監視)',
   REBALANCING = 'リバランス中',
   EMERGENCY = '緊急停止中',
+  GRID_ORDERING = 'グリッド指値配置中',
 }
 
 export class Strategy {
@@ -75,12 +76,21 @@ export class Strategy {
 
   // ===== 仕様書準拠: 安全ゲート & 常時監視ループ状態 =====
 
-  // 5分逸脱確認用
+  // 15分逸脱確認用 (往復ビンタ防止のため延長)
   private lastBreachTime: number | null = null;
-  private readonly BREACH_CONFIRM_MS = 5 * 60 * 1000; // 5分
+  private readonly BREACH_CONFIRM_MS = 15 * 60 * 1000; 
+
+  // ゆとりバッファ (0.2%)
+  private readonly HYSTERESIS_BUFFER_PCT = 0.002;
+
+  // 再起動クールダウン (20分)
+  private readonly MIN_REBALANCE_COOLDOWN_MS = 20 * 60 * 1000;
 
   // drawdown計算用
   private peakPortfolioValue: number = 0;
+
+  // 二重実行防止ロック
+  private isProcessingRebalance: boolean = false;
 
   // 連続エラーカウンター (20回で即停止に緩和)
   private consecutiveErrors: number = 0;
@@ -89,6 +99,7 @@ export class Strategy {
   // LP評価額キャッシュ (Deltaドリフト計算用)
   private currentLpValueUsdc: number = 0;
   private currentHedgeUsd: number = 0;
+  public sessionId: string = 'master-bot'; // 追加
 
   // 1時間サマリー集計
   private hourlyStats = {
@@ -114,7 +125,7 @@ export class Strategy {
     details: string;
     fundingArbitrage: boolean;
     currentFundingRate: number;
-    regime: 'LOW_VOL' | 'HIGH_VOL';
+    regime: 'LOW_VOL' | 'NORMAL_VOL' | 'HIGH_VOL';
     hedgeRatio: number;
     updatedAt: number; // timestamp
   } | null = null;
@@ -225,7 +236,7 @@ export class Strategy {
   /**
    * ボラティリティ計算（過去N期間の標準偏差 / 平均）
    */
-  private calculateVolatility(): number {
+  public calculateVolatility(): number {
     if (this.priceHistoryForAnalysis.length < this.VOLATILITY_WINDOW) {
       return 0.05; // デフォルト5%
     }
@@ -271,7 +282,7 @@ export class Strategy {
   /**
    * トレンド判定（単純移動平均比較）
    */
-  private detectTrend(): 'uptrend' | 'downtrend' | 'sideways' {
+  public detectTrend(): 'uptrend' | 'downtrend' | 'sideways' {
     if (this.priceHistoryForAnalysis.length < this.TREND_WINDOW) {
       return 'sideways';
     }
@@ -405,7 +416,6 @@ export class Strategy {
     const details = `[MTF] ${tfDetails.join(' | ')} | Funding:${fundingLabel} | MTF:${mtfScore} Bias:${fundingBias} Total:${totalScore} → ${direction}`;
     Logger.info(details);
 
-    // ダッシュボード表示用にキャッシュ保存
     const regime = this.getVolatilityRegime();
     const hedgeRatio = this.calculateOptimalHedgeRatio(regime);
     this.lastMtfState = {
@@ -417,6 +427,7 @@ export class Strategy {
 
     return { direction, mtfScore, fundingBias, totalScore, details, fundingArbitrage, currentFundingRate };
   }
+
 
   // ===== ボラティリティレジーム & ダイナミックヘッジ比率 ===== //
 
@@ -431,15 +442,23 @@ export class Strategy {
    *   < 1.5%  → LOW_VOL  : LP手数料収集モード（ヘッジ最小化）
    *   >= 1.5% → HIGH_VOL : デルタニュートラル防御モード（ヘッジ強化）
    */
-  private getVolatilityRegime(): 'LOW_VOL' | 'HIGH_VOL' {
+  private getVolatilityRegime(): 'LOW_VOL' | 'NORMAL_VOL' | 'HIGH_VOL' {
     const atr = this.priceMonitor.calculateATR24h();
     const prices = this.priceHistoryForAnalysis;
     const currentPrice = prices.length > 0 ? prices[prices.length - 1] : 0;
 
-    if (currentPrice <= 0) return 'HIGH_VOL'; // 安全側にフォールバック
+    if (currentPrice <= 0) return 'HIGH_VOL';
 
-    const atrRatio = atr / currentPrice; // 例: 0.015 = 1.5%
-    const regime: 'LOW_VOL' | 'HIGH_VOL' = atrRatio < 0.015 ? 'LOW_VOL' : 'HIGH_VOL';
+    const atrRatio = atr / currentPrice;
+    
+    let regime: 'LOW_VOL' | 'NORMAL_VOL' | 'HIGH_VOL';
+    if (atrRatio < 0.010) {
+      regime = 'LOW_VOL';
+    } else if (atrRatio < 0.030) {
+      regime = 'NORMAL_VOL';
+    } else {
+      regime = 'HIGH_VOL';
+    }
 
     Logger.info(`[REGIME] ATR=$${atr.toFixed(4)} (${(atrRatio * 100).toFixed(2)}%) → ${regime}`);
     return regime;
@@ -453,12 +472,12 @@ export class Strategy {
    *   100%ヘッジはFunding Rateコストが手数料収入を侵食する
    *
    *   低ボラ  (< 2%/day) : 50% — コスト最小化、手数料収入重視
-   *   中ボラ  (2〜5%/day): 65% — リスクとコストのバランス
+   *   中ボラ  (2〜5%/day): 65% — リスクとコスト的のバランス
    *   高ボラ  (> 5%/day) : 80% — ILリスク最大化対応、防御優先
    *
    * @returns 最適ヘッジ比率（0.5〜0.8）
    */
-  private calculateOptimalHedgeRatio(regime: 'LOW_VOL' | 'HIGH_VOL'): number {
+  private calculateOptimalHedgeRatio(regime: 'LOW_VOL' | 'NORMAL_VOL' | 'HIGH_VOL'): number {
     const vol = this.calculateVolatility(); // 標準偏差/平均（小数）
     // 年率換算: vol_daily ≈ vol_per_interval × sqrt(intervals_per_day)
     // モニタリング間隔3秒 → 1日28800回 → √28800 ≈ 169.7
@@ -541,6 +560,11 @@ export class Strategy {
       return false;
     }
 
+    if (process.env.HEDGE_TEST_MODE === 'true' || process.env.SKIP_PROFITABILITY_CHECK === 'true') {
+      Logger.info(`🧪 [TEST_MODE] 採算性チェックをバイパスします`);
+      return true;
+    }
+
     if (!this.gasTracker.isRebalanceProfitable(this.config.minProfitForRebalance, 2)) {
       return false;
     }
@@ -559,14 +583,36 @@ export class Strategy {
   private calculateATRRange(currentPrice: number): { lower: number; upper: number } {
     const atr = this.priceMonitor.calculateATR24h();
     const atrRatio = atr / currentPrice;
-    const halfWidth = atrRatio * 2.0;
+    
+    // セーフティガード: 最小レンジ幅 (±0.2% = 合計0.4%)
+    const MIN_RANGE_WIDTH_PCT = 0.002;
+    
+    // 超低ボラティリティ時はさらに絞り込む (超・極狭レンジロジック)
+    // 従来の1.2倍から、状況に応じて0.8倍〜1.0倍に調整し、手数料収益を最大化する
+    let multiplier = 1.2;
+    if (atrRatio < 0.005) {
+      multiplier = 0.8;
+      Logger.info(`🔥 超低ボラティリティ検知: 「超・極狭レンジ」モード発動 (Multiplier: ${multiplier})`);
+    } else if (atrRatio < 0.010) {
+      multiplier = 1.0;
+      Logger.info(`⚡ 低ボラティリティ検知: 精密レンジモード (Multiplier: ${multiplier})`);
+    }
+    
+    let halfWidth = Math.max(atrRatio * multiplier, MIN_RANGE_WIDTH_PCT);
 
     const rawLower = currentPrice * (1 - halfWidth);
     const rawUpper = currentPrice * (1 + halfWidth);
 
     // Cetus tick_spacingに丸める
-    const lower = this.roundToTickSpacing(rawLower, this.TICK_SPACING);
-    const upper = this.roundToTickSpacing(rawUpper, this.TICK_SPACING);
+    let lower = this.roundToTickSpacing(rawLower, this.TICK_SPACING);
+    let upper = this.roundToTickSpacing(rawUpper, this.TICK_SPACING);
+
+    // 丸め処理の結果、同じ値になってしまった場合は最小1ティック分の差を強制する
+    if (lower === upper) {
+      Logger.warn(`⚠️ レンジが収束したため最小Tick幅を適用します (Price: ${currentPrice})`);
+      lower = this.roundToTickSpacing(rawLower * (1 - 0.0005), this.TICK_SPACING);
+      upper = this.roundToTickSpacing(rawUpper * (1 + 0.0005), this.TICK_SPACING);
+    }
 
     Logger.info(`📐 ATRRange: ATR=$${atr.toFixed(4)} (${(atrRatio*100).toFixed(2)}%) → [$${lower.toFixed(4)}, $${upper.toFixed(4)}]`);
     return { lower, upper };
@@ -610,8 +656,8 @@ export class Strategy {
     // Phase C (下方逸脱) → ショート検討
     if (trend === 'downtrend') {
       // EMA20 < EMA50 の確認が必要 (evaluateTrendで既に確認済み)
-      if (netBenefitIfShort > 0) {
-        Logger.info(`✅ SHORT決定: netBenefit=${(netBenefitIfShort*100).toFixed(4)}%/h`);
+      if (netBenefitIfShort > 0 || process.env.SKIP_FUNDING_RATE_CHECK === 'true') {
+        Logger.info(`✅ SHORT決定: netBenefit=${(netBenefitIfShort*100).toFixed(4)}%/h${process.env.SKIP_FUNDING_RATE_CHECK === 'true' ? ' (TEST_MODEスキップ)' : ''}`);
         return 'SHORT';
       }
       Logger.info(`⏸️ 下落トレンドだがSHORT採算NG (funding高) → NO_HEDGE`);
@@ -667,7 +713,7 @@ export class Strategy {
       return 'EMERGENCY';
     }
 
-    // 3. drawdownチェック (80%超で緊急停止に緩和)
+    // 3. drawdownチェック
     const totalValue = this.config.totalOperationalCapitalUsdc + this.pnlEngine.calculateNetPnl(currentPrice).netPnl;
     if (this.peakPortfolioValue === 0) this.peakPortfolioValue = totalValue;
     if (totalValue > this.peakPortfolioValue) this.peakPortfolioValue = totalValue;
@@ -676,8 +722,9 @@ export class Strategy {
       ? (this.peakPortfolioValue - totalValue) / this.peakPortfolioValue
       : 0;
     
-    if (drawdown > 0.80) {
-      Logger.error(`🚨 SAFETY: Drawdown ${(drawdown*100).toFixed(2)}% > 80% → EMERGENCY`);
+    const DD_LIMIT = process.env.HEDGE_TEST_MODE === 'true' ? 0.30 : 0.05;
+    if (drawdown > DD_LIMIT) {
+      Logger.error(`🚨 SAFETY: Drawdown ${(drawdown*100).toFixed(2)}% > ${(DD_LIMIT*100).toFixed(0)}% → EMERGENCY`);
       this.notify(`🚨 ドローダウン超過: ${(drawdown*100).toFixed(2)}% → 緊急撤退`);
       return 'EMERGENCY';
     }
@@ -700,8 +747,11 @@ export class Strategy {
   private async checkAndAdjustDelta(currentPrice: number): Promise<void> {
     if (this.currentLowerBound <= 0 || this.currentLpValueUsdc <= 0) return;
 
+    // 精密計算用: LP内の実SUI量を取得
+    const lpSuiAmount = await this.lpManager.getSuiAmountInLp();
+
     const { delta, hedgeUsd: newHedgeUsd } = this.hedgeManager.calcHedgeDelta(
-      currentPrice, this.currentLowerBound, this.currentUpperBound, this.currentLpValueUsdc
+      currentPrice, this.currentLowerBound, this.currentUpperBound, this.currentLpValueUsdc, lpSuiAmount
     );
 
     const currentHedgeUsd = this.currentHedgeUsd || this.hedgeManager.getStatus(currentPrice).size;
@@ -739,10 +789,13 @@ export class Strategy {
       
       const direction = this.hedgeDirection !== 'NONE' ? this.hedgeDirection : 'SHORT';
       const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
-      if (hedgeStatus.active) {
-        await this.hedgeManager.adjustPosition(newHedgeUsd, currentPrice);
+      if (this.config.hedgeEnabled && hedgeStatus.active) {
+        await this.hedgeManager.adjustPosition(newHedgeUsd, currentPrice, this.sessionId);
         this.currentHedgeUsd = newHedgeUsd;
         this.hourlyStats.hedgeAdjustCount++;
+      } else if (!this.config.hedgeEnabled) {
+        Logger.info('ℹ️ [CONFIG] ヘッジが無効化されているため、ドリフト補正をスキップします。');
+      }
 
         const fundingRate = await this.hedgeManager.getFundingRate();
         const logEntry = {
@@ -759,7 +812,6 @@ export class Strategy {
         };
         Logger.info(`[ACTION_LOG] ${JSON.stringify(logEntry)}`);
         await this.tracker.recordEvent('DeltaAdjust', JSON.stringify(logEntry), currentPrice);
-      }
     } else {
       Logger.info(`✅ DeltaDrift: ${(driftPct*100).toFixed(1)}% < ${(driftThreshold*100).toFixed(0)}% [${thresholdReason}] → OK`);
     }
@@ -878,23 +930,43 @@ export class Strategy {
 
   // ===== 戦略ディスパッチャー ===== //
 
-  async runRebalance(currentPrice: number) {
-    const timeSinceLastRebalance = Date.now() - this.lastRebalanceTime;
-    
-    // クールダウン判定（起動直後や新規構築時は無視する）
-    if (this.currentLowerBound > 0 && timeSinceLastRebalance < this.config.cooldownPeriodMs && this.lastRebalanceTime !== 0) {
-      const remaining = Math.floor((this.config.cooldownPeriodMs - timeSinceLastRebalance) / 1000);
-      Logger.warn(`⏳ クールダウン中: あと${remaining}秒`);
+  async runRebalance(currentPrice: number, forceReset: boolean = false) {
+    if (this.isProcessingRebalance) {
+      Logger.warn('⚠️ リバランス処理が既に実行中です。新規リクエストをスキップします。');
       return;
     }
 
     try {
+      this.isProcessingRebalance = true;
+
+      // セッション上はポジションがあることになっている場合、実際にオンチェーンに存在するか確認
+      if (this.currentLowerBound > 0) {
+        const hasPos = await this.lpManager.hasExistingPosition();
+        if (!hasPos) {
+          Logger.warn(`⚠️ ポジションの消失を確認しました。セッション状態をリセットして即座に再構築します。`);
+          this.currentLowerBound = 0;
+          this.currentUpperBound = 0;
+          this.lastRebalanceTime = 0; // クールダウンもリセット
+        }
+      }
+
+      const timeSinceLastRebalance = Date.now() - this.lastRebalanceTime;
+      
+      // クールダウン判定（起動直後や新規構築時は無視する）
+      if (this.currentLowerBound > 0 && timeSinceLastRebalance < this.config.cooldownPeriodMs && this.lastRebalanceTime !== 0) {
+        const remaining = Math.floor((this.config.cooldownPeriodMs - timeSinceLastRebalance) / 1000);
+        Logger.warn(`⏳ クールダウン中: あと${remaining}秒`);
+        return;
+      }
+
       this.currentPhase = CyclePhase.REBALANCING;
       
       if (this.config.strategyMode === 'range_order') {
         await this.executeRangeOrderStrategy(currentPrice);
+      } else if (this.config.strategyMode === 'bluefin_grid' || this.sessionId.includes('bot3')) {
+        await this.executeGridStrategy(currentPrice, forceReset);
       } else {
-        await this.executeBalancedStrategy(currentPrice);
+        await this.executeBalancedStrategy(currentPrice, forceReset);
       }
 
     } catch (e: any) {
@@ -902,9 +974,6 @@ export class Strategy {
       const errorMsg = e.message || 'Unknown error';
       Logger.error(`戦略実行中に重大なエラーが発生しました: ${errorMsg}`);
       
-      // 注意: LPが既に作成されている場合(currentLowerBound > 0)、
-      // ここで0にリセットしてしまうと、次回ループでまたLPを解体して作り直す「無限ループ」に陥る。
-      // LPが既にあるなら0にせず、監視フェーズからの「自己修復」に任せる。
       if (this.currentLowerBound === 0) {
         this.currentLowerBound = 0;
         this.currentUpperBound = 0;
@@ -912,6 +981,8 @@ export class Strategy {
 
       await this.tracker.recordEvent('エラー', `リバランス失敗: ${errorMsg}`, currentPrice);
       this.notify(`❌ 戦略エラー: ${errorMsg}`);
+    } finally {
+      this.isProcessingRebalance = false;
       this.lastRebalanceTime = Date.now();
     }
   }
@@ -923,15 +994,48 @@ export class Strategy {
    *  - 初回 or 下方向逸脱 → ショート (下落ヘッジ)
    *  - 上方向逸脱 → ロング (トレンドフォロー)
    */
-  private async executeBalancedStrategy(currentPrice: number) {
-    // レンジ逸脱方向を判定
+  private async executeBalancedStrategy(currentPrice: number, forceReset: boolean = false) {
+    if (forceReset) {
+      Logger.info('🔄 [FORCE RESET] 設定変更のため、現在のポジションを全決済して再構築します...');
+      this.notify('🔄 設定が更新されたため、ボットを再起動（リセット）します...');
+      
+      // STEP 1: 全決済
+      this.currentPhase = CyclePhase.CLOSING_HEDGE;
+      await this.hedgeManager.closeHedge(currentPrice);
+      
+      this.currentPhase = CyclePhase.REMOVING_LP;
+      await this.lpManager.forceCloseAllPositions();
+      
+      // 状態リセット
+      this.currentLowerBound = 0;
+      this.currentUpperBound = 0;
+      this.lastExitDirection = null;
+      this.hedgeDirection = 'NONE';
+      
+      // STEP 2: 新規エントリー
+      await this.executeInitialEntry(currentPrice);
+      return;
+    }
+
+    // レンジ逸脱または接近（オートフォロー）を判定
     if (this.currentLowerBound > 0 && this.currentUpperBound > 0) {
+      const rangeWidth = this.currentUpperBound - this.currentLowerBound;
+      const proximityThreshold = rangeWidth * 0.15; // 15% 接近でオートフォロー
+
       if (currentPrice > this.currentUpperBound) {
         this.lastExitDirection = 'upper';
         Logger.info(`📈 上方向レンジ逸脱を検知 (${currentPrice.toFixed(4)} > ${this.currentUpperBound.toFixed(4)})`);
       } else if (currentPrice < this.currentLowerBound) {
         this.lastExitDirection = 'lower';
         Logger.info(`📉 下方向レンジ逸脱を検知 (${currentPrice.toFixed(4)} < ${this.currentLowerBound.toFixed(4)})`);
+      } else if (currentPrice > this.currentUpperBound - proximityThreshold) {
+        this.lastExitDirection = 'upper';
+        Logger.info(`⚡ [AUTO-FOLLOW] 上限接近検知 (${currentPrice.toFixed(4)} > ${this.currentUpperBound.toFixed(4)} - 15%) → 先行リバランスを実行`);
+        this.notify(`⚡ オートフォロー: 上限に接近したため先行リバランスを実行します ($${currentPrice.toFixed(4)})`);
+      } else if (currentPrice < this.currentLowerBound + proximityThreshold) {
+        this.lastExitDirection = 'lower';
+        Logger.info(`⚡ [AUTO-FOLLOW] 下限接近検知 (${currentPrice.toFixed(4)} < ${this.currentLowerBound.toFixed(4)} + 15%) → 先行リバランスを実行`);
+        this.notify(`⚡ オートフォロー: 下限に接近したため先行リバランスを実行します ($${currentPrice.toFixed(4)})`);
       }
     }
 
@@ -944,14 +1048,48 @@ export class Strategy {
       // 逸脱していない場合（lastExitDirection === null）
       // すでにポジションがある場合は、何もしない（監視継続）
       if (this.currentLowerBound > 0 && this.currentUpperBound > 0) {
-        Logger.box('Stable Monitoring', `Price $${currentPrice.toFixed(4)} is within range: $${this.currentLowerBound.toFixed(4)} - $${this.currentUpperBound.toFixed(4)}`);
-        this.currentPhase = CyclePhase.MONITORING;
-        this.finalizeRebalance(currentPrice, 0, 0, 0); // 状態同期のみ
-        return;
+        // オンチェーンに実際にポジションがあるか確認（セッション復元時の不整合対策）
+        const hasPosition = await this.lpManager.hasActivePosition();
+        if (!hasPosition) {
+          Logger.warn(`⚠️ セッション上はポジションありですが、オンチェーンで確認できません。新規構築へ移行します。`);
+          this.currentLowerBound = 0;
+          this.currentUpperBound = 0;
+          this.hedgeDirection = 'NONE';
+        } else {
+          Logger.box('Stable Monitoring', `Price $${currentPrice.toFixed(4)} is within range: $${this.currentLowerBound.toFixed(4)} - $${this.currentUpperBound.toFixed(4)}`);
+          this.currentPhase = CyclePhase.MONITORING;
+          this.finalizeRebalance(currentPrice, 0, 0, 0); // 状態同期のみ
+          return;
+        }
       }
 
       // ポジションがない場合は初回構築 (常にショートから開始)
       await this.executeInitialEntry(currentPrice);
+    }
+  }
+
+  /**
+   * 資金配分テーブル (仕様書 v3.1 準拠)
+   */
+  private getAllocationTable(totalUsd: number) {
+    const isTestMode = process.env.HEDGE_TEST_MODE === 'true';
+    
+    // テストモード時 (PART 0)
+    if (isTestMode) {
+      return { bot1: 0.40, bot2: 0.40, hedge: 0.10, bot3: 0.05, gas: 0.05 };
+    }
+
+    // 通常モード時
+    if (totalUsd < 50) {
+      return { bot1: 0.45, bot2: 0.45, hedge: 0.00, bot3: 0.00, gas: 0.10 };
+    } else if (totalUsd < 200) {
+      return { bot1: 0.40, bot2: 0.40, hedge: 0.00, bot3: 0.16, gas: 0.04 };
+    } else if (totalUsd < 1000) {
+      return { bot1: 0.375, bot2: 0.375, hedge: 0.10, bot3: 0.10, gas: 0.05 };
+    } else if (totalUsd < 10000) {
+      return { bot1: 0.35, bot2: 0.35, hedge: 0.15, bot3: 0.13, gas: 0.02 };
+    } else {
+      return { bot1: 0.35, bot2: 0.30, hedge: 0.15, bot3: 0.17, gas: 0.03 };
     }
   }
 
@@ -967,6 +1105,7 @@ export class Strategy {
     totalCapital: number;
     lpValue: number;
     hedgeNotional: number;
+    isHedgeEnabled: boolean;
   }> {
     await new Promise(resolve => setTimeout(resolve, 2000));
     await this.hedgeManager.syncPositionWithBluefin().catch(() => {});
@@ -974,55 +1113,136 @@ export class Strategy {
     const { suiBalance, usdcBalance } = await this.lpManager.checkBalance();
     const GAS_RESERVE_SUI = 1.0;
     const usableSui = Math.max(0, suiBalance - GAS_RESERVE_SUI);
-    const bluefinMargin = this.hedgeManager.lastMarginBalance;
-    const totalEquity = usdcBalance + (usableSui * currentPrice) + bluefinMargin;
-    const totalCapital = totalEquity * 0.99;
+    
+    // PythからSUIの米ドル価格を取得（換算用）
+    const suiUsdPrice = await this.priceMonitor.getPythPrice();
+    
+    let totalEquityUsd = 0;
+    const bluefinMarginTotal = this.hedgeManager.lastMarginBalance;
+    // マルチボット共有アカウント対応: 自身の運用額に応じた割合の証拠金のみを評価対象にする
+    const marginShareRatio = this.config.lpAmountUsdc / (this.config.totalOperationalCapitalUsdc || (this.config.lpAmountUsdc * 2));
+    const bluefinMargin = bluefinMarginTotal * marginShareRatio;
 
-    if (totalCapital < 1.0) throw new Error('運用可能資金が不足しています');
+    const coinTypeA = await this.priceMonitor.getCoinTypeA();
+    const isCoinAUsdc = coinTypeA.toLowerCase().includes('usdc') || coinTypeA.toLowerCase().includes('coin_a');
 
-    // LP全力投入のため、50:50にバランス調整
-    const targetSuiValue = totalCapital * 0.50; // 50%をSUIに
-    const currentSuiValue = usableSui * currentPrice;
+    let coinAValueUsd = 0;
+    const suiValueUsd = usableSui * suiUsdPrice;
 
+    if (isCoinAUsdc) {
+      // SUI/USDC プールの場合: totalEquity = USDC + (SUI * SUI/USDC) + Margin
+      coinAValueUsd = usdcBalance;
+      totalEquityUsd = coinAValueUsd + (usableSui * currentPrice) + bluefinMargin;
+    } else {
+      // DEEP/SUI 等の非USDペアの場合:
+      // 簡易的に: CoinAのUSD価値 = (CoinA残高 * (1 / currentPrice) * SUI_USD)
+      coinAValueUsd = usdcBalance * (1 / currentPrice) * suiUsdPrice;
+      totalEquityUsd = coinAValueUsd + suiValueUsd + bluefinMargin;
+    }
+
+    // --- v3.1 資金配分テーブルに基づくターゲット計算 ---
+    const allocation = this.getAllocationTable(totalEquityUsd);
+    const botName = process.env.BOT_NAME || 'bot1';
+    
+    let myAllocationPct = 0;
+    if (botName.includes('bot1')) myAllocationPct = allocation.bot1;
+    else if (botName.includes('bot2')) myAllocationPct = allocation.bot2;
+    else if (botName.includes('bot3')) myAllocationPct = allocation.bot3;
+
+    const totalCapital = totalEquityUsd * 0.99;
+    
+    // 自身のボットのLPターゲット
+    const targetLpUsdValue = totalEquityUsd * myAllocationPct;
+    
+    // ヘッジはBot1またはBot2のいずれかが代表して管理するか、全体で合算して管理する。
+    // ここではBot1がヘッジも兼務する仕様とする。
+    const isHedgeEnabled = (this.config.hedgeEnabled !== false) && (botName.includes('bot1') || process.env.HEDGE_TEST_MODE === 'true');
+    const targetHedgeNotional = isHedgeEnabled ? (totalEquityUsd * allocation.hedge) : 0;
+
+    // ヘッジ無効時にBluefinにポジションまたは資金が残っている場合はクリーンアップ
+    if (!isHedgeEnabled) {
+      const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
+      if (hedgeStatus.active) {
+        Logger.info(`🛡️ ヘッジ無効設定: 既存のヘッジポジション ($${hedgeStatus.size}) を決済します...`);
+        await this.hedgeManager.closeHedge(currentPrice).catch(e => {
+          Logger.error(`Failed to close hedge during cleanup: ${e.message}`);
+        });
+        await new Promise(resolve => setTimeout(resolve, 3000)); // 同期待機
+      }
+      
+      if (bluefinMargin > 1.0) {
+        Logger.info(`💰 ヘッジ無効設定: Bluefinから証拠金 ($${bluefinMargin.toFixed(2)}) を回収してLPに回します...`);
+        await this.hedgeManager.withdrawAllMargin().catch(() => {});
+      }
+    }
+    
+    // CoinA(DEEP等)のターゲット残高 (LP構成比を50:50に)
+    const targetCoinAUsdValue = targetLpUsdValue * 0.50;
+    const targetSuiValue = targetCoinAUsdValue; // SUI側の価値
+    
     this.currentPhase = CyclePhase.SWAPPING;
+
+    const currentSuiValue = usableSui * suiUsdPrice;
+    const currentCoinAValue = coinAValueUsd;
 
     if (currentSuiValue > targetSuiValue + 0.1) {
       // SUIが多すぎる → SUI売却
-      const suiToSell = Math.max(0, (currentSuiValue - targetSuiValue) / currentPrice);
+      const suiToSell = Math.max(0, (currentSuiValue - targetSuiValue) / suiUsdPrice);
       if (suiToSell > 0.1) {
-        Logger.info(`🔄 資産バランス調整: ${suiToSell.toFixed(4)} SUIを売却`);
+        Logger.info(`🔄 資産バランス調整: ${suiToSell.toFixed(4)} SUIを売却 (約 $${(currentSuiValue - targetSuiValue).toFixed(2)})`);
         const sellRes = await this.lpManager.swapSuiToUsdc(suiToSell);
-        this.pnlEngine.recordGas(sellRes.gasCostUsdc); // ガス代を記録
-        await this.tracker.recordEvent('資産調整', `${suiToSell.toFixed(2)} SUIを売却してUSDCに変換`, currentPrice, sellRes.digest);
+        this.pnlEngine.recordGas(sellRes.gasCostUsdc); 
+        await this.tracker.recordEvent('資産調整', `${suiToSell.toFixed(2)} SUIを売却して${isCoinAUsdc ? 'USDC' : 'CoinA'}に変換`, currentPrice, sellRes.digest);
       }
     } else if (currentSuiValue < targetSuiValue - 0.1) {
-      // USDCが多すぎる → SUI購入
-      const usdcToSpend = targetSuiValue - currentSuiValue;
-      if (usdcToSpend > 0.1) {
-        Logger.info(`🔄 資産バランス調整: ${usdcToSpend.toFixed(2)} USDCでSUIを購入`);
-        const buyRes = await this.lpManager.swapUsdcToSui(usdcToSpend);
-        this.pnlEngine.recordGas(buyRes.gasCostUsdc); // ガス代を記録
-        await this.tracker.recordEvent('資産調整', `${usdcToSpend.toFixed(2)} USDCでSUIを購入`, currentPrice, buyRes.digest);
+      // SUIが少なすぎる → CoinAを売ってSUI購入
+      const usdcToSpendUsd = targetSuiValue - currentSuiValue;
+      // CoinAでの支払額 = usdcToSpendUsd / (CoinA_USD_Price)
+      // CoinA_USD_Price = (1 / currentPrice) * suiUsdPrice
+      const coinAPriceUsd = (1 / currentPrice) * suiUsdPrice;
+      const amountToSpend = usdcToSpendUsd / coinAPriceUsd;
+
+      if (amountToSpend > 0.1) {
+        Logger.info(`🔄 資産バランス調整: ${amountToSpend.toFixed(2)} ${isCoinAUsdc ? 'USDC' : 'CoinA'}でSUIを購入`);
+        const buyRes = await this.lpManager.swapUsdcToSui(amountToSpend);
+        this.pnlEngine.recordGas(buyRes.gasCostUsdc); 
+        await this.tracker.recordEvent('資産調整', `${amountToSpend.toFixed(2)} ${isCoinAUsdc ? 'USDC' : 'CoinA'}でSUIを購入`, currentPrice, buyRes.digest);
       }
     }
 
-    // スワップ後の実際の残高を再取得（正確なLP投入額にするため）
-    await new Promise(resolve => setTimeout(resolve, 2000)); // RPC同期待ち
+    // スワップ後の実際の残高を再取得
+    await new Promise(resolve => setTimeout(resolve, 2000)); 
     const postSwapBalance = await this.lpManager.checkBalance();
     const finalUsableSui = Math.max(0, postSwapBalance.suiBalance - GAS_RESERVE_SUI);
-    const finalSuiValue = finalUsableSui * currentPrice;
-    const finalUsdc = postSwapBalance.usdcBalance;
+    const finalSuiValueUsd = finalUsableSui * suiUsdPrice;
+    
+    // CoinAのUSD価値
+    const finalCoinAValueUsd = postSwapBalance.usdcBalance * (isCoinAUsdc ? 1 : (1 / currentPrice) * suiUsdPrice);
 
-    // 実際に投入可能なLP価値（少ない方に合わせた金額の2倍に0.97のバッファをかける。スリッページ対応のため3%温存）
-    const lpValue = Math.min(finalSuiValue, finalUsdc) * 2 * 0.97;
+    // 実際に投入可能なLP価値 (USD)
+    const lpValue = Math.min(finalSuiValueUsd, finalCoinAValueUsd) * 2 * 0.97;
 
-    // ヘッジ額 = LP価値の (hedgeRatio)% 相当。
-    // hedgeRatio 1.0 (100%) の場合、LPのSUI評価額(lpValue*0.5)とヘッジ額が一致しデルタニュートラルになる。
-    let targetHedgeQuantity = Math.round((lpValue * 0.5 * this.config.hedgeRatio) / currentPrice);
-    if (targetHedgeQuantity < 1) targetHedgeQuantity = 1; // 最小1 SUI
-    const hedgeNotional = targetHedgeQuantity * currentPrice;
+    // ヘッジ必要額 = LP価値の半分 (SUI相当分) * hedgeRatio
+    const hedgeNotional = isHedgeEnabled ? (lpValue * 0.5 * this.config.hedgeRatio) : 0;
+    
+    // 必要証拠金の算出（ヘッジ額の約40% = レバレッジ2.5倍相当で安定運用）
+    const requiredMargin = hedgeNotional * 0.40;
+    const currentMargin = this.hedgeManager.lastMarginBalance;
 
-    return { totalCapital, lpValue, hedgeNotional };
+    if (isHedgeEnabled) {
+      if (currentMargin < requiredMargin * 0.9) {
+        // 不足している場合のみ入金
+        Logger.info(`🛡️ 証拠金不足: 現在 $${currentMargin.toFixed(2)} < 必要 $${requiredMargin.toFixed(2)} → 補充します`);
+        await this.hedgeManager.depositMargin(requiredMargin, this.lpManager);
+      } else if (currentMargin > requiredMargin * 1.5 && currentMargin > 2.0) {
+        // 過剰な場合は回収してLPに回す (2.0ドル以上の余裕がある場合)
+        const excess = currentMargin - requiredMargin;
+        Logger.info(`💰 証拠金過剰: 現在 $${currentMargin.toFixed(2)} > 必要 $${requiredMargin.toFixed(2)} → $${excess.toFixed(2)} を回収してLPに回します`);
+        await this.hedgeManager.withdrawMargin(excess);
+      }
+    }
+
+    return { totalCapital, lpValue, hedgeNotional, isHedgeEnabled };
   }
 
   /**
@@ -1041,8 +1261,8 @@ export class Strategy {
     // STEP 1: 既存ポジションのクリーンアップ
     await this.closeAllPositions(currentPrice);
 
-    // STEP 2: 資産評価と50:50バランス調整
-    const { totalCapital, lpValue, hedgeNotional } = await this.evaluateAndBalance(currentPrice);
+    // STEP 2: 資産評価とリバランス調整
+    const { totalCapital, lpValue, hedgeNotional, isHedgeEnabled } = await this.evaluateAndBalance(currentPrice);
 
     // STEP 3: LP構築
     let lowerBound: number, upperBound: number;
@@ -1056,36 +1276,39 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: レジーム判定 + MTF シグナルでヘッジ比率・方向を決定
-    const regime = this.getVolatilityRegime();
-    const optimalRatio = this.calculateOptimalHedgeRatio(regime);
-    // 動的ヘッジ比率をconfigに一時適用（evaluateAndBalanceの計算後なので再計算）
-    const adjustedHedgeNotional = hedgeNotional * (optimalRatio / this.config.hedgeRatio);
+    if (isHedgeEnabled) {
+      // STEP 4: レジーム判定 + MTF シグナルでヘッジ比率・方向を決定
+      const regime = this.getVolatilityRegime();
+      const optimalRatio = this.calculateOptimalHedgeRatio(regime);
+      // 動的ヘッジ比率をconfigに一時適用（evaluateAndBalanceの計算後なので再計算）
+      const adjustedHedgeNotional = hedgeNotional * (optimalRatio / this.config.hedgeRatio);
 
-    const mtfSignal = await this.getMtfHedgeSignal();
+      const mtfSignal = await this.getMtfHedgeSignal();
 
-    // アービトラージモード通知
-    if (mtfSignal.fundingArbitrage) {
-      this.notify(`🔥 Funding Rate ARBモード発動! ${(mtfSignal.currentFundingRate * 100).toFixed(4)}%/h → LP手数料+Funding受取のダブル収益を狙います`);
-    }
+      // アービトラージモード通知
+      if (mtfSignal.fundingArbitrage) {
+        this.notify(`🔥 Funding Rate ARBモード発動! ${(mtfSignal.currentFundingRate * 100).toFixed(4)}%/h → LP手数料+Funding受取のダブル収益を狙います`);
+      }
 
-    // データ不足（30分未満稼働）の場合はSHORTをデフォルトとして使用
-    const hedgeDir = mtfSignal.direction === 'NEUTRAL'
-      ? 'SHORT' // 初回はSHORTで安全側を優先
-      : mtfSignal.direction;
+      // データ不足（30分未満稼働）の場合はSHORTをデフォルトとして使用
+      const hedgeDir = mtfSignal.direction === 'NEUTRAL'
+        ? 'SHORT' // 初回はSHORTで安全側を優先
+        : mtfSignal.direction;
 
-    if (mtfSignal.direction === 'NEUTRAL') {
-      Logger.warn(`[MTF] 初回エントリー: シグナル中立 → デフォルトSHORTで開始 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
-      this.notify(`📊 MTF: 初回はデフォルトSHORT (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+      if (mtfSignal.direction === 'NEUTRAL') {
+        Logger.warn(`[MTF] 初回エントリー: シグナル中立 → デフォルトSHORTで開始 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
+        this.notify(`📊 MTF: 初回はデフォルトSHORT (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+      } else {
+        Logger.info(`[MTF] 初回エントリー: ${hedgeDir}を採用 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
+        this.notify(`📊 MTF確認 → ${hedgeDir} (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+      }
+
+      await this.buildHedgePosition(currentPrice, adjustedHedgeNotional, hedgeDir);
+      this.finalizeRebalance(currentPrice, lpValue, adjustedHedgeNotional, totalCapital, this.hedgeDirection as any);
     } else {
-      Logger.info(`[MTF] 初回エントリー: ${hedgeDir}を採用 (score: ${mtfSignal.totalScore}, regime: ${regime}, ratio: ${(optimalRatio*100).toFixed(0)}%)`);
-      this.notify(`📊 MTF確認 → ${hedgeDir} (スコア: ${mtfSignal.totalScore}, ヘッジ比率: ${(optimalRatio*100).toFixed(0)}%)`);
+      Logger.info('🛡️ ヘッジ無効モード: LP構築のみで運用を開始します');
+      this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
     }
-
-    await this.buildHedgePosition(currentPrice, adjustedHedgeNotional, hedgeDir);
-
-    this.hedgeDirection = hedgeDir;
-    this.finalizeRebalance(currentPrice, lpValue, adjustedHedgeNotional, totalCapital, hedgeDir);
   }
 
 
@@ -1110,8 +1333,8 @@ export class Strategy {
       await this.tracker.recordEvent('LP解除', '上方向逸脱のためLP解除 → SUIが返却', currentPrice, removeRes.digest);
     }
 
-    // STEP 2: 資産を50:50にリバランス (SUI過多→USDC)
-    const { totalCapital, lpValue, hedgeNotional } = await this.evaluateAndBalance(currentPrice);
+    // STEP 2: 資産をリバランス
+    const { totalCapital, lpValue, hedgeNotional, isHedgeEnabled } = await this.evaluateAndBalance(currentPrice);
 
     // STEP 3: 新しいLP構築 (より高い価格帯)
     let lowerBound: number, upperBound: number;
@@ -1125,21 +1348,21 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: MTF + Funding Rate でLONG方向を確認してからヘッジ
-    const mtfSignalLong = await this.getMtfHedgeSignal();
-    if (mtfSignalLong.direction === 'LONG' || mtfSignalLong.direction === 'NEUTRAL') {
-      // LONG or NEUTRAL(データ不足): 逸脱方向に従ってLONG実行
-      Logger.info(`[MTF] LONG反転: スコア=${mtfSignalLong.totalScore} → LONGヘッジを開設`);
-      this.notify(`📈 MTF確認済みLONG反転 (スコア: ${mtfSignalLong.totalScore})`);
-      await this.buildHedgePosition(currentPrice, hedgeNotional, 'LONG');
-      this.hedgeDirection = 'LONG';
-      this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'LONG');
+    // STEP 4: ヘッジ構築
+    if (isHedgeEnabled) {
+      const mtfSignalLong = await this.getMtfHedgeSignal();
+      if (mtfSignalLong.direction === 'LONG' || mtfSignalLong.direction === 'NEUTRAL') {
+        Logger.info(`[MTF] LONG反転: スコア=${mtfSignalLong.totalScore} → LONGヘッジを開設`);
+        this.notify(`📈 MTF確認済みLONG反転 (スコア: ${mtfSignalLong.totalScore})`);
+        await this.buildHedgePosition(currentPrice, hedgeNotional, 'LONG');
+        this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, this.hedgeDirection as any);
+      } else {
+        Logger.warn(`[MTF] LONG反転キャンセル: MTFスコア=${mtfSignalLong.totalScore} がSHORTを示唆 → ヘッジなしでLP維持`);
+        this.notify(`⚠️ MTF: 上抜けだがSHORTシグナル → ヘッジ見送り (スコア: ${mtfSignalLong.totalScore})\n${mtfSignalLong.details}`);
+        this.hedgeDirection = 'NONE';
+        this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
+      }
     } else {
-      // MTFがSHORTを示している → 上抜けは偽シグナルの可能性が高い
-      Logger.warn(`[MTF] LONG反転キャンセル: MTFスコア=${mtfSignalLong.totalScore} がSHORTを示唆 → ヘッジなしでLP維持`);
-      this.notify(`⚠️ MTF: 上抜けだがSHORTシグナル → ヘッジ見送り (スコア: ${mtfSignalLong.totalScore})\n${mtfSignalLong.details}`);
-      // LPは既に構築済みなので手数料収集を継続。ヘッジ方向はNONEに設定。
-      this.hedgeDirection = 'NONE';
       this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
     }
   }
@@ -1165,8 +1388,8 @@ export class Strategy {
       await this.tracker.recordEvent('LP解除', '下方向逸脱のためLP解除 → USDCが返却', currentPrice, removeRes.digest);
     }
 
-    // STEP 2: 資産を50:50にリバランス (USDC過多→SUI)
-    const { totalCapital, lpValue, hedgeNotional } = await this.evaluateAndBalance(currentPrice);
+    // STEP 2: 資産をリバランス
+    const { totalCapital, lpValue, hedgeNotional, isHedgeEnabled } = await this.evaluateAndBalance(currentPrice);
 
     // STEP 3: 新しいLP構築 (より低い価格帯)
     let lowerBound: number, upperBound: number;
@@ -1180,21 +1403,21 @@ export class Strategy {
     }
     await this.buildLpPosition(currentPrice, lowerBound, upperBound, lpValue * 0.50);
 
-    // STEP 4: MTF + Funding Rate でSHORT方向を確認してからヘッジ
-    const mtfSignalShort = await this.getMtfHedgeSignal();
-    if (mtfSignalShort.direction === 'SHORT' || mtfSignalShort.direction === 'NEUTRAL') {
-      // SHORT or NEUTRAL(データ不足): 逸脱方向に従ってSHORT実行
-      Logger.info(`[MTF] SHORT反転: スコア=${mtfSignalShort.totalScore} → SHORTヘッジを開設`);
-      this.notify(`📉 MTF確認済みSHORT反転 (スコア: ${mtfSignalShort.totalScore})`);
-      await this.buildHedgePosition(currentPrice, hedgeNotional, 'SHORT');
-      this.hedgeDirection = 'SHORT';
-      this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, 'SHORT');
+    // STEP 4: ヘッジ構築
+    if (isHedgeEnabled) {
+      const mtfSignalShort = await this.getMtfHedgeSignal();
+      if (mtfSignalShort.direction === 'SHORT' || mtfSignalShort.direction === 'NEUTRAL') {
+        Logger.info(`[MTF] SHORT反転: スコア=${mtfSignalShort.totalScore} → SHORTヘッジを開設`);
+        this.notify(`📉 MTF確認済みSHORT反転 (スコア: ${mtfSignalShort.totalScore})`);
+        await this.buildHedgePosition(currentPrice, hedgeNotional, 'SHORT');
+        this.finalizeRebalance(currentPrice, lpValue, hedgeNotional, totalCapital, this.hedgeDirection as any);
+      } else {
+        Logger.warn(`[MTF] SHORT反転キャンセル: MTFスコア=${mtfSignalShort.totalScore} がLONGを示唆 → ヘッジなしでLP維持`);
+        this.notify(`⚠️ MTF: 下抜けだがLONGシグナル → ヘッジ見送り (スコア: ${mtfSignalShort.totalScore})\n${mtfSignalShort.details}`);
+        this.hedgeDirection = 'NONE';
+        this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
+      }
     } else {
-      // MTFがLONGを示している → 下抜けは偽シグナルの可能性が高い
-      Logger.warn(`[MTF] SHORT反転キャンセル: MTFスコア=${mtfSignalShort.totalScore} がLONGを示唆 → ヘッジなしでLP維持`);
-      this.notify(`⚠️ MTF: 下抜けだがLONGシグナル → ヘッジ見送り (スコア: ${mtfSignalShort.totalScore})\n${mtfSignalShort.details}`);
-      // LPは既に構築済みなので手数料収集を継続。ヘッジ方向はNONEに設定。
-      this.hedgeDirection = 'NONE';
       this.finalizeRebalance(currentPrice, lpValue, 0, totalCapital, 'NONE' as any);
     }
   }
@@ -1210,12 +1433,23 @@ export class Strategy {
     currentPrice: number,
     lowerBound: number,
     upperBound: number,
-    usdcAmount: number
+    usdcAmountUsd: number
   ): Promise<void> {
-    Logger.info(`🎯 LP構築: $${lowerBound.toFixed(4)} 〜 $${upperBound.toFixed(4)} (USDC: $${usdcAmount.toFixed(2)})`);
+    const coinTypeA = await this.priceMonitor.getCoinTypeA();
+    const isCoinAUsdc = coinTypeA.toLowerCase().includes('usdc') || coinTypeA.toLowerCase().includes('coin_a');
+    let amountInCoinA = usdcAmountUsd;
+
+    if (!isCoinAUsdc) {
+      // CoinA(DEEP等)の量に変換
+      const suiUsdPrice = await this.priceMonitor.getPythPrice();
+      const coinAPriceUsd = (1 / currentPrice) * suiUsdPrice;
+      amountInCoinA = usdcAmountUsd / coinAPriceUsd;
+    }
+
+    Logger.info(`🎯 LP構築: ${lowerBound.toFixed(4)} 〜 ${upperBound.toFixed(4)} (${isCoinAUsdc ? '$' : ''}${amountInCoinA.toFixed(isCoinAUsdc ? 2 : 4)} ${isCoinAUsdc ? 'USDC' : 'CoinA'})`);
     this.currentPhase = CyclePhase.ADDING_LP;
 
-    const lpRes = await this.lpManager.addLiquidity(lowerBound, upperBound, usdcAmount, true);
+    const lpRes = await this.lpManager.addLiquidity(lowerBound, upperBound, amountInCoinA, true);
     this.pnlEngine.recordGas(lpRes.gasCostUsdc); // ガス代を記録
 
     // 成功時のみ状態更新
@@ -1224,7 +1458,7 @@ export class Strategy {
 
     await this.tracker.recordRebalance(
       currentPrice, 0, 0, lpRes.digest, // 手数料ではなく0を記録
-      `LP構築完了 [$${lowerBound.toFixed(4)}, $${upperBound.toFixed(4)}]`,
+      `LP構築完了 [${lowerBound.toFixed(4)}, ${upperBound.toFixed(4)}]`,
       this.currentLowerBound, this.currentUpperBound, 'DELTA_NEUTRAL_FLIP'
     );
   }
@@ -1234,34 +1468,44 @@ export class Strategy {
    */
   private async buildHedgePosition(
     currentPrice: number,
-    hedgeNotional: number,
+    hedgeNotionalUsd: number,
     direction: 'SHORT' | 'LONG'
-  ): Promise<void> {
+  ): Promise<boolean> {
+    if (!this.config.hedgeEnabled) {
+      Logger.info('ℹ️ [CONFIG] ヘッジが無効化されています。スキップします。');
+      this.hedgeDirection = 'NONE';
+      return false;
+    }
     const dirLabel = direction === 'SHORT' ? 'ショート' : 'ロング';
     Logger.info(`⏳ Indexer同期待機 (5秒)...`);
     await new Promise(resolve => setTimeout(resolve, 5000));
 
     this.currentPhase = CyclePhase.OPENING_HEDGE;
 
-    if (hedgeNotional > 0.1 && !isNaN(hedgeNotional)) {
-      Logger.info(`🎯 Bluefin: ${dirLabel}ヘッジ構築 ($${hedgeNotional.toFixed(2)})`);
+    if (hedgeNotionalUsd > 0.1 && !isNaN(hedgeNotionalUsd)) {
+      Logger.info(`🎯 Bluefin: ${dirLabel}ヘッジ構築 ($${hedgeNotionalUsd.toFixed(2)})`);
 
       // 証拠金が足りない場合は追加入金
-      const marginNeeded = hedgeNotional * 0.55; // 3倍レバレッジでの必要証拠金
-      await this.hedgeManager.depositMargin(marginNeeded);
+      const marginNeeded = hedgeNotionalUsd * 0.55; // 3倍レバレッジでの必要証拠金
+      await this.hedgeManager.depositMargin(marginNeeded, this.lpManager);
 
-      const hedgeRes = await this.hedgeManager.openHedge(hedgeNotional, currentPrice, direction);
+      const hedgeRes = await this.hedgeManager.openHedge(hedgeNotionalUsd, currentPrice, direction, this.sessionId);
       this.pnlEngine.recordGas(hedgeRes.gasCostUsdc); // ガス代を記録
 
-      let actualSize = Math.round(hedgeNotional / currentPrice);
+      const suiUsdPrice = await this.priceMonitor.getPythPrice();
+      let actualSize = Math.round(hedgeNotionalUsd / suiUsdPrice);
       if (actualSize < 1) actualSize = 1;
       
       await this.tracker.recordHedge(
         direction, `${dirLabel}ヘッジ構築`,
         currentPrice, actualSize, hedgeRes.digest
       );
+      this.hedgeDirection = direction;
+      return true;
     } else {
-      Logger.warn(`Bluefin: ヘッジ額が少なすぎるためスキップ ($${hedgeNotional.toFixed(2)})`);
+      Logger.warn(`Bluefin: ヘッジ額が少なすぎるためスキップ ($${hedgeNotionalUsd.toFixed(2)})`);
+      this.hedgeDirection = 'NONE';
+      return false;
     }
   }
 
@@ -1392,10 +1636,10 @@ export class Strategy {
       }
       
       retryCount++;
-      Logger.warn(`⚠️ ポジションがまだ残っています (試行 ${retryCount}/${maxRetries})。再確認します...`);
+      Logger.warn(`⚠️ ポジション(ヘッジ)がまだ残っています (試行 ${retryCount}/${maxRetries})。再確認します...`);
     }
 
-    throw new Error("Critical: ポジションのクローズに失敗しました。取引所に残高が残っているか、インデクサーの更新が遅れています。");
+    Logger.error("⚠️ ポジションのクローズに時間がかかっています。無視して続行します。");
   }
 
   /**
@@ -1482,28 +1726,29 @@ export class Strategy {
       setTimeout(async () => {
         // すでにレンジが復旧されている場合(restart)はInitialEntryを回避
         if (this.currentLowerBound > 0 && this.currentUpperBound > 0) {
-          Logger.info('🔄 [PERSISTENCE] 既存のレンジ情報を検出しました。全決済をスキップし、直接監視に移行します。');
-          
-          // PnLエンジンのエントリー価格が未設定（0）の場合、現在の価格をエントリー点として記録
-          // ※ netPnl === 0 では手数料が既に存在する場合に誤検知するため lpEntryPrice で判定
-          const pnlState = this.pnlEngine.serialize();
-          if (!pnlState.lpEntryPrice || pnlState.lpEntryPrice <= 0) {
-            Logger.info('📊 [PNL FIX] lpEntryPriceが未設定 → 現在の価格で初期化します');
-            // LP資本はtotalOperationalCapitalの50%をLP側に投入する設計
-            const estimatedLpValue = this.config.totalOperationalCapitalUsdc * 0.5;
-            const estimatedHedgeValue = estimatedLpValue * this.config.hedgeRatio;
-            this.pnlEngine.recordLpEntry(firstPrice, estimatedLpValue);
-            this.pnlEngine.recordHedgeEntry(
-              firstPrice,
-              estimatedHedgeValue,
-              this.hedgeDirection !== 'NONE' ? this.hedgeDirection as 'SHORT' | 'LONG' : 'SHORT'
-            );
-          } else {
-            Logger.info(`📊 [PNL OK] 前回のエントリー価格を維持: $${pnlState.lpEntryPrice.toFixed(4)}`);
+          // オンチェーンに実際にポジションがあるか確認
+          const hasPos = await this.lpManager.hasExistingPosition();
+          if (hasPos) {
+            Logger.info('🔄 [PERSISTENCE] 既存のレンジ情報を検出しました。全決済をスキップし、直接監視に移行します。');
+            
+            const pnlState = this.pnlEngine.serialize();
+            if (!pnlState.lpEntryPrice || pnlState.lpEntryPrice <= 0) {
+              Logger.info('📊 [PNL FIX] lpEntryPriceが未設定 → 現在の価格で初期化します');
+              const estimatedLpValue = this.config.totalOperationalCapitalUsdc * 0.5;
+              const estimatedHedgeValue = estimatedLpValue * this.config.hedgeRatio;
+              this.pnlEngine.recordLpEntry(firstPrice, estimatedLpValue);
+              this.pnlEngine.recordHedgeEntry(
+                firstPrice,
+                estimatedHedgeValue,
+                this.hedgeDirection !== 'NONE' ? this.hedgeDirection as 'SHORT' | 'LONG' : 'SHORT'
+              );
+            } else {
+              Logger.info(`📊 [PNL OK] 前回のエントリー価格を維持: $${pnlState.lpEntryPrice.toFixed(4)}`);
+            }
+            
+            this.currentPhase = CyclePhase.MONITORING;
+            return;
           }
-          
-          this.currentPhase = CyclePhase.MONITORING;
-          return;
         }
         await this.runRebalance(firstPrice);
       }, 1000);
@@ -1582,28 +1827,41 @@ export class Strategy {
           await this.checkAndAdjustDelta(currentPrice);
         }
 
-        // ===== レンジ逸脱検知 (5分継続確認) =====
+        // ===== レンジ逸脱検知 (ゆとりバッファ + 15分継続確認) =====
         const hasLpPos = await this.lpManager.hasExistingPosition();
-        const isOutOfRange = this.currentLowerBound > 0 &&
-          this.priceMonitor.isOutOfRange(currentPrice, this.currentLowerBound, this.currentUpperBound);
+        
+        // バッファを含めた逸脱判定
+        const buffer = this.HYSTERESIS_BUFFER_PCT;
+        const isActuallyOutOfRange = this.currentLowerBound > 0 && (
+          currentPrice < this.currentLowerBound * (1 - buffer) || 
+          currentPrice > this.currentUpperBound * (1 + buffer)
+        );
 
+        // クールダウン中かチェック
+        const isCooldown = (Date.now() - this.lastRebalanceTime) < this.MIN_REBALANCE_COOLDOWN_MS;
+        
         if (this.currentLowerBound === 0 || !hasLpPos) {
           // LPがない → 初回構築
           this.lastBreachTime = null;
           await this.runRebalance(currentPrice);
-        } else if (isOutOfRange) {
+        } else if (isActuallyOutOfRange) {
+          if (isCooldown) {
+            Logger.info(`⌛ クールダウン中につきリバランス保留 (前回から ${((Date.now() - this.lastRebalanceTime)/60000).toFixed(1)}分経過)`);
+            return;
+          }
           // 逸脱検知
           const now = Date.now();
           if (this.lastBreachTime === null) {
             this.lastBreachTime = now;
-            Logger.warn(`⚠️ レンジ逸脱検知: $${currentPrice.toFixed(4)} (逸脱開始時刻記録)`);
+            Logger.warn(`⚠️ レンジ逸脱検知(バッファ込): $${currentPrice.toFixed(4)} (逸脱開始時刻記録)`);
           } else if ((now - this.lastBreachTime) > this.BREACH_CONFIRM_MS) {
-            // 5分継続確認
-            const twap5min = this.priceMonitor.fetchTWAP(5 * 60 * 1000);
-            const twapAlsoOutOfRange = this.priceMonitor.isOutOfRange(twap5min, this.currentLowerBound, this.currentUpperBound);
+            // 15分継続確認
+            const twapWindow = this.BREACH_CONFIRM_MS;
+            const twapVal = this.priceMonitor.fetchTWAP(twapWindow);
+            const twapAlsoOutOfRange = twapVal < this.currentLowerBound || twapVal > this.currentUpperBound;
 
             if (twapAlsoOutOfRange) {
-              Logger.error(`🚨 5分逸脱確認 + TWAP逸脱 → リバランス実行 (${currentPrice > this.currentUpperBound ? 'Phase B' : 'Phase C'})`);
+              Logger.error(`🚨 15分逸脱確認 + TWAP逸脱 → リバランス実行`);
               this.lastBreachTime = null;
               if (currentPrice > this.currentUpperBound) {
                 this.lastExitDirection = 'upper';
@@ -1612,11 +1870,11 @@ export class Strategy {
               }
               await this.runRebalance(currentPrice);
             } else {
-              Logger.info(`⏸️ TWAPがレンジ内 ($${twap5min.toFixed(4)}) → リバランス保留`);
+              Logger.info(`⏸️ TWAPがレンジ内 ($${twapVal.toFixed(4)}) → リバランス保留`);
             }
           } else {
             const elapsed = (now - this.lastBreachTime) / 1000;
-            Logger.warn(`⏱️ 逸脱継続中: ${elapsed.toFixed(0)}/300秒 レンジ: [$${this.currentLowerBound.toFixed(4)}, $${this.currentUpperBound.toFixed(4)}]`);
+            Logger.warn(`⏱️ 逸脱継続中: ${elapsed.toFixed(0)}/${this.BREACH_CONFIRM_MS/1000}秒 レンジ: [$${this.currentLowerBound.toFixed(4)}, $${this.currentUpperBound.toFixed(4)}]`);
           }
         } else {
           // レンジ内
@@ -1756,6 +2014,10 @@ export class Strategy {
     const trackerStats = this.tracker.getStats();
     
     const pnlResult = this.pnlEngine.calculateNetPnl(currentPrice);
+    
+    // AI推薦を生成
+    const advisor = await this.generateRecommendation(currentPrice);
+
     return {
       pnl: {
         ...pnlResult,
@@ -1770,9 +2032,166 @@ export class Strategy {
       trend: this.detectTrend(),
       dailySnapshots: this.pnlEngine.getDailySnapshots(),
       currentPhase: this.currentPhase,
-      mtf: this.lastMtfState, // 追加: MTF/レジーム状態
-      ...trackerStats, // trackerからの統計（履歴含む）を追加
+      mtf: this.lastMtfState,
+      advisor, // AIアドバイザーの提案を追加
+      ...trackerStats,
     };
+  }
+
+  /**
+   * 市場環境に基づいたAI戦略推薦を生成
+   */
+  async generateRecommendation(currentPrice: number) {
+    const regime = this.priceMonitor.getMarketRegime();
+    if (!regime) return null;
+    
+    Logger.info(`[AI_ADVISOR] 市場環境分析中... Vol: ${regime.volatility}, Trend: ${regime.trend}`);
+
+    const fundingRate = await this.hedgeManager.getFundingRate();
+    const fundingAnnualized = fundingRate * 24 * 365 * 100;
+
+    let strategy: 'DELTA_NEUTRAL' | 'LP_ONLY' | 'RANGE_ORDER' = 'DELTA_NEUTRAL';
+    let reason = '';
+    let action = 'STAY'; // STAY or CHANGE
+    let targetConfig: any = {};
+
+    // 戦略ロジック判定
+    if (regime.volatility === 'LOW' && regime.trend === 'sideways') {
+      strategy = 'LP_ONLY';
+      reason = 'ボラティリティが低く、レンジ内推移が続いています。ヘッジコストを削り、LP手数料収入を最大化する「ヘッジなしモード」が最適です。';
+      if (this.config.hedgeEnabled) {
+        action = 'CHANGE';
+        targetConfig = { hedgeEnabled: false };
+      }
+    } else if (regime.volatility === 'HIGH' || regime.volatility === 'EXTREME') {
+      strategy = 'DELTA_NEUTRAL';
+      reason = 'ボラティリティが高まっています。急激な価格変動から資産を守るため、デルタニュートラル（ヘッジあり）での運用を推奨します。';
+      if (!this.config.hedgeEnabled) {
+        action = 'CHANGE';
+        targetConfig = { hedgeEnabled: true };
+      }
+    } else if (regime.trend !== 'sideways') {
+      strategy = 'DELTA_NEUTRAL';
+      reason = `${regime.trend === 'uptrend' ? '上昇' : '下落'}トレンドが形成されています。トレンドに合わせたヘッジを行うことで、リスクを抑制した運用を推奨します。`;
+      if (!this.config.hedgeEnabled) {
+        action = 'CHANGE';
+        targetConfig = { hedgeEnabled: true };
+      }
+    } else {
+      strategy = 'DELTA_NEUTRAL';
+      reason = '現在の相場はニュートラルです。標準的なデルタニュートラル戦略を継続し、安定した収益を狙うのが適切です。';
+    }
+
+    // 金利ボーナス判定
+    if (Math.abs(fundingAnnualized) > 15) {
+      reason += `\n現在、Bluefinの金利（年率${fundingAnnualized.toFixed(2)}%）が魅力的な水準です。ヘッジによる金利収入も大きな収益源となります。`;
+    }
+
+    Logger.info(`[AI_ADVISOR] 分析完了: ${strategy} (${action})`);
+
+    return {
+      regime: { ...regime, fundingAnnualized },
+      recommendation: {
+        strategy,
+        reason,
+        action,
+        targetConfig,
+        confidence: regime.volatility === 'NORMAL' ? 85 : 70
+      }
+    };
+  }
+
+  /**
+   * [Bot3] Bluefin 指値グリッド戦略
+   */
+  private async executeGridStrategy(currentPrice: number, forceReset: boolean = false) {
+    if (!this.hedgeManager.bluefinClient) {
+      Logger.error('Bot3: Bluefin client not initialized');
+      return;
+    }
+
+    // ヘッジ無効設定時は全決済して停止
+    if (!this.config.hedgeEnabled) {
+      Logger.info('Bot3: [CONFIG] ヘッジが無効化されました。全ポジションと注文をクリーンアップします...');
+      await this.closeAllPositions(currentPrice);
+      this.currentPhase = CyclePhase.IDLE;
+      return;
+    }
+
+    if (forceReset) {
+      Logger.info('Bot3: [FORCE RESET] 設定変更のため、現在のポジションを全決済してグリッドを再構築します...');
+      await this.closeAllPositions(currentPrice);
+    }
+
+    this.currentPhase = CyclePhase.GRID_ORDERING;
+    Logger.box('Bot3: Bluefin Grid Strategy', `Price: $${currentPrice.toFixed(4)}`);
+
+    try {
+      const client = this.hedgeManager.bluefinClient;
+      const market = process.env.HEDGE_MARKET || 'SUI-PERP';
+      const buyLevels = 5;
+      const sellLevels = 2;
+      const gridSpacingPct = 0.004; // 0.4%
+      const gridSizeUsdc = 0.15; // $0.15 per order
+
+      // STEP 1: 全キャンセル
+      Logger.info(`Bot3: Cancelling all open orders on ${market}...`);
+      if ((client as any).cancelOrders) {
+        await (client as any).cancelOrders(market);
+      } else if ((client as any).cancelAllOpenOrders) {
+        await (client as any).cancelAllOpenOrders(market);
+      }
+
+      // STEP 2: 安全確認（証拠金比率）
+      const marginRatio = await this.hedgeManager.getMarginRatio();
+      if (marginRatio < 10) { 
+        Logger.warn(`Bot3: Margin ratio too low (${marginRatio.toFixed(1)}%). Standing by.`);
+        return;
+      }
+
+      // STEP 3: グリッド配置 (LONGバイアス)
+      
+      // BUY Levels (5 levels to accumulate)
+      for (let i = 1; i <= buyLevels; i++) {
+        const buyPrice = currentPrice * (1 - gridSpacingPct * i);
+        const qty = gridSizeUsdc / currentPrice;
+        await client.createOrder({
+          symbol: market as any,
+          side: 'BUY' as any,
+          type: 'LIMIT' as any,
+          priceE9: new BigNumber(buyPrice).times(1e9).integerValue().toString(),
+          quantityE9: new BigNumber(qty).times(1e9).integerValue().toString(),
+          leverageE9: new BigNumber(2).times(1e9).toString(),
+          isIsolated: true,
+          expiresAtMillis: Date.now() + 3600000,
+          clientOrderId: `grid_buy_${i}_${Date.now()}`
+        }).catch(e => Logger.warn(`Grid Buy ${i} failed: ${e.message}`));
+      }
+
+      // SELL Levels (2 levels to take profit)
+      for (let i = 1; i <= sellLevels; i++) {
+        const sellPrice = currentPrice * (1 + gridSpacingPct * i);
+        const qty = gridSizeUsdc / currentPrice;
+        await client.createOrder({
+          symbol: market as any,
+          side: 'SELL' as any,
+          type: 'LIMIT' as any,
+          priceE9: new BigNumber(sellPrice).times(1e9).integerValue().toString(),
+          quantityE9: new BigNumber(qty).times(1e9).integerValue().toString(),
+          leverageE9: new BigNumber(2).times(1e9).toString(),
+          isIsolated: true,
+          expiresAtMillis: Date.now() + 3600000,
+          clientOrderId: `grid_sell_${i}_${Date.now()}`
+        }).catch(e => Logger.warn(`Grid Sell ${i} failed: ${e.message}`));
+      }
+
+      Logger.success(`Bot3: ✅ Long-biased grid orders placed (Buy: ${buyLevels}, Sell: ${sellLevels}) around $${currentPrice.toFixed(4)}`);
+      this.currentPhase = CyclePhase.MONITORING;
+
+    } catch (e: any) {
+      Logger.error(`Bot3 Grid Error: ${e.message}`);
+      this.currentPhase = CyclePhase.IDLE;
+    }
   }
 
 }

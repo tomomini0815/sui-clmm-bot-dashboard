@@ -15,7 +15,8 @@ import { HedgePerfChart } from './components/HedgePerfChart';
 import { SafetyGauge } from './components/SafetyGauge';
 import { HourlySummaryCard } from './components/HourlySummaryCard';
 import { MtfPanel } from './components/MtfPanel';
-import { Bot2Panel } from './components/Bot2Panel';
+import { MultiBotPanel } from './components/MultiBotPanel';
+import MarketAdvisor from './components/MarketAdvisor';
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 
 function App() {
@@ -38,9 +39,7 @@ function App() {
     return localStorage.getItem('session_id') || '';
   });
   const [botWalletAddress, setBotWalletAddress] = useState('');
-  const [apiUrl] = useState(() => 
-    import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
-  );
+  const [apiUrl] = useState('http://127.0.0.1:3002');
 
 
 
@@ -116,9 +115,11 @@ function App() {
     safetyGates: null as any,
     hourlySummary: null as any,
     mtf: null as any,
+    advisor: null as any,
   });
 
   const [bot2, setBot2] = useState<any>(null);
+  const [bot3, setBot3] = useState<any>(null);
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
   const [combinedHistory, setCombinedHistory] = useState<
@@ -206,12 +207,62 @@ function App() {
       } catch (e) {
         // console.warn('Bot2 stats sync failed');
       }
-    };
 
+      // === Bot3のステータス取得 ===
+      try {
+        const res3 = await fetch(`${apiUrl}/api/bot3/status`);
+        const data3 = await res3.json();
+        if (data3.success) {
+          setBot3(data3);
+        } else {
+          setBot3({ active: false, message: data3.message || 'Bot3 inactive' });
+        }
+      } catch (e) {
+        // console.warn('Bot3 stats sync failed');
+      }
+    };
     fetchStats();
     const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
   }, [apiUrl, sessionId]);
+
+  const handleApplyAdvisorRecommendation = async (mode: 'LP_ONLY' | 'DELTA_NEUTRAL') => {
+    if (!sessionId) return;
+    try {
+      const isHedge = mode === 'DELTA_NEUTRAL';
+      const updatedConfig = {
+        ...stats.config,
+        hedgeEnabled: isHedge,
+        hedgeMode: isHedge ? 'bluefin' : 'simulate',
+        rangeWidth: 0.04 
+      };
+
+      const response = await fetch(`${apiUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          ...updatedConfig,
+          rangeWidth: (updatedConfig.rangeWidth * 100).toString(),
+          hedgeRatio: (updatedConfig.hedgeRatio * 100).toString(),
+        }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        alert(`AI Strategy Applied: ${mode}. Bot is rebalancing...`);
+        // 最新のステータスを取得
+        const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
+        const statsData = await statsRes.json();
+        if (statsData.success) {
+          setStats(statsData.data);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to apply strategy', err);
+      alert('Failed to apply AI strategy.');
+    }
+  };
 
   const toggleBotState = async () => {
     if (!sessionId) return;
@@ -257,7 +308,7 @@ function App() {
     }
   };
 
-  const handleUpdateStrategyMode = async (mode: 'balanced' | 'range_order') => {
+  const handleUpdateStrategyMode = async (mode: 'balanced' | 'range_order', hedgeEnabled: boolean) => {
     if (!sessionId) return;
     
     try {
@@ -267,6 +318,7 @@ function App() {
         body: JSON.stringify({
           sessionId,
           strategyMode: mode,
+          hedgeEnabled: hedgeEnabled,
           lpAmountUsdc: stats.config.lpAmountUsdc,
           rangeWidth: (stats.config.rangeWidth * 100).toString(),
           hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
@@ -275,12 +327,13 @@ function App() {
       });
       const data = await response.json();
       if (data.success) {
-        setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode } }));
+        setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode, hedgeEnabled: hedgeEnabled } }));
         // ボットが稼働中の場合はリバランスがトリガーされる旨を通知
+        const modeText = mode === 'balanced' ? 'ヘッジあり (バランス型)' : 'ヘッジなし (指値レンジ型)';
         if (isBotActive) {
-          alert(`🚀 戦略を ${mode === 'balanced' ? 'デルタニュートラル方向反転型' : '指値レンジ型'} に切り替えました。即座にリバランスが実行されます。`);
+          alert(`🚀 戦略を 「${modeText}」 に切り替えました。即座にリセット・再構築が実行されます。`);
         } else {
-          alert(`✅ 戦略を ${mode === 'balanced' ? 'デルタニュートラル方向反転型' : '指値レンジ型'} に設定しました。`);
+          alert(`✅ 戦略を 「${modeText}」 に設定しました。`);
         }
       }
     } catch (e) {
@@ -316,8 +369,7 @@ function App() {
           </h1>
           <p className="header-subtitle">
             Delta-Neutral Profit Engine • V3.0
-            {stats.network === 'mainnet' && (
-              <span style={{ 
+            <span style={{ 
                 marginLeft: '12px', 
                 padding: '2px 8px', 
                 background: 'rgba(46, 213, 115, 0.15)', 
@@ -327,55 +379,54 @@ function App() {
                 border: '1px solid rgba(46, 213, 115, 0.3)',
                 fontWeight: 700,
                 letterSpacing: '0.05em'
-              }}>MAINNET</span>
-            )}
+              }}>本番環境</span>
           </p>
         </div>
         <div className="header-actions">
           <div className={`badge ${isBotActive ? 'animate-pulse-slow' : ''}`} style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          borderColor: isBotActive ? 'rgba(63, 185, 80, 0.3)' : 'rgba(139, 148, 158, 0.25)',
-          color: isBotActive ? 'var(--success)' : 'var(--text-muted)',
-          background: isBotActive ? 'rgba(63, 185, 80, 0.12)' : 'rgba(139, 148, 158, 0.08)',
-          padding: '8px 14px',
-          fontSize: '0.85rem'
-        }}>
-          {isBotActive ? (
-            <>
-              <span style={{
-                width: '8px', height: '8px', borderRadius: '50%',
-                background: 'var(--success)', display: 'inline-block',
-                boxShadow: '0 0 8px var(--success)', animation: 'pulse-slow 2s infinite'
-              }}></span>
-              稼働中
-              {stats.currentPhase && (
-                <>
-                  <span style={{ color: 'var(--border-panel)', margin: '0 4px' }}>|</span>
-                  <span style={{ color: 'var(--accent)', fontWeight: '600' }}>
-                    工程: {
-                      stats.currentPhase === 'スワップ中' ? 'スワップ中' :
-                      stats.currentPhase === 'LP投入中' ? 'LP投入中' :
-                      stats.currentPhase === 'ヘッジ注文中' ? 'ヘッジ構築中' :
-                      stats.currentPhase === 'ヘッジ決済中' ? 'ヘッジ決済中' :
-                      stats.currentPhase === 'LP解除中' ? 'LP解除中' :
-                      stats.currentPhase === 'ヘッジ方向反転中' ? '方向反転中' :
-                      stats.currentPhase === '運用中 (監視)' ? '運用監視中' :
-                      stats.currentPhase === 'リバランス中' ? 'リバランス中' : 
-                      stats.currentPhase === '待機中' ? '待機中' : stats.currentPhase
-                    }
-                  </span>
-                </>
-              )}
-            </>
-          ) : (
-            <>
-              <PowerOff size={14} />
-              待機中
-            </>
-          )}
-        </div>
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            borderColor: isBotActive ? 'rgba(63, 185, 80, 0.3)' : 'rgba(139, 148, 158, 0.25)',
+            color: isBotActive ? 'var(--success)' : 'var(--text-muted)',
+            background: isBotActive ? 'rgba(63, 185, 80, 0.12)' : 'rgba(139, 148, 158, 0.08)',
+            padding: '8px 14px',
+            fontSize: '0.85rem'
+          }}>
+            {isBotActive ? (
+              <>
+                <span style={{
+                  width: '8px', height: '8px', borderRadius: '50%',
+                  background: 'var(--success)', display: 'inline-block',
+                  boxShadow: '0 0 8px var(--success)', animation: 'pulse-slow 2s infinite'
+                }}></span>
+                稼働中
+                {stats.currentPhase && (
+                  <>
+                    <span style={{ color: 'var(--border-panel)', margin: '0 4px' }}>|</span>
+                    <span style={{ color: 'var(--accent)', fontWeight: '600' }}>
+                      工程: {
+                        stats.currentPhase === 'スワップ中' ? 'スワップ中' :
+                        stats.currentPhase === 'LP投入中' ? 'LP投入中' :
+                        stats.currentPhase === 'ヘッジ注文中' ? 'ヘッジ構築中' :
+                        stats.currentPhase === 'ヘッジ決済中' ? 'ヘッジ決済中' :
+                        stats.currentPhase === 'LP解除中' ? 'LP解除中' :
+                        stats.currentPhase === 'ヘッジ方向反転中' ? '方向反転中' :
+                        stats.currentPhase === '運用中 (監視)' ? '運用監視中' :
+                        stats.currentPhase === 'リバランス中' ? 'リバランス中' : 
+                        stats.currentPhase === '待機中' ? '待機中' : stats.currentPhase
+                      }
+                    </span>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <PowerOff size={14} />
+                待機中
+              </>
+            )}
+          </div>
           <div className="sui-connect-wrapper">
             <ConnectButton />
           </div>
@@ -391,7 +442,7 @@ function App() {
               trend={netPnl >= 0 ? "up" : "down"}
               icon={<DollarSign size={18} />}
               subtitle={`手数料: $${stats.pnl?.fees?.toFixed(4) || '0.0000'}`}
-              change={apr !== 0 ? `APR ${apr.toFixed(1)}%` : undefined}
+              change={apr !== 0 ? `集計APR ${apr.toFixed(1)}% / 推定 ${stats.estimatedApr?.toFixed(1) || '0.0'}%` : undefined}
             />
             <StatCard title="リバランス回数" value={(stats.totalRebalances ?? 0).toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime || '0分'}`} />
             <StatCard title="勝率" value={`${stats.winRate ?? '0'}%`} trend={parseFloat(stats.winRate ?? '0') >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
@@ -406,7 +457,8 @@ function App() {
               <BarChart3 size={16} color="var(--accent)" />
               市場分析
             </h3>
-            <div className="market-analysis-grid">
+
+            <div className="market-analysis-grid" style={{ marginTop: '12px' }}>
               <div className="market-analysis-item">
                 <div className="market-analysis-label">現在価格</div>
                 <div className="market-analysis-value">${currentPrice.toFixed(4)}</div>
@@ -443,6 +495,11 @@ function App() {
                 </div>
               )}
             </div>
+
+            <MarketAdvisor 
+              advisor={stats.advisor} 
+              onApplyStrategy={handleApplyAdvisorRecommendation} 
+            />
           </div>
 
           <div className="main-charts-section">
@@ -482,7 +539,10 @@ function App() {
           />
 
           {/* Bot2 (DEEP/SUI) ステータスパネル */}
-          <Bot2Panel bot2={bot2} />
+          <MultiBotPanel title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`} bot={bot2} />
+
+          {/* Bot3 (Extra) ステータスパネル */}
+          <MultiBotPanel title={`Bot3 — ${bot3?.pool || 'SUI-PERP'}`} bot={bot3} />
 
           {/* 安全ゲートパネル */}
           <SafetyGauge

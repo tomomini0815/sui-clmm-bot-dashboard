@@ -5,7 +5,7 @@ interface StrategyVisualizerProps {
   totalCapital: number;
   config?: { strategyMode?: 'balanced' | 'range_order' };
   hedge?: { active?: boolean; direction?: string; size?: number };
-  onUpdateStrategyMode: (mode: 'balanced' | 'range_order') => void;
+  onUpdateStrategyMode: (mode: 'balanced' | 'range_order', hedgeEnabled: boolean) => void;
 }
 
 export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({ 
@@ -45,28 +45,28 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
           padding: '4px', borderRadius: '10px', gap: '4px' 
         }}>
           <button
-            onClick={() => onUpdateStrategyMode('balanced')}
+            onClick={() => onUpdateStrategyMode('balanced', true)}
             style={{
               flex: 1, padding: '8px 4px', borderRadius: '8px', border: 'none',
               fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-              background: config?.strategyMode === 'balanced' ? 'var(--accent)' : 'transparent',
-              color: config?.strategyMode === 'balanced' ? 'white' : 'var(--text-muted)',
-              boxShadow: config?.strategyMode === 'balanced' ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
+              background: (config?.strategyMode === 'balanced') ? 'var(--accent)' : 'transparent',
+              color: (config?.strategyMode === 'balanced') ? 'white' : 'var(--text-muted)',
+              boxShadow: (config?.strategyMode === 'balanced') ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
             }}
           >
-            DN Flip
+            ヘッジあり
           </button>
           <button
-            onClick={() => onUpdateStrategyMode('range_order')}
+            onClick={() => onUpdateStrategyMode('range_order', false)}
             style={{
               flex: 1, padding: '8px 4px', borderRadius: '8px', border: 'none',
               fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-              background: config?.strategyMode === 'range_order' ? 'var(--accent)' : 'transparent',
-              color: config?.strategyMode === 'range_order' ? 'white' : 'var(--text-muted)',
-              boxShadow: config?.strategyMode === 'range_order' ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
+              background: (config?.strategyMode === 'range_order') ? 'var(--accent)' : 'transparent',
+              color: (config?.strategyMode === 'range_order') ? 'white' : 'var(--text-muted)',
+              boxShadow: (config?.strategyMode === 'range_order') ? '0 2px 6px rgba(88, 166, 255, 0.4)' : 'none'
             }}
           >
-            指値レンジ
+            ヘッジなし
           </button>
         </div>
       </div>
@@ -163,7 +163,7 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
       }}>
         <Info size={14} style={{ marginTop: '2px', color: 'var(--text-muted)', flexShrink: 0 }} />
         <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.4 }}>
-          Delta-Neutral Flip: 資産の100%をLPに投入し、レンジ逸脱時にヘッジ方向を自動反転（SHORT↔LONG）。トレンドフォロー型のデルタニュートラル戦略です。
+          デルタニュートラル・フリップ: 資産の100%をLPに投入し、レンジ逸脱時にヘッジ方向を自動反転（ショート↔ロング）。トレンド追従とリスク回避を両立する戦略です。
         </p>
       </div>
     </div>

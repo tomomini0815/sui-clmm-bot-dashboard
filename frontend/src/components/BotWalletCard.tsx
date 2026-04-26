@@ -164,11 +164,11 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
       {/* 4. Wallet Balance Summary (Compact) */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
         <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI Balance</div>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI 残高</div>
           <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>{suiBalance.toFixed(2)} <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>SUI</span></div>
         </div>
         <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC Balance</div>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC 残高</div>
           <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>${usdcBalance.toFixed(2)}</div>
         </div>
       </div>

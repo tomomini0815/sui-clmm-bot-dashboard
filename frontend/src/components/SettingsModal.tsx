@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Eye, EyeOff, Save, X, Zap, Settings as SettingsIcon, Info, Copy, Check } from 'lucide-react';
+import { Eye, EyeOff, Save, X, Zap, Settings as SettingsIcon, Info, Copy, Check, TrendingUp, Wallet } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -13,6 +13,7 @@ interface SettingsModalProps {
     lpAmountUsdc: number;
     totalOperationalCapitalUsdc: number;
     backupPassword?: string;
+    hedgeEnabled?: boolean;
   };
 }
 
@@ -33,6 +34,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [totalCapital, setTotalCapital] = useState('200');
+  const [lpAmount, setLpAmount] = useState('1.0');
+  const [hedgeEnabled, setHedgeEnabled] = useState(true);
 
   // モーダルを開いた時だけ初期値をセットするように変更
   useEffect(() => {
@@ -41,7 +44,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
       setRangeWidth((currentConfig.rangeWidth * 100).toFixed(1));
       setHedgeRatio((currentConfig.hedgeRatio * 100).toFixed(0));
       setTotalCapital((currentConfig.totalOperationalCapitalUsdc ?? 200).toString());
+      setLpAmount((currentConfig.lpAmountUsdc ?? 1.0).toString());
       setBackupPassword(currentConfig.backupPassword || '');
+      setHedgeEnabled(currentConfig.hedgeEnabled !== false);
     }
   }, [isOpen]); // currentConfig を依存関係から外す
 
@@ -65,23 +70,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
           sessionId,
           rangeWidth,
           hedgeRatio,
-          lpAmountUsdc: currentConfig?.lpAmountUsdc || 0.10,
+          lpAmountUsdc: parseFloat(lpAmount),
           totalOperationalCapitalUsdc: parseFloat(totalCapital),
           telegramToken,
           telegramChatId,
           configMode,
-          backupPassword: backupPassword
+          backupPassword: backupPassword,
+          hedgeEnabled: hedgeEnabled
         })
       });
       const data = await response.json();
       if (data.success) {
-        console.log('Settings Saved!');
+        alert('✅ 設定を保存しました。現在のポジションをリセットして再構築を開始します。');
+        onClose();
+      } else {
+        alert('❌ 保存に失敗しました: ' + (data.error || 'Unknown error'));
       }
     } catch (err) {
       console.error('Failed to save settings to backend:', err);
+      alert('❌ サーバー通信エラーが発生しました。');
     } finally {
       setIsSaving(false);
-      onClose();
     }
   };
 
@@ -280,7 +289,47 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
             gap: '6px',
             paddingLeft: '4px' 
           }}>
-             <Info size={14} /> 入力額の 50% を LP、残りの 50% をヘッジ担保として運用します。
+             <Info size={14} /> ボットが認識する総資本額です（利益計算やマージン管理の基準）。
+          </div>
+        </div>
+
+        <div className="form-group" style={{ marginBottom: '28px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', color: 'var(--text-main)', fontSize: '0.9rem' }}>
+            <Wallet size={16} color="var(--neon-cetus)" /> LP投入額 (LP Amount)
+          </label>
+          <div style={{ position: 'relative' }}>
+            <input 
+              type="number" 
+              className="input-glass" 
+              value={lpAmount} 
+              onChange={(e) => setLpAmount(e.target.value)} 
+              placeholder="e.g. 100"
+              style={{ 
+                fontSize: '1.2rem', 
+                fontWeight: 700, 
+                color: 'white', 
+                padding: '12px 80px 12px 20px',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid rgba(255,255,255,0.1)'
+              }}
+            />
+            <span style={{ 
+              position: 'absolute', 
+              right: '20px', 
+              top: '50%', 
+              transform: 'translateY(-50%)', 
+              fontSize: '0.9rem', 
+              color: 'var(--text-muted)',
+              fontWeight: 700
+            }}>USDC</span>
+          </div>
+          <div style={{ 
+            marginTop: '8px', 
+            fontSize: '0.75rem', 
+            color: 'var(--text-muted)', 
+            paddingLeft: '4px' 
+          }}>
+             CetusのLPポジションに実際に投入する金額です。
           </div>
         </div>
 
@@ -318,6 +367,44 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
                 fontWeight: 700
               }}
             />
+          </div>
+        </div>
+
+        {/* ヘッジ有効・無効切り替え */}
+        <div className="form-group" style={{ marginBottom: '28px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem' }}>
+              <TrendingUp size={16} color="var(--accent)" /> デルタヘッジ (Bluefin) を有効にする
+            </span>
+            <div 
+              onClick={() => setHedgeEnabled(!hedgeEnabled)}
+              style={{
+                width: '50px',
+                height: '26px',
+                background: hedgeEnabled ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
+                borderRadius: '13px',
+                position: 'relative',
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                border: '1px solid rgba(255,255,255,0.1)'
+              }}
+            >
+              <div style={{
+                width: '20px',
+                height: '20px',
+                background: 'white',
+                borderRadius: '50%',
+                position: 'absolute',
+                top: '2px',
+                left: hedgeEnabled ? '26px' : '2px',
+                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+              }} />
+            </div>
+          </label>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px', paddingLeft: '24px' }}>
+            {hedgeEnabled 
+              ? 'Bluefinでショートポジションを持ち、現物価格の変動リスクを相殺します。' 
+              : 'ヘッジを行わず、LPのみで運用します。価格上昇時には利益が増えますが、下落時のリスクが大きくなります。'}
           </div>
         </div>
 

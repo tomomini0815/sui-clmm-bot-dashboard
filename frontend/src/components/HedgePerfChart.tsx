@@ -64,9 +64,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({
     : 'rgba(248, 81, 73, 0.1)';
 
   // タイトル・説明文
-  const titleLabel = isNone
-    ? 'ヘッジパフォーマンス'
-    : `ヘッジパフォーマンス (${isLong ? 'ロング' : 'ショート'}ポジション)`;
+  const titleLabel = 'ヘッジパフォーマンス';
 
   const descLabel = isNone
     ? 'ヘッジポジション待機中'
@@ -74,7 +72,7 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({
     ? '価格上昇時にLPの評価損をカバーします'
     : '価格下落時にLPの評価損をカバーします';
 
-  const entryLabel = isLong ? 'LONG ENTRY' : 'SHORT ENTRY';
+  const entryLabel = isLong ? 'ロング建玉' : 'ショート建玉';
 
   const legendText = isNone
     ? 'ヘッジポジションが開かれると詳細が表示されます。'
@@ -84,40 +82,42 @@ export const HedgePerfChart: React.FC<HedgePerfChartProps> = ({
 
   return (
     <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      {/* ヘッダー */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
-        <div>
-          <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <ShieldCheck size={20} color={isLong ? 'var(--success)' : 'var(--accent)'} />
-            {titleLabel}
-          </h2>
-          <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-            {descLabel}
-          </p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div>
+            <h2 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ShieldCheck size={20} color={isLong ? 'var(--success)' : (isShort ? 'var(--danger)' : 'var(--accent)')} />
+              {titleLabel}
+              {!isNone && (
+                <div style={{
+                  padding: '2px 10px',
+                  borderRadius: '20px',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  letterSpacing: '0.04em',
+                  background: isLong
+                    ? 'rgba(63, 185, 80, 0.15)'
+                    : 'rgba(248, 81, 73, 0.15)',
+                  border: `1px solid ${isLong ? 'rgba(63, 185, 80, 0.4)' : 'rgba(248, 81, 73, 0.4)'}`,
+                  color: isLong ? 'var(--success)' : 'var(--danger)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  marginLeft: '4px'
+                }}>
+                  {isLong ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+                  {isLong ? 'ロング' : 'ショート'}
+                </div>
+              )}
+            </h2>
+            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+              {descLabel}
+            </p>
+          </div>
         </div>
 
-        {/* ポジション方向バッジ */}
+        {/* 建玉・損益情報 */}
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          {!isNone && (
-            <div style={{
-              padding: '4px 12px',
-              borderRadius: '20px',
-              fontSize: '0.78rem',
-              fontWeight: 700,
-              letterSpacing: '0.06em',
-              background: isLong
-                ? 'rgba(63, 185, 80, 0.15)'
-                : 'rgba(248, 81, 73, 0.15)',
-              border: `1px solid ${isLong ? 'rgba(63, 185, 80, 0.4)' : 'rgba(248, 81, 73, 0.4)'}`,
-              color: isLong ? 'var(--success)' : 'var(--danger)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px'
-            }}>
-              {isLong ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
-              {isLong ? 'LONG' : 'SHORT'}
-            </div>
-          )}
 
           {/* 建玉価格 */}
           <div style={{

@@ -41,6 +41,7 @@ export interface UserSession {
 
 export class SessionManager {
   private static sessions: Map<string, UserSession> = new Map();
+  private static hedgeManagers: Map<string, HedgeManager> = new Map();
   private static readonly SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24時間
 
   /**
@@ -171,7 +172,11 @@ export class SessionManager {
     const lpManager = new LpManager(priceMonitor, gasTracker, tracker, sessionConfig);
     lpManager.setKeypair(sessionKeypair);
 
-    const hedgeManager = new HedgeManager(sessionConfig.hedgeMode);
+    let hedgeManager = this.hedgeManagers.get(botWalletAddress);
+    if (!hedgeManager) {
+      hedgeManager = new HedgeManager(sessionConfig.hedgeMode);
+      this.hedgeManagers.set(botWalletAddress, hedgeManager);
+    }
 
     const strategy = new Strategy(
       priceMonitor,
@@ -250,6 +255,13 @@ export class SessionManager {
       session.lastActive = Date.now();
     }
     return session || null;
+  }
+
+  /**
+   * 全セッションを取得
+   */
+  static getAllSessions(): UserSession[] {
+    return Array.from(this.sessions.values());
   }
 
   /**

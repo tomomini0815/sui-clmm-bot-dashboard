@@ -80,6 +80,16 @@ export class PriceMonitor {
     return this.poolObjectId;
   }
 
+  async getCoinTypeA() {
+    await this.initializePoolData();
+    return this.coinTypeA;
+  }
+
+  async getCoinTypeB() {
+    await this.initializePoolData();
+    return this.coinTypeB;
+  }
+
   getPriceHistory() {
     return this.priceHistory;
   }
@@ -161,17 +171,27 @@ export class PriceMonitor {
         }
       }
 
-      // Pyth Oracle チェック
-      const pythPrice = await this.getPythPrice();
-      if (pythPrice > 0) {
-        const diff = Math.abs(price - pythPrice) / pythPrice;
-        if (diff > 0.05) {
-          Logger.warn(`Price Divergence: Pool=$${price.toFixed(4)}, Pyth=$${pythPrice.toFixed(4)}. Using Pyth.`);
-          price = pythPrice;
+      // Pyth Oracle チェック (USDCプールの場合のみ実行)
+      const isUsdcPool = this.coinTypeA.toLowerCase().includes('usdc') || 
+                        this.coinTypeB.toLowerCase().includes('usdc') ||
+                        this.coinTypeA.toLowerCase().includes('coin_a') ||
+                        this.coinTypeB.toLowerCase().includes('coin_a');
+
+      if (isUsdcPool) {
+        const pythPrice = await this.getPythPrice();
+        if (pythPrice > 0) {
+          const diff = Math.abs(price - pythPrice) / pythPrice;
+          if (diff > 0.05) {
+            Logger.warn(`Price Divergence: Pool=$${price.toFixed(4)}, Pyth=$${pythPrice.toFixed(4)}. Using Pyth.`);
+            price = pythPrice;
+          }
         }
       }
 
-      Logger.info(`📈 Market Price: $${price.toFixed(4)} USDC/SUI (Tick: ${pool.current_tick_index})`);
+      const coinASymbol = (await this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }))?.symbol || 'A';
+      const coinBSymbol = (await this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }))?.symbol || 'B';
+      
+      Logger.info(`📈 Market Price: ${price.toFixed(4)} ${coinASymbol}/${coinBSymbol} (Tick: ${pool.current_tick_index})`);
       
       const now = new Date();
       const timeStr = now.toLocaleTimeString('ja-JP', { hour12: false });
@@ -328,5 +348,35 @@ export class PriceMonitor {
 
   isOutOfRange(currentPrice: number, lowerBound: number, upperBound: number): boolean {
     return currentPrice < lowerBound || currentPrice > upperBound;
+  }
+
+  /**
+   * 市場環境を総合的に判定 (AIアドバイザー用)
+   */
+  getMarketRegime() {
+    const currentPrice = this.priceHistory[this.priceHistory.length - 1]?.price || 0;
+    if (currentPrice === 0) return null;
+
+    const atr = this.calculateATR24h();
+    const volatilityPct = (atr / currentPrice) * 100;
+    
+    // ボラティリティ判定
+    let volatility: 'LOW' | 'NORMAL' | 'HIGH' | 'EXTREME' = 'NORMAL';
+    if (volatilityPct < 0.05) volatility = 'LOW';
+    else if (volatilityPct > 0.2) volatility = 'HIGH';
+    else if (volatilityPct > 0.5) volatility = 'EXTREME';
+
+    // トレンド判定
+    const { trend, ema20, ema50 } = this.evaluateTrend();
+
+    return {
+      price: currentPrice,
+      volatility,
+      volatilityPct: Number(volatilityPct.toFixed(4)),
+      trend,
+      ema20: Number(ema20.toFixed(4)),
+      ema50: Number(ema50.toFixed(4)),
+      timestamp: Date.now()
+    };
   }
 }

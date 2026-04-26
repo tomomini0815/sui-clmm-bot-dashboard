@@ -22,6 +22,9 @@ export class PnlEngine {
 
   // ガス
   private totalGasCost: number = 0;       // 累積ガス代(USDC)
+  
+  // 推定APR算出用（直近の手数料収益を追跡）
+  private recentFees: Array<{ timestamp: number; amount: number }> = [];
 
   // 日次追跡
   private dailySnapshots: Array<{
@@ -61,6 +64,11 @@ export class PnlEngine {
    */
   recordFee(feeUsdc: number) {
     this.totalFeesCollected += feeUsdc;
+    this.recentFees.push({ timestamp: Date.now(), amount: feeUsdc });
+    
+    // 24時間以上前のデータは削除
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    this.recentFees = this.recentFees.filter(f => f.timestamp > cutoff);
   }
 
   /**
@@ -140,6 +148,7 @@ export class PnlEngine {
     apr: number;
     dailyPnl: number;
     elapsedHours: number;
+    estimatedApr: number;
   } {
     const lpPnl = this.calculateLpPnl(currentPrice);
     const hedgePnl = this.calculateHedgePnl(currentPrice);
@@ -171,6 +180,9 @@ export class PnlEngine {
     // 日次スナップショット
     this.tryDailySnapshot(currentPrice, lpPnl, hedgePnl);
 
+    // 推定APR (直近24時間の収益から算出)
+    const estimatedApr = this.calculateEstimatedApr();
+    
     return {
       lpPnl: Number(lpPnl.toFixed(4)),
       hedgePnl: Number(hedgePnl.toFixed(4)),
@@ -179,9 +191,32 @@ export class PnlEngine {
       fundingCost: Number(fundingCost.toFixed(4)),
       netPnl: Number(netPnl.toFixed(4)),
       apr: Number(apr.toFixed(2)),
+      estimatedApr: Number(estimatedApr.toFixed(2)),
       dailyPnl: Number(dailyPnl.toFixed(4)),
       elapsedHours: Number(elapsedHours.toFixed(1)),
     };
+  }
+
+  /**
+   * 直近の収益に基づいた推定APR（年利）を計算
+   */
+  private calculateEstimatedApr(): number {
+    if (this.lpEntryValue <= 0) return 0;
+
+    const now = Date.now();
+    const cutoff = now - 24 * 60 * 60 * 1000; // 24時間
+    
+    // 24時間以内の合計手数料
+    const totalRecentFees = this.recentFees
+      .filter(f => f.timestamp > cutoff)
+      .reduce((sum, f) => sum + f.amount, 0);
+
+    if (totalRecentFees === 0) return 0;
+
+    // 日利換算
+    const dailyRate = totalRecentFees / this.lpEntryValue;
+    // 年利換算 (365倍)
+    return dailyRate * 365 * 100;
   }
 
   /**

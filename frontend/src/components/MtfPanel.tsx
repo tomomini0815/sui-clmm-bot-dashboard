@@ -52,7 +52,7 @@ export const MtfPanel: React.FC<MtfPanelProps> = ({ mtf }) => {
           color: isLong ? 'var(--success)' : isShort ? 'var(--danger)' : 'var(--text-muted)',
           border: `1px solid ${isLong ? 'rgba(63, 185, 80, 0.3)' : isShort ? 'rgba(248, 81, 73, 0.3)' : 'rgba(255, 255, 255, 0.1)'}`
         }}>
-          {mtf.direction}
+          {mtf.direction === 'LONG' ? 'ロング' : mtf.direction === 'SHORT' ? 'ショート' : 'ニュートラル'}
         </div>
       </div>
 
@@ -106,13 +106,13 @@ export const MtfPanel: React.FC<MtfPanelProps> = ({ mtf }) => {
         }}>
           <Zap size={16} color="#8a4bff" />
           <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#d1b3ff' }}>
-            Funding Arbitrage Mode Active: SHORT を維持し金利を収益化中
+            ファンディング金利裁定モード：SHORTを維持し金利を収益化中
           </span>
         </div>
       )}
 
       <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textAlign: 'right' }}>
-        Last updated: {new Date(mtf.updatedAt).toLocaleTimeString()}
+        最終更新: {new Date(mtf.updatedAt).toLocaleTimeString()}
       </div>
 
       <style dangerouslySetInnerHTML={{ __html: `

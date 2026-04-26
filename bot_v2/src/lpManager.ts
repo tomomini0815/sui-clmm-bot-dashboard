@@ -11,6 +11,10 @@ import { GasTracker } from './gasTracker.js';
 import { Tracker } from './tracker.js';
 import { globalTxQueue, WalletTxQueue } from './walletTxQueue.js';
 
+const NATIVE_USDC_TYPE = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
+const WUSDC_TYPE = '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN';
+const USDC_WUSDC_POOL_ID = '0x1efc96c99c9d91ac0f54f0ca78d2d9a6ba11377d29354c0a192c86f0495ddec7'; // Mainnet Native USDC / wUSDC (0.01%)
+
 export class LpManager {
   private keypair!: Ed25519Keypair;
   private suiClient!: SuiClient;
@@ -384,6 +388,24 @@ export class LpManager {
   }
 
   /**
+   * ウォレットが該当プールの有効な（流動性のある）ポジションを保有しているか確認
+   */
+  async hasActivePosition(): Promise<boolean> {
+    if (!this.isInitialized) await this.initializePoolData();
+    try {
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
+      
+      // 流動性が0より大きいポジションが一つでもあればtrue
+      return positionList.some(pos => Number(pos.liquidity) > 0);
+    } catch (error) {
+      Logger.error('Failed to check active positions', error);
+      return false;
+    }
+  }
+
+  /**
    * ウォレットが保有する該当プールの全ポジションをブロックチェーンから取得し、すべて強制クローズする
    * (セッション情報が消失した場合でも確実に資産を回収するための「大掃除」ロジック)
    */
@@ -619,6 +641,69 @@ export class LpManager {
       return { digest: response.digest, amountOut };
     } catch (e: any) {
       Logger.error(`Execution failed: ${e.message}`);
+      throw e;
+    }
+  }
+
+  /**
+   * Native USDC を wUSDC (Wormhole) に変換する (Bluefin入金用)
+   */
+  async swapNativeUsdcToWUsdc(amountUsdc: number): Promise<{ digest: string; amountOut: number }> {
+    Logger.info(`LpManager: Swapping ${amountUsdc.toFixed(2)} Native USDC to wUSDC...`);
+    const amountInBN = new BN(Math.floor(amountUsdc * 1e6).toString());
+    
+    try {
+      const sdk = this.getSdkWithSender();
+      const pool = await sdk.Pool.getPool(USDC_WUSDC_POOL_ID);
+      if (!pool) throw new Error("USDC/wUSDC Pool not found on Cetus.");
+
+      // a2b: Native USDC (A) -> wUSDC (B) or vice versa
+      const a2b = pool.coinTypeA.includes('dba3'); 
+
+      const res = await sdk.Swap.preswap({
+        pool: pool,
+        currentSqrtPrice: pool.current_sqrt_price,
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB,
+        decimalsA: 6,
+        decimalsB: 6,
+        a2b,
+        byAmountIn: true,
+        amount: amountInBN.toString(),
+      });
+
+      if (!res) throw new Error("Swap estimation failed");
+      const slippage = Percentage.fromDecimal(d(0.01 * 100)); // 1.0% slippage
+      const amountLimit = adjustForSlippage(new BN(res.estimatedAmountOut), slippage, false);
+
+      const txPayload = await sdk.Swap.createSwapTransactionPayload({
+        pool_id: USDC_WUSDC_POOL_ID,
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB,
+        a2b,
+        by_amount_in: true,
+        amount: amountInBN.toString(),
+        amount_limit: amountLimit.toString(),
+      });
+
+      const response = await this.txQueue.execute(
+        () => this.suiClient.signAndExecuteTransaction({
+          transaction: txPayload as any,
+          signer: this.keypair,
+          options: { showEffects: true, showEvents: true },
+        }),
+        'swapUsdcToWUsdc'
+      );
+
+      if (response.effects?.status?.status !== 'success') {
+        throw new Error(`Swap TX failed: ${response.effects?.status?.error}`);
+      }
+
+      const amountOut = Number(res.estimatedAmountOut) / 1e6;
+      Logger.success(`LpManager: Swapped Native USDC to ${amountOut.toFixed(4)} wUSDC!`);
+      return { digest: response.digest, amountOut };
+    } catch (e: any) {
+      Logger.error(`LpManager: USDC -> wUSDC Swap failed: ${e.message}`);
       throw e;
     }
   }
