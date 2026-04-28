@@ -89,23 +89,55 @@ async function bootstrap() {
       });
 
     if (sessionFiles.length > 0) {
-      const latest = sessionFiles[0];
-      const sessionId = latest.sessionId;
+      Logger.info(`ℹ Found ${sessionFiles.length} session files. Selective resume starting...`);
       
-      Logger.info(`ℹ Auto-resuming most relevant session: ${sessionId} (Running: ${latest.isRunning}, Tracker: ${latest.trackerSize} bytes)`);
-      
-      const session = await SessionManager.createSession(sessionId);
-      const actualSessionId = session.sessionId; // 確定後のIDを取得
+      for (const sessionFile of sessionFiles) {
+        const sid = sessionFile.sessionId.toLowerCase();
+        // メインボット（master）と Bot2 のみを自動再開の対象にする
+        const isTargetBot = sid.startsWith('master-') || sid.startsWith('bot2-');
+        
+        Logger.info(`[BOOTSTRAP] Checking session: ${sid} (Target: ${isTargetBot}, Running: ${sessionFile.isRunning})`);
+        
+        if (isTargetBot && (sessionFile.isRunning || sessionFile === sessionFiles[0])) {
+          try {
+            Logger.info(`🔄 Resuming target session: ${sid}`);
+            const session = await SessionManager.createSession(sessionFile.sessionId);
+            const actualSessionId = session.sessionId;
 
-      if (session.strategy.isRunning) {
-        Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${actualSessionId}`);
-        session.strategy.isRunning = false;
-        await session.strategy.start();
-      }
+            // レンジ幅を 2% (0.02) に強制同期
+            const TARGET_RANGE_WIDTH = 0.02;
+            if (session.config.rangeWidth !== TARGET_RANGE_WIDTH) {
+              Logger.info(`🎯 Overriding rangeWidth for ${sid} to 2%: ${TARGET_RANGE_WIDTH}`);
+              session.config.rangeWidth = TARGET_RANGE_WIDTH;
+              session.strategy.refreshConfig(session.config);
+            }
 
-      // 他の古いセッションはスキップ
-      if (sessionFiles.length > 1) {
-        Logger.warn(`Skipped ${sessionFiles.length - 1} older session files to prevent competition.`);
+            // Bot2 (DEEP/SUI) の場合はプールIDを強制セット（初期状態または旧IDの場合）
+            if (sid.startsWith('bot2-')) {
+              const DEEP_SUI_POOL_ID = '0xe01243f37f712ef87e556afb9b1d03d0fae13f96d324ec912daffc339dfdcbd2';
+              if (session.config.poolObjectId !== DEEP_SUI_POOL_ID) {
+                Logger.info(`🎯 Overriding poolObjectId for Bot2 to DEEP/SUI: ${DEEP_SUI_POOL_ID}`);
+                session.config.poolObjectId = DEEP_SUI_POOL_ID;
+                session.priceMonitor.refreshConfig(session.config);
+                session.lpManager.refreshConfig(session.config);
+              }
+            }
+
+            if (sessionFile.isRunning) {
+              Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${actualSessionId} (Background)`);
+              session.strategy.isRunning = false;
+              session.strategy.start().catch(err => {
+                Logger.error(`Failed to background-start strategy for ${actualSessionId}`, err);
+              });
+            } else {
+              Logger.info(`💤 [RESTORED] Session ${actualSessionId} loaded in IDLE state.`);
+            }
+          } catch (err) {
+            Logger.error(`Failed to resume session: ${sessionFile.sessionId}`, err);
+          }
+        } else {
+          Logger.info(`⏭ Skipping session: ${sid}`);
+        }
       }
     }
 
@@ -124,6 +156,7 @@ async function bootstrap() {
 
 // セッション作成・ログイン
 app.post('/api/session', async (req, res) => {
+  Logger.info(`API Request: POST /api/session - Body: ${JSON.stringify(req.body)}`);
   try {
     const { privateKey, mnemonic, walletAddress, isWalletConnect } = req.body;
     
@@ -147,7 +180,11 @@ app.post('/api/session', async (req, res) => {
 
       // 既存セッションがなければ新規作成
       if (!session) {
-        const sessionId = crypto.randomUUID();
+        Logger.info(`[WALLET CONNECT] No active session found for ${walletAddress}. Searching filesystem...`);
+        // まずファイルシステムから検索
+        const existingId = SessionManager.findSessionIdByWalletAddress(walletAddress);
+        const sessionId = existingId || crypto.randomUUID();
+        Logger.info(`[WALLET CONNECT] Selected SessionID: ${sessionId} (Found existing: ${!!existingId})`);
         session = await SessionManager.createSession(sessionId, null, null, walletAddress);
       }
 
@@ -297,15 +334,20 @@ app.post('/api/config', async (req, res) => {
     // セッションの設定を更新・反映
     refreshSessionComponents(sessionId, newConfig);
     
-    // 戦略モードが変更された場合、または設定が更新された場合に即座にリバランスを実行
-    if (session.strategy.isRunning) {
-      Logger.info(`Config updated via API. Triggering immediate rebalance for strategy: ${newConfig.strategyMode}`);
-      const currentPrice = await session.priceMonitor.getCurrentPrice();
-      // 非同期で実行（レスポンスを待たせない）
-      session.strategy.runRebalance(currentPrice, true).catch(err => {
-        Logger.error('Auto-rebalance after config update failed', err);
-      });
-    }
+    // 戦略モードやヘッジ設定が変更された場合、即座にリバランス/クリーンアップを実行
+    // ボットが停止していても、ヘッジをオフにした場合は決済が必要なため、強制的に実行するロジックに変更
+    Logger.info(`Config updated via API. Triggering immediate reset/cleanup for session: ${sessionId}`);
+    
+    // 価格取得とリバランスの実行
+    (async () => {
+      try {
+        const currentPrice = await session.priceMonitor.getCurrentPrice();
+        await session.strategy.runRebalance(currentPrice, true);
+        Logger.success(`Immediate reset/cleanup completed for session: ${sessionId}`);
+      } catch (err) {
+        Logger.error('Auto-rebalance/Cleanup after config update failed', err);
+      }
+    })();
     
     // 即座に永続化
     SessionManager.saveSessionState(sessionId);
@@ -388,6 +430,7 @@ app.post('/api/stop', async (req, res) => {
 // 統計取得（セッション指定）
 app.get('/api/stats', async (req, res) => {
   const sessionId = req.query.sessionId as string;
+  Logger.info(`API Request: GET /api/stats - sessionId: ${sessionId}`);
   
   if (!sessionId) {
     return res.status(400).json({ success: false, error: 'Session ID required' });
@@ -491,11 +534,7 @@ app.get('/api/stats', async (req, res) => {
         hourlySummary: (session.strategy as any).lastHourlySummary ?? null,
 
         // === EMA・TWAP (Phase B/C判断用) ===
-        trendInfo: (() => {
-          try {
-            return session.priceMonitor.evaluateTrend?.() ?? null;
-          } catch { return null; }
-        })(),
+        trendInfo: null,
       }
 
     });
@@ -528,36 +567,47 @@ app.get('/api/market-regime', (req, res) => {
   const master = sessions[0];
   const priceHistory = master.priceMonitor.getPriceHistory();
   const price = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1].price : 0;
-  const volatility = master.strategy.calculateVolatility() * 100;
-  const trend = master.strategy.detectTrend();
-  
   res.json({
     success: true,
     data: {
       price,
-      volatility: volatility > 2.0 ? 'HIGH' : volatility > 0.5 ? 'NORMAL' : 'LOW',
-      volatilityPct: volatility,
-      trend,
-      ema20: price * 0.998, // 簡易
-      ema50: price * 0.995, // 簡易
+      volatility: 'NORMAL',
+      volatilityPct: 0.5,
+      trend: 'SIDEWAYS',
+      ema20: price,
+      ema50: price,
       timestamp: Date.now()
     }
   });
 });
 
 // Bot2ステータス専用 (後方互換用)
-app.get('/api/bot2/status', (req, res) => {
-  const stats = SessionManager.getAllSessionsStats();
-  if (stats.length < 2) return res.json({ success: false, message: 'Bot2 not running' });
-  res.json({ success: true, ...stats[1] });
+app.get('/api/bot2/status', async (req, res) => {
+  const sessions = SessionManager.getAllSessions();
+  const bot2 = sessions.find(s => s.sessionId.toLowerCase().startsWith('bot2-'));
+  
+  if (!bot2) return res.json({ success: false, message: 'Bot2 session not found' });
+  
+  const stats = bot2.tracker.getStats();
+  const currentPrice = await bot2.priceMonitor.getCurrentPrice();
+  const pnlData = await bot2.strategy.getPnlData(currentPrice);
+  
+  res.json({ 
+    success: true, 
+    sessionId: bot2.sessionId,
+    active: bot2.strategy.isRunning,
+    pool: 'DEEP/SUI', // Bot2はDEEP/SUIペアとして表示
+    currentPrice,
+    currentRange: {
+      lower: bot2.strategy.currentLowerBound,
+      upper: bot2.strategy.currentUpperBound
+    },
+    phase: bot2.strategy.currentPhase,
+    tracker: stats,
+    ...pnlData
+  });
 });
 
-// Bot3ステータス専用 (後方互換用)
-app.get('/api/bot3/status', (req, res) => {
-  const stats = SessionManager.getAllSessionsStats();
-  if (stats.length < 3) return res.json({ success: false, message: 'Bot3 not running' });
-  res.json({ success: true, ...stats[2] });
-});
 
 app.post('/api/faucet', async (req, res) => {
   try {
@@ -613,8 +663,10 @@ app.get('/health', (req, res) => {
 
 console.log('DEBUG: Starting API Server...');
 const port = parseInt(process.env.PORT || '3002', 10);
-app.listen(port, '0.0.0.0', () => {
-  Logger.success(`API Server Running: port ${port}`);
+const host = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1';
+
+app.listen(port, host, () => {
+  Logger.success(`API Server Running: http://${host}:${port}`);
   
   // Start bot logic in background to avoid health check timeout
   console.log('DEBUG: Starting background bootstrap...');

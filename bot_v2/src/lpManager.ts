@@ -87,6 +87,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
+      Logger.info(`LpManager [${this.walletAddress.slice(0,6)}]: Fetching pool data for ${poolId}...`);
       const pool = await sdk.Pool.getPool(poolId);
       
       if (pool) {
@@ -99,18 +100,31 @@ export class LpManager {
         this.decimalsA = coinAMeta?.decimals ?? 9;
         this.decimalsB = coinBMeta?.decimals ?? 9;
         
-        // USDC判定 (MainnetのUSDCまたはTestnetのCOIN_A)
+        // ベース通貨（USDC相当）の判定
+        // 1. まず名前に 'usdc' または 'coin_a' (テスト用) を含むものを探す
         const isAUsdc = this.coinTypeA.toLowerCase().includes('usdc') || this.coinTypeA.toLowerCase().includes('coin_a');
         const isBUsdc = this.coinTypeB.toLowerCase().includes('usdc') || this.coinTypeB.toLowerCase().includes('coin_a');
         
+        // 2. 名前に含まれない場合（DEEP/SUIなど）、SUI以外の方をベース通貨とみなす
+        const isASui = this.coinTypeA.toLowerCase().endsWith('sui::sui');
+        const isBSui = this.coinTypeB.toLowerCase().endsWith('sui::sui');
+
         if (isAUsdc) {
           this.usdcIsA = true;
           this.usdcDecimals = this.decimalsA;
         } else if (isBUsdc) {
           this.usdcIsA = false;
           this.usdcDecimals = this.decimalsB;
+        } else if (!isASui) {
+          // AがSUIでないなら、AをUSDC相当（DEEP等）として扱う
+          this.usdcIsA = true;
+          this.usdcDecimals = this.decimalsA;
+        } else if (!isBSui) {
+          // BがSUIでないなら、BをUSDC相当として扱う
+          this.usdcIsA = false;
+          this.usdcDecimals = this.decimalsB;
         } else {
-          // デフォルトはAをUSDCとみなす
+          // 両方SUI（理論上ありえないが）ならAをデフォルトに
           this.usdcIsA = true;
           this.usdcDecimals = this.decimalsA;
         }
@@ -217,32 +231,32 @@ export class LpManager {
   async checkBalance(): Promise<{ suiBalance: number; usdcBalance: number; sufficient: boolean }> {
     if (!this.isInitialized) await this.initializePoolData();
     try {
-      // SUI残高
-      const suiBalance = await this.suiClient.getBalance({
+      // Coin A の残高
+      const balanceA = await this.suiClient.getBalance({
         owner: this.walletAddress,
+        coinType: this.coinTypeA
       });
-      const suiAmount = Number(suiBalance.totalBalance) / 1e9;
+      const amountA = Number(balanceA.totalBalance) / Math.pow(10, this.decimalsA);
 
-      // USDC残高
-      let usdcAmount = 0;
-      if (this.isInitialized) {
-        const usdcCoinType = this.usdcIsA ? this.coinTypeA : this.coinTypeB;
-        try {
-          const usdcBalance = await this.suiClient.getBalance({
-            owner: this.walletAddress,
-            coinType: usdcCoinType,
-          });
-          usdcAmount = Number(usdcBalance.totalBalance) / Math.pow(10, this.usdcDecimals);
-        } catch {
-          Logger.warn('USDC残高の取得に失敗');
-        }
-      }
+      // Coin B の残高
+      const balanceB = await this.suiClient.getBalance({
+        owner: this.walletAddress,
+        coinType: this.coinTypeB
+      });
+      const amountB = Number(balanceB.totalBalance) / Math.pow(10, this.decimalsB);
 
-      // 最小運用可能額 (0.1 USDC)
-      const MIN_OPERATIONAL_USDC = 0.1;
-      const sufficient = suiAmount >= 0.01 && usdcAmount >= MIN_OPERATIONAL_USDC;
+      // 便宜上、USDC相当(base)とSUI相当に分ける
+      const usdcAmount = this.usdcIsA ? amountA : amountB;
+      const suiAmount = this.usdcIsA ? amountB : amountA;
 
-      Logger.info(`💰 残高: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)} → ${sufficient ? '✅ 運用可能' : '❌ 資金不足 (0.1 USDC以上必要)'}`);
+      // 最小運用可能額 (0.1 USDC相当)
+      const MIN_OPERATIONAL_BASE = 0.05;
+      const sufficient = suiAmount >= 0.005 && usdcAmount >= MIN_OPERATIONAL_BASE;
+
+      const baseSymbol = this.usdcIsA ? 'CoinA' : 'CoinB';
+      const suiSymbol = this.usdcIsA ? 'CoinB' : 'CoinA';
+
+      Logger.info(`💰 残高: ${baseSymbol}=${usdcAmount.toFixed(4)}, ${suiSymbol}=${suiAmount.toFixed(4)} → ${sufficient ? '✅ 運用可能' : '❌ 資金不足'}`);
 
       return { suiBalance: suiAmount, usdcBalance: usdcAmount, sufficient };
     } catch (e: any) {
@@ -375,6 +389,18 @@ export class LpManager {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
 
+      // 新規作成されたPosition IDを取得
+      if (response.events) {
+        const openEvent = response.events.find(e => e.type.includes('OpenPositionEvent'));
+        if (openEvent) {
+          const posId = (openEvent.parsedJson as any)?.position;
+          if (posId) {
+            this.currentPositionNft = posId;
+            Logger.info(`LpManager: Captured new Position ID: ${posId}`);
+          }
+        }
+      }
+
       // ガス代を記録
       const currentPrice = await this.priceMonitor.getCurrentPrice();
       const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'addLiquidity');
@@ -406,11 +432,12 @@ export class LpManager {
   }
 
   /**
-   * ウォレットが保有する該当プールの全ポジションをブロックチェーンから取得し、すべて強制クローズする
-   * (セッション情報が消失した場合でも確実に資産を回収するための「大掃除」ロジック)
+   * ウォレットが保有する該当プールの全ポジション、または特定のポジションをクローズする
+   * @param specificId 指定した場合、そのIDのポジションのみを閉じる。未指定ならプール内全ポジション。
    */
-  async forceCloseAllPositions(): Promise<void> {
-    Logger.info('--- 既存の迷子ポジションをスキャンして全回収します ---');
+  async forceCloseAllPositions(specificId?: string | null): Promise<void> {
+    const targetInfo = specificId ? `ポジション ${specificId}` : 'すべての迷子ポジション';
+    Logger.info(`--- ${targetInfo} をスキャンして回収します ---`);
     if (!this.isInitialized) await this.initializePoolData();
     
     try {
@@ -418,10 +445,15 @@ export class LpManager {
       const poolId = this.priceMonitor.getPoolId();
       const pool = await sdk.Pool.getPool(poolId);
       
-      const positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
+      let positionList = await sdk.Position.getPositionList(this.walletAddress, [poolId]);
+      
+      // 特定のIDが指定されている場合はフィルタリング
+      if (specificId) {
+        positionList = positionList.filter(pos => pos.pos_object_id === specificId);
+      }
       
       if (positionList.length === 0) {
-        Logger.info('回収すべき既存ポジションは見つかりませんでした。');
+        Logger.info(`回収すべき${targetInfo}は見つかりませんでした。`);
         return;
       }
 
@@ -474,8 +506,9 @@ export class LpManager {
   }
 
   async removeLiquidity(): Promise<{ digest: string; gasCostUsdc: number }> {
-    // 下位互換性のため残すが、実態は forceCloseAllPositions を使用する
-    await this.forceCloseAllPositions();
+    // 自身の管理しているポジションがあればそれを、なければ全チェック
+    await this.forceCloseAllPositions(this.currentPositionNft);
+    this.currentPositionNft = null;
     return { digest: 'forced_check_complete', gasCostUsdc: 0 };
   }
 

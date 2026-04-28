@@ -43,13 +43,13 @@ function App() {
 
 
 
-  // ウォレット接続時にセッション作成
+  // ウォレット接続時にセッション作成・同期
   useEffect(() => {
-    if (currentAccount && !sessionId) {
-      console.log('Detected connected wallet without session. Creating session...');
+    if (currentAccount) {
+      console.log('Wallet connected/changed. Syncing session...');
       createSessionFromWallet();
     }
-  }, [currentAccount, sessionId]); // sessionIdを追加して同期を確実に
+  }, [currentAccount?.address, sessionId, apiUrl]); // サイズを常に3に固定
 
   const createSessionFromWallet = async () => {
     if (!currentAccount) return;
@@ -72,6 +72,18 @@ function App() {
         localStorage.setItem('session_id', data.sessionId);
         localStorage.setItem('wizard_completed', 'true');
         setIsWizardOpen(false);
+
+        // 統計データを即座に取得して表示に反映
+        try {
+          const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${data.sessionId}`);
+          const statsData = await statsRes.json();
+          if (statsData.success) {
+            setStats(statsData.data);
+            setIsBotActive(statsData.data.isRunning);
+          }
+        } catch (err) {
+          console.warn('Initial stats fetch failed');
+        }
       } else {
         alert('セッションの作成に失敗しました: ' + (data.error || 'Unknown error'));
       }
@@ -119,7 +131,6 @@ function App() {
   });
 
   const [bot2, setBot2] = useState<any>(null);
-  const [bot3, setBot3] = useState<any>(null);
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
   const [combinedHistory, setCombinedHistory] = useState<
@@ -208,23 +219,11 @@ function App() {
         // console.warn('Bot2 stats sync failed');
       }
 
-      // === Bot3のステータス取得 ===
-      try {
-        const res3 = await fetch(`${apiUrl}/api/bot3/status`);
-        const data3 = await res3.json();
-        if (data3.success) {
-          setBot3(data3);
-        } else {
-          setBot3({ active: false, message: data3.message || 'Bot3 inactive' });
-        }
-      } catch (e) {
-        // console.warn('Bot3 stats sync failed');
-      }
     };
     fetchStats();
     const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
-  }, [apiUrl, sessionId]);
+  }, [apiUrl, sessionId, currentAccount?.address]); // サイズを常に3に固定
 
   const handleApplyAdvisorRecommendation = async (mode: 'LP_ONLY' | 'DELTA_NEUTRAL') => {
     if (!sessionId) return;
@@ -250,7 +249,7 @@ function App() {
 
       const data = await response.json();
       if (data.success) {
-        alert(`AI Strategy Applied: ${mode}. Bot is rebalancing...`);
+        alert(`AI戦略「${mode === 'LP_ONLY' ? 'LPのみ（ヘッジなし）' : 'デルタニュートラル'}」を適用しました。\n現在、ヘッジの決済とポジションのリセット（再構築）を実行中です。完了まで数十秒お待ちください。`);
         // 最新のステータスを取得
         const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
         const statsData = await statsRes.json();
@@ -368,7 +367,7 @@ function App() {
             </span>
           </h1>
           <p className="header-subtitle">
-            Delta-Neutral Profit Engine • V3.0
+            Autonomous Balanced Strategy • V4.0
             <span style={{ 
                 marginLeft: '12px', 
                 padding: '2px 8px', 
@@ -541,8 +540,6 @@ function App() {
           {/* Bot2 (DEEP/SUI) ステータスパネル */}
           <MultiBotPanel title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`} bot={bot2} />
 
-          {/* Bot3 (Extra) ステータスパネル */}
-          <MultiBotPanel title={`Bot3 — ${bot3?.pool || 'SUI-PERP'}`} bot={bot3} />
 
           {/* 安全ゲートパネル */}
           <SafetyGauge

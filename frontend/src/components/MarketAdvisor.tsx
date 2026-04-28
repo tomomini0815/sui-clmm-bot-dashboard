@@ -131,7 +131,7 @@ const MarketAdvisor: React.FC<MarketAdvisorProps> = ({ advisor, onApply, onApply
 
     const fetchMarketRegime = async () => {
       try {
-        const res = await fetch('http://localhost:3002/api/market-regime');
+        const res = await fetch('http://127.0.0.1:3002/api/market-regime');
         if (!res.ok) throw new Error('Not found');
         const data = await res.json();
         if (data.success) {

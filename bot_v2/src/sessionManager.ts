@@ -68,18 +68,27 @@ export class SessionManager {
         const masterAddress = sessionKeypair.getPublicKey().toSuiAddress();
         Logger.success(`[MASTER KEY] Dedicated Bot Wallet FIXED to: ${masterAddress}`);
         
-        // マスターキー使用時は、入力された sessionId にかかわらず、アドレスベースの固定IDを使用する
         const masterSessionId = `master-${masterAddress.slice(0, 8)}`;
         
+        Logger.info(`[DEBUG] masterAddress: ${masterAddress}`);
+        Logger.info(`[DEBUG] connecting walletAddress: ${walletAddress}`);
+        
+        // セッションIDが「default」であるか、接続ウォレットがマスターアドレスと一致する場合、マスターセッションとして扱う
+        const isDefaultMaster = (sessionId === masterSessionId || sessionId === 'default' || walletAddress === masterAddress);
+        
+        Logger.info(`[DEBUG] isDefaultMaster: ${isDefaultMaster} (ID match: ${sessionId === masterSessionId}, default: ${sessionId === 'default'}, wallet match: ${walletAddress === masterAddress})`);
+        
         // メモリ上に既存のセッションがあればそれを返す
-        const existingMasterSession = this.sessions.get(masterSessionId) || Array.from(this.sessions.values()).find(s => s.botWalletAddress === masterAddress);
-        if (existingMasterSession) {
-          Logger.info(`[SINGLETON] Reusing existing session [${existingMasterSession.sessionId}] for master wallet: ${masterAddress}`);
-          return existingMasterSession;
+        // ただし、明示的に異なるセッションID（bot2など）が指定されている場合は、シングルトンをバイパスして新規作成を許可する
+        const existingSession = Array.from(this.sessions.values()).find(s => s.sessionId === masterSessionId || s.walletAddress === masterAddress);
+        
+        if (existingSession && isDefaultMaster) {
+          Logger.info(`[SINGLETON] Reusing existing master session [${existingSession.sessionId}] for wallet: ${masterAddress}`);
+          return existingSession;
         }
 
-        // ここで sessionId をマスター用のものに上書き
-        sessionId = masterSessionId;
+        // ここで sessionId をマスター用のものに上書き（マスター判定時のみ）
+        if (isDefaultMaster) sessionId = masterSessionId;
       } catch (e: any) {
         Logger.error(`Failed to load MASTER PRIVATE_KEY from .env: ${e.message}`);
       }
@@ -186,6 +195,7 @@ export class SessionManager {
       pnlEngine,
       tracker,
       sessionConfig,
+      targetSessionId, // sessionIdを明示的に渡す
       () => SessionManager.saveSessionState(targetSessionId)
     );
 
@@ -195,11 +205,13 @@ export class SessionManager {
     // 保存された状態があれば復元
     const savedState = this.loadSessionState({ sessionId: targetSessionId, pnlEngine, gasTracker, hedgeManager, tracker, strategy });
     
-    // 保存された設定がある場合、戦略的に重要な設定（運用額など）を .env から最新化する
+    // 保存された状態がある場合、まず保存された設定をベースにする
     if (savedState && savedState.config) {
+      Object.assign(sessionConfig, savedState.config);
+      
+      // その上で、運用額などの動的に変更したい項目のみ .env から最新化する
       sessionConfig.lpAmountUsdc = globalConfig.lpAmountUsdc;
       sessionConfig.totalOperationalCapitalUsdc = globalConfig.totalOperationalCapitalUsdc;
-      sessionConfig.hedgeMode = globalConfig.hedgeMode;
       sessionConfig.rpcUrl = globalConfig.rpcUrl;
       
       // コンポーネントに反映
@@ -207,7 +219,7 @@ export class SessionManager {
       lpManager.refreshConfig(sessionConfig);
       strategy.refreshConfig(sessionConfig);
       
-      Logger.info(`Session [${targetSessionId}] config synced with latest .env values.`);
+      Logger.info(`Session [${targetSessionId}] config restored and synced with key .env values.`);
     }
     
     // ウォレット接続モード（デモ/読み取り専用）
@@ -244,6 +256,29 @@ export class SessionManager {
     this.saveSessionState(targetSessionId);
 
     return session;
+  }
+
+  /**
+   * ウォレットアドレスに基づいて既存のセッションIDを検索
+   */
+  static findSessionIdByWalletAddress(walletAddress: string): string | null {
+    try {
+      const files = fs.readdirSync(process.cwd());
+      const sessionFiles = files.filter(f => f.startsWith('session_state_') && f.endsWith('.json'));
+
+      for (const file of sessionFiles) {
+        try {
+          const content = fs.readFileSync(path.join(process.cwd(), file), 'utf-8');
+          const state = JSON.parse(content);
+          if (state.walletAddress === walletAddress) {
+            return file.replace('session_state_', '').replace('.json', '');
+          }
+        } catch (e) {}
+      }
+    } catch (e) {
+      Logger.error('Failed to scan session files for wallet address', e);
+    }
+    return null;
   }
 
   /**
@@ -311,6 +346,7 @@ export class SessionManager {
     walletAddress: string;
     isRunning: boolean;
     createdAt: number;
+    lpAmountUsdc: number;
   }> {
     const stats = [];
     for (const [sessionId, session] of this.sessions.entries()) {
@@ -318,10 +354,38 @@ export class SessionManager {
         sessionId,
         walletAddress: session.walletAddress,
         isRunning: session.strategy.isRunning,
-        createdAt: session.createdAt
+        createdAt: session.createdAt,
+        lpAmountUsdc: session.config.lpAmountUsdc
       });
     }
     return stats;
+  }
+
+  /**
+   * 指定したセッション以外で使用されている総資金を計算
+   */
+  static getCommittedCapital(excludeSessionId: string): number {
+    let total = 0;
+    for (const [sid, session] of this.sessions.entries()) {
+      if (sid !== excludeSessionId && session.strategy.isRunning) {
+        // 設定されたLP運用額を「コミット済み」とみなす
+        total += session.config.lpAmountUsdc;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * 全アクティブセッションの合計希望運用額を計算
+   */
+  static getTotalDesiredCapital(): number {
+    let total = 0;
+    for (const session of this.sessions.values()) {
+      if (session.strategy.isRunning) {
+        total += session.config.lpAmountUsdc;
+      }
+    }
+    return total;
   }
 
   /**
@@ -373,6 +437,7 @@ export class SessionManager {
         strategy: session.strategy.serialize(), // 戦略状態を追加
         botSecretKey: session.keypair.getSecretKey(),
         mnemonic: session.mnemonic,
+        walletAddress: session.walletAddress, // ウォレットアドレスを保存
         config: session.config,
         isRunning: session.strategy.isRunning,
         updatedAt: Date.now()
@@ -380,7 +445,7 @@ export class SessionManager {
       
       const filePath = path.resolve(process.cwd(), `session_state_${sessionId}.json`);
       fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
-      Logger.info(`Session state saved (including secret key): ${sessionId}`);
+      Logger.info(`Session state saved (including secret key and wallet address): ${sessionId}`);
     } catch (e) {
       Logger.error(`Failed to save session state: ${sessionId}`, e);
     }

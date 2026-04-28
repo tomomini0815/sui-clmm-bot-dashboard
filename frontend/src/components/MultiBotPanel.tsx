@@ -31,6 +31,8 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
     ? ((bot2.currentRange.upper - bot2.currentRange.lower) / bot2.currentPrice * 100).toFixed(2)
     : '—';
 
+  const quoteToken = bot2?.pool?.split('/')[1] || 'SUI';
+
   const inRange = bot2?.currentPrice && bot2?.currentRange
     ? bot2.currentPrice >= bot2.currentRange.lower && bot2.currentPrice <= bot2.currentRange.upper
     : null;
@@ -67,7 +69,7 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
           <div className="bot2-price-section">
             <div className="bot2-price-row">
               <span className="bot2-label">現在価格</span>
-              <span className="bot2-value">{bot2?.currentPrice?.toFixed(6) ?? '—'} SUI</span>
+              <span className="bot2-value">{bot2?.currentPrice?.toFixed(6) ?? '—'} {quoteToken}</span>
             </div>
             {bot2?.currentRange && (
               <>
@@ -121,7 +123,7 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
             <div className="bot2-stat">
               <Zap size={13} className="bot2-stat-icon" />
               <span className="bot2-stat-label">最大資金</span>
-              <span className="bot2-stat-val">${bot2?.maxCapitalUsdc ?? 3} USDC</span>
+              <span className="bot2-stat-val">${bot2?.maxCapitalUsdc ?? 3} USD</span>
             </div>
           </div>
 

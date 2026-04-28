@@ -96,7 +96,7 @@ function loadConfig(): BotConfig {
     telegramChatId: TELEGRAM_CHAT_ID,
     lpAmountUsdc: parseFloat(LP_AMOUNT_USDC || '0.10'),
     hedgeRatio: parseFloat(HEDGE_RATIO || '0.5'),
-    rangeWidth: parseFloat(RANGE_WIDTH || '0.05'),
+    rangeWidth: parseFloat(RANGE_WIDTH || '0.02'),
     monitorIntervalMs: parseInt(MONITOR_INTERVAL_MS || '30000', 10),
     cooldownPeriodMs: parseInt(COOLDOWN_PERIOD_MS || '300000', 10),
     apiPort: parseInt(process.env.PORT || '3002', 10),
@@ -113,7 +113,7 @@ function loadConfig(): BotConfig {
     configMode: (CONFIG_MODE as 'auto' | 'manual') || 'auto',
     backupPassword: BACKUP_PASSWORD || 'change_me',
     totalOperationalCapitalUsdc: parseFloat(TOTAL_OPERATIONAL_CAPITAL_USDC || '200'),
-
+ 
     // 戦略設定
     strategyMode: (STRATEGY_MODE as 'balanced' | 'range_order') || 'balanced',
     rangeOrderSide: (RANGE_ORDER_SIDE as 'above' | 'below') || 'above',

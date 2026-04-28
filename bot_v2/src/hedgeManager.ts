@@ -30,7 +30,8 @@ export class HedgeManager {
   private readonly SIMULATED_FUNDING_RATE_8H = 0.0001;
   private cachedFundingRate: number = 0;
   private lastFundingRateFetch: number = 0;
-  private readonly FUNDING_CACHE_MS = 60 * 1000;
+  private keypair: Ed25519Keypair | null = null;
+
 
   constructor(mode: 'simulate' | 'bluefin' = 'simulate') {
     this.mode = mode;
@@ -46,11 +47,18 @@ export class HedgeManager {
   }
 
   getMode() { return this.mode; }
+  setMode(mode: 'simulate' | 'bluefin') {
+    if (this.mode !== mode) {
+      Logger.info(`HedgeManager: Switching mode ${this.mode} -> ${mode}`);
+      this.mode = mode;
+    }
+  }
   isReady() { return this.mode === 'simulate' || (this.mode === 'bluefin' && this.isInitialized); }
 
   async setupBluefin(keypair: Ed25519Keypair, rpcUrl: string, network: 'mainnet' | 'testnet' = 'mainnet') {
     if (this.mode === 'simulate') return;
     try {
+      this.keypair = keypair;
       Logger.info(`Bluefin: Initializing for ${network}...`);
       const signer = new BluefinRequestSigner(makeSigner(keypair as any, false));
       const suiClient = new SuiClient({ url: rpcUrl });
@@ -179,18 +187,17 @@ export class HedgeManager {
       if (coinsRes.data.length > 1) {
         Logger.info(`Bluefin: Fragmented coins detected (${coinsRes.data.length}). Merging before deposit...`);
         const tx = new Transaction();
-        const coinIds = coinsRes.data.map(c => c.coinObjectId);
+        const coinIds = coinsRes.data.map((c: any) => c.coinObjectId);
         const primaryCoin = coinIds[0];
         const otherCoins = coinIds.slice(1);
         
-        tx.mergeCoins(tx.object(primaryCoin), otherCoins.map(id => tx.object(id)));
+        tx.mergeCoins(tx.object(primaryCoin), otherCoins.map((id: any) => tx.object(id)));
         
-        const signer = (this.bluefinClient as any).signer;
-        const keypair = signer.keypair;
+        if (!this.keypair) throw new Error('Keypair not set');
         
         const result = await suiClient.signAndExecuteTransaction({
           transaction: tx,
-          signer: keypair,
+          signer: this.keypair,
         });
         await suiClient.waitForTransaction({ digest: result.digest });
         Logger.info(`Bluefin: Coins merged. Digest: ${result.digest}`);
@@ -208,10 +215,10 @@ export class HedgeManager {
         
         // 全ての USDC コインを取得してプライマリにマージ
         const coinsRes = await suiClient.getCoins({ owner: this.currentAddress, coinType });
-        const coinIds = coinsRes.data.map(c => c.coinObjectId);
+        const coinIds = coinsRes.data.map((c: any) => c.coinObjectId);
         const primaryCoinId = coinIds[0];
         if (coinIds.length > 1) {
-          tx.mergeCoins(tx.object(primaryCoinId), coinIds.slice(1).map(id => tx.object(id)));
+          tx.mergeCoins(tx.object(primaryCoinId), coinIds.slice(1).map((id: any) => tx.object(id)));
         }
         
         // 入金額分をスプリット
@@ -234,13 +241,12 @@ export class HedgeManager {
         // 残ったコインを自分に送る（SplitCoinsのResultと元のPrimary）
         tx.transferObjects([splitCoin], tx.pure.address(this.currentAddress));
 
-        const signer = (this.bluefinClient as any).signer;
-        const keypair = signer.keypair;
+        if (!this.keypair) throw new Error('Keypair not set');
         
         Logger.info(`Bluefin: Executing manual PTB deposit ($${needed.toFixed(2)})...`);
         const result = await suiClient.signAndExecuteTransaction({
           transaction: tx,
-          signer: keypair,
+          signer: this.keypair,
         });
         
         await suiClient.waitForTransaction({ digest: result.digest });
@@ -347,24 +353,51 @@ export class HedgeManager {
     return { digest: (response as any).hash || 'success', gasCostUsdc: 0 };
   }
 
-  async closeHedge(currentPrice: number, sessionId?: string): Promise<{ pnl: number, digest: string }> {
+  async closeHedge(currentPrice: number, sessionId?: string, force: boolean = false): Promise<{ pnl: number, digest: string }> {
     if (sessionId) this.sessionTargets.set(sessionId, 0);
+    
+    // 強制モードまたは通常同期
     await this.syncPositionWithBluefin().catch(() => {});
-    if (!this.hasPosition) return { pnl: 0, digest: '' };
+    
+    if (!this.hasPosition && !force) {
+      Logger.info('HedgeManager: No position detected to close.');
+      return { pnl: 0, digest: '' };
+    }
+
     const pnl = this.calculateCurrentPnl(currentPrice);
-    if (this.mode === 'bluefin' && this.bluefinClient) {
+
+    // force=true の場合、または現在のモードが bluefin の場合は取引所を確認する
+    if ((this.mode === 'bluefin' || force) && this.bluefinClient) {
       try {
+        Logger.info(`HedgeManager: Fetching account details for final cleanup (Mode=${this.mode}, Force=${force})...`);
         const detailsRes = await this.bluefinClient.accountDataApi.getAccountDetails(undefined, this.getAuthHeaders());
-        const suiPos = ((detailsRes as any).data || detailsRes).positions.find((p: any) => String(p.symbol).toUpperCase().includes('SUI'));
+        const details = (detailsRes as any).data || detailsRes;
+        const suiPos = details.positions.find((p: any) => String(p.symbol).toUpperCase().includes('SUI'));
+        
         if (suiPos && suiPos.sizeE9 !== '0') {
+          const size = this.safeBN(suiPos.sizeE9).dividedBy(1e9).toNumber();
+          Logger.info(`HedgeManager: Found open SUI position on exchange: ${size} SUI. Executing Market Close...`);
+          
           const response = await this.bluefinClient.createOrder({
-            symbol: suiPos.symbol, side: this.safeBN(suiPos.sizeE9).isNegative() ? OrderSide.Long : OrderSide.Short,
-            type: OrderType.Market, quantityE9: this.safeBN(suiPos.sizeE9).abs().toString(), priceE9: '0',
-            leverageE9: suiPos.leverageE9, isIsolated: true, reduceOnly: true,
-            expiresAtMillis: Date.now() + 600000, clientOrderId: 'close_' + Date.now().toString(),
+            symbol: suiPos.symbol, 
+            side: this.safeBN(suiPos.sizeE9).isNegative() ? OrderSide.Long : OrderSide.Short,
+            type: OrderType.Market, 
+            quantityE9: this.safeBN(suiPos.sizeE9).abs().toString(), 
+            priceE9: '0',
+            leverageE9: suiPos.leverageE9, 
+            isIsolated: true, 
+            reduceOnly: true,
+            expiresAtMillis: Date.now() + 600000, 
+            clientOrderId: 'close_' + Date.now().toString(),
           });
-          this.hasPosition = false; this.currentAmount = 0; this.hedgeDirection = 'NONE';
+          
+          this.hasPosition = false; 
+          this.currentAmount = 0; 
+          this.hedgeDirection = 'NONE';
+          Logger.success(`HedgeManager: Market Close order executed. Hash: ${(response as any).hash || 'success'}`);
           return { pnl, digest: (response as any).hash || 'success' };
+        } else {
+          Logger.info('HedgeManager: No SUI position found on Bluefin to close.');
         }
       } catch (e: any) {
         Logger.error(`Bluefin closeHedge failed: ${e.message}`);
@@ -374,12 +407,16 @@ export class HedgeManager {
           this.currentAmount = 0;
           this.hedgeDirection = 'NONE';
         }
-        throw e;
+        if (!force) throw e;
       }
     }
-    this.hasPosition = false; this.currentAmount = 0; this.hedgeDirection = 'NONE';
+    
+    // シミュレーションまたは強制リセット
+    this.hasPosition = false; 
+    this.currentAmount = 0; 
+    this.hedgeDirection = 'NONE';
     this.cumulativePnl += pnl;
-    return { pnl, digest: 'simulated' };
+    return { pnl, digest: this.mode === 'bluefin' ? 'cleanup_done' : 'simulated' };
   }
 
   calculateCurrentPnl(currentPrice: number): number {
