@@ -679,6 +679,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
             <Save size={20} /> {isSaving ? '保存中...' : '設定を保存して接続'}
           </button>
         </div>
+
+
       </div>
     </div>
   );

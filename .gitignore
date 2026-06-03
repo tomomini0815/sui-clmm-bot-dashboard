@@ -52,3 +52,7 @@ bot_v2/logs/
 bot_v2/config/
 bot_v2/scripts/
 logs/
+bot_v2/backend.log
+bot_v2/backup_sessions/
+bot_v2/state/
+

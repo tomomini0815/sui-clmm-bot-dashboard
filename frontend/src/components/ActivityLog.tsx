@@ -38,7 +38,7 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
 
     const totalRebalances = rebalances.length;
     const totalFeesCollected = fees;
-    const successRate = totalRebalances > 0 ? (successful.length / totalRebalances * 100).toFixed(1) : '0';
+    const successRate = totalRebalances > 0 ? (successful.length / totalRebalances * 100).toFixed(1) : '-';
 
     return { totalRebalances, totalFeesCollected, successRate };
   }, [logs]);
@@ -49,7 +49,7 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
       flexDirection: 'column',
       gap: '18px',
       flex: 1,
-      minHeight: 0
+      minHeight: logs.length > 0 ? '0' : '404px'
     }}>
       <div style={{ 
         display: 'flex', 
@@ -80,53 +80,57 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
           )}
         </h2>
         
-        {/* 統計情報バッジ */}
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <div style={{
-            background: 'rgba(88, 166, 255, 0.1)',
-            padding: '6px 12px',
-            borderRadius: '8px',
-            border: '1px solid rgba(88, 166, 255, 0.2)',
-            fontSize: '0.8rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px'
-          }}>
-            <ArrowRightLeft size={14} color="var(--accent)" />
-            <span style={{ color: 'var(--text-muted)' }}>リバランス: </span>
-            <strong style={{ color: 'var(--accent)' }}>{stats.totalRebalances}回</strong>
+        {/* 統計情報バッジ - ログがある場合のみ表示 */}
+        {logs.length > 0 && (
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <div style={{
+              background: 'rgba(88, 166, 255, 0.1)',
+              padding: '6px 12px',
+              borderRadius: '8px',
+              border: '1px solid rgba(88, 166, 255, 0.2)',
+              fontSize: '0.8rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}>
+              <ArrowRightLeft size={14} color="var(--accent)" />
+              <span style={{ color: 'var(--text-muted)' }}>リバランス: </span>
+              <strong style={{ color: 'var(--accent)' }}>{stats.totalRebalances}回</strong>
+            </div>
+            <div style={{
+              background: 'rgba(63, 185, 80, 0.1)',
+              padding: '6px 12px',
+              borderRadius: '8px',
+              border: '1px solid rgba(63, 185, 80, 0.2)',
+              fontSize: '0.8rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}>
+              <DollarSign size={14} color="var(--success)" />
+              <span style={{ color: 'var(--text-muted)' }}>手数料合計: </span>
+              <strong style={{ color: 'var(--success)' }}>{stats.totalFeesCollected.toFixed(4)} USDC</strong>
+            </div>
+            {stats.successRate !== '-' && (
+              <div style={{
+                background: parseFloat(stats.successRate) >= 80 ? 'rgba(63, 185, 80, 0.1)' : 'rgba(210, 153, 34, 0.1)',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                border: parseFloat(stats.successRate) >= 80 ? '1px solid rgba(63, 185, 80, 0.2)' : '1px solid rgba(210, 153, 34, 0.2)',
+                fontSize: '0.8rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}>
+                <TrendingUp size={14} color={parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'} />
+                <span style={{ color: 'var(--text-muted)' }}>成功率: </span>
+                <strong style={{ 
+                  color: parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'
+                }}>{stats.successRate}%</strong>
+              </div>
+            )}
           </div>
-          <div style={{
-            background: 'rgba(63, 185, 80, 0.1)',
-            padding: '6px 12px',
-            borderRadius: '8px',
-            border: '1px solid rgba(63, 185, 80, 0.2)',
-            fontSize: '0.8rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px'
-          }}>
-            <DollarSign size={14} color="var(--success)" />
-            <span style={{ color: 'var(--text-muted)' }}>手数料合計: </span>
-            <strong style={{ color: 'var(--success)' }}>{stats.totalFeesCollected.toFixed(4)} USDC</strong>
-          </div>
-          <div style={{
-            background: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'rgba(63, 185, 80, 0.1)' : 'rgba(210, 153, 34, 0.1)',
-            padding: '6px 12px',
-            borderRadius: '8px',
-            border: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? '1px solid rgba(63, 185, 80, 0.2)' : '1px solid rgba(210, 153, 34, 0.2)',
-            fontSize: '0.8rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px'
-          }}>
-            <TrendingUp size={14} color={stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'} />
-            <span style={{ color: 'var(--text-muted)' }}>成功率: </span>
-            <strong style={{ 
-              color: stats.totalRebalances > 0 && parseFloat(stats.successRate) >= 80 ? 'var(--success)' : 'var(--warning)'
-            }}>{stats.successRate}%</strong>
-          </div>
-        </div>
+        )}
       </div>
       
       <div className="activity-log-table-wrapper" style={{ 
@@ -135,41 +139,42 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
         position: 'relative', 
         flex: 1, 
         height: 0,
-        minHeight: '200px'
+        minHeight: logs.length > 0 ? '200px' : '150px'
       }}>
-        <table className="log-table" style={{ minWidth: '850px' }}>
-          <thead>
-            <tr>
-              <th style={{ width: '90px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Clock size={14} />
-                  時刻
-                </div>
-              </th>
-              <th style={{ width: '150px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Activity size={14} />
-                  アクション
-                </div>
-              </th>
-              <th style={{ width: '110px' }}>実行価格</th>
-              <th style={{ width: '160px' }}>設定レンジ</th>
-              <th style={{ width: '100px' }}>手数料</th>
-              <th style={{ minWidth: '150px' }}>詳細</th>
-              <th style={{ 
-                width: '110px', 
-                textAlign: 'right', 
-                position: 'sticky', 
-                right: 0, 
-                top: 0,
-                background: 'var(--bg-panel)',
-                zIndex: 20,
-                boxShadow: '-10px 0 10px -5px rgba(0,0,0,0.3)'
-              }}>ステータス</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(logs && logs.length > 0) ? logs.map((log, idx) => {
+        {logs.length > 0 ? (
+          <table className="log-table" style={{ minWidth: '850px' }}>
+            <thead>
+              <tr>
+                <th style={{ width: '90px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Clock size={14} />
+                    時刻
+                  </div>
+                </th>
+                <th style={{ width: '150px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Activity size={14} />
+                    アクション
+                  </div>
+                </th>
+                <th style={{ width: '110px' }}>実行価格</th>
+                <th style={{ width: '160px' }}>設定レンジ</th>
+                <th style={{ width: '100px' }}>手数料</th>
+                <th style={{ minWidth: '150px' }}>詳細</th>
+                <th style={{ 
+                  width: '110px', 
+                  textAlign: 'right', 
+                  position: 'sticky', 
+                  right: 0, 
+                  top: 0,
+                  background: 'var(--bg-panel)',
+                  zIndex: 20,
+                  boxShadow: '-10px 0 10px -5px rgba(0,0,0,0.3)'
+                }}>ステータス</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((log, idx) => {
               // アクション別アイコンと色
               const getActionStyle = (action: string) => {
                 if (action.includes('リバランス') && !action.includes('失敗')) {
@@ -353,32 +358,65 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
                   </td>
                 </tr>
               );
-            }) : (
-              <tr>
-                <td colSpan={7} style={{ 
-                  textAlign: 'center', 
-                  color: 'var(--text-muted)', 
-                  padding: '40px 24px'
-                }}>
-                  <div style={{ 
-                    display: 'flex', 
-                    flexDirection: 'column', 
-                    alignItems: 'center', 
-                    gap: '10px' 
-                  }}>
-                    <BarChart3 size={40} color="var(--text-muted)" opacity={0.3} />
-                    <p style={{ fontSize: '0.9rem' }}>
-                      まだ実行履歴がありません
-                    </p>
-                    <p style={{ fontSize: '0.825rem', opacity: 0.7 }}>
-                      Botを起動すると、ここに自動で記録されます
-                    </p>
-                  </div>
-                </td>
-              </tr>
-            )}
+            })}
           </tbody>
         </table>
+      ) : (
+        <div style={{ 
+          height: '100%',
+          display: 'flex', 
+          flexDirection: 'column', 
+          alignItems: 'center', 
+          justifyContent: 'center',
+          gap: '16px',
+          padding: '40px',
+          background: 'rgba(255, 255, 255, 0.02)',
+          borderRadius: '12px',
+          border: '1px dashed rgba(255, 255, 255, 0.1)'
+        }}>
+          <div style={{
+            width: '60px',
+            height: '60px',
+            borderRadius: '30px',
+            background: 'rgba(88, 166, 255, 0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginBottom: '8px'
+          }}>
+            <BarChart3 size={32} color="var(--text-muted)" opacity={0.5} />
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <p style={{ 
+              fontSize: '1rem', 
+              fontWeight: 600, 
+              color: 'var(--text-main)',
+              marginBottom: '4px'
+            }}>
+              実行履歴はまだありません
+            </p>
+            <p style={{ 
+              fontSize: '0.85rem', 
+              color: 'var(--text-muted)',
+              maxWidth: '300px',
+              lineHeight: 1.5
+            }}>
+              Botが稼働を開始すると、ここに自動リバランスや手数料回収のログがリアルタイムに表示されます。
+            </p>
+          </div>
+          <div style={{
+            fontSize: '0.75rem',
+            color: 'var(--accent)',
+            background: 'rgba(88, 166, 255, 0.1)',
+            padding: '4px 12px',
+            borderRadius: '20px',
+            border: '1px solid rgba(88, 166, 255, 0.2)',
+            marginTop: '8px'
+          }}>
+            監視モード待機中...
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

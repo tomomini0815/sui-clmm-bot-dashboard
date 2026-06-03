@@ -29,6 +29,30 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
           </button>
         </div>
 
+        <div style={{ 
+          background: 'rgba(88, 166, 255, 0.05)', 
+          padding: '16px', 
+          borderRadius: '12px', 
+          border: '1px solid rgba(88, 166, 255, 0.15)',
+          marginBottom: '20px',
+          fontSize: '0.85rem',
+          lineHeight: 1.5
+        }}>
+          <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--accent)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Wallet size={16} /> 2つのウォレットの仕組み
+          </h3>
+          <p style={{ margin: 0, color: 'var(--text-main)' }}>
+            このボットは、あなたの<strong>「個人ウォレット」</strong>（ログイン用）と、ボットが自動取引を行うための<strong>「専用運用ウォレット」</strong>を分けて管理します。
+          </p>
+          <ul style={{ margin: '8px 0 0 20px', padding: 0, color: 'var(--text-muted)' }}>
+            <li><strong>個人ウォレット:</strong> ダッシュボードへのログインと、運用資金の送金元として使用します。</li>
+            <li><strong>専用運用ウォレット:</strong> ボットが24時間体制でリバランスを行うための専用口座です。このアドレスに送金した資金のみが運用に使用されます。</li>
+          </ul>
+          <p style={{ margin: '8px 0 0 0', fontSize: '0.8rem', fontStyle: 'italic', color: 'var(--text-muted)' }}>
+            ※セキュリティのため、ボットが直接あなたのメインウォレットを操作することはありません。
+          </p>
+        </div>
+
         {/* Network Tabs */}
         <div style={{
           display: 'flex',

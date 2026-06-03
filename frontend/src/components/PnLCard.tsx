@@ -27,10 +27,17 @@ interface PnLCardProps {
 // NOTE: React.memo を外してある — pnl オブジェクトの参照が変わらなくても
 // 毎ポーリングで確実に再レンダリングするため
 export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
-  // pnl が null の場合はゼロフィルでフォールバック（ボット待機中の表示を維持しつつ更新に備える）
-  const safePnl: PnlData = pnl ?? {
-    lpPnl: 0, hedgePnl: 0, fees: 0, gasCost: 0,
-    fundingCost: 0, netPnl: 0, apr: 0, dailyPnl: 0, elapsedHours: 0
+  // pnl が null の場合や、プロパティが欠落している（undefined）場合でも安全にフォールバックさせる
+  const safePnl: PnlData = {
+    lpPnl: pnl?.lpPnl ?? 0,
+    hedgePnl: pnl?.hedgePnl ?? 0,
+    fees: pnl?.fees ?? (pnl as any)?.feesCollected ?? 0,
+    gasCost: pnl?.gasCost ?? (pnl as any)?.gasSpent ?? 0,
+    fundingCost: pnl?.fundingCost ?? (pnl as any)?.fundingFee ?? 0,
+    netPnl: pnl?.netPnl ?? 0,
+    apr: pnl?.apr ?? 0,
+    dailyPnl: pnl?.dailyPnl ?? 0,
+    elapsedHours: pnl?.elapsedHours ?? (pnl as any)?.runtimeHours ?? 0,
   };
   const hasData = pnl !== null;
   if (!hasData) {

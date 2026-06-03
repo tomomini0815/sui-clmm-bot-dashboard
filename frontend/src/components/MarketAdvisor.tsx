@@ -5,13 +5,18 @@ import {
   TrendingDown, 
   Zap, 
   ShieldCheck, 
-  AlertTriangle,
   Cpu,
   BarChart3,
   Layers,
   ArrowRight
 } from 'lucide-react';
 import './MarketAdvisor.css';
+
+declare global {
+  interface Window {
+    TradingView?: any;
+  }
+}
 
 interface MarketData {
   price: number;
@@ -25,7 +30,6 @@ interface MarketData {
 
 interface MarketAdvisorProps {
   advisor?: any;
-  onApply?: (recommendation: any) => void;
   onApplyStrategy?: (mode: 'LP_ONLY' | 'DELTA_NEUTRAL') => void;
 }
 
@@ -117,7 +121,7 @@ const TradingViewWidget: React.FC = () => {
   );
 };
 
-const MarketAdvisor: React.FC<MarketAdvisorProps> = ({ advisor, onApply, onApplyStrategy }) => {
+const MarketAdvisor: React.FC<MarketAdvisorProps> = ({ advisor, onApplyStrategy }) => {
   const [marketData, setMarketData] = useState<MarketData | null>(null);
   const [loading, setLoading] = useState(!advisor);
   const [activeTab, setActiveTab] = useState<'analysis' | 'strategy'>('analysis');
@@ -131,7 +135,7 @@ const MarketAdvisor: React.FC<MarketAdvisorProps> = ({ advisor, onApply, onApply
 
     const fetchMarketRegime = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:3002/api/market-regime');
+        const res = await fetch('http://localhost:3002/api/market-regime');
         if (!res.ok) throw new Error('Not found');
         const data = await res.json();
         if (data.success) {

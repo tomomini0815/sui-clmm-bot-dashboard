@@ -166,7 +166,7 @@ export class Tracker {
         txDigest,
         details: `手数料回収: +${feeCollected.toFixed(4)} USDC`
       });
-      if (this.data.history.length > 200) {
+      if (this.data.history.length > 1000) {
         this.data.history.shift();
       }
       await this.save();
@@ -185,7 +185,7 @@ export class Tracker {
       txDigest,
       details
     });
-    if (this.data.history.length > 200) {
+    if (this.data.history.length > 1000) {
       this.data.history.shift();
     }
     await this.save();
@@ -201,7 +201,7 @@ export class Tracker {
       txDigest,
       details: `${details} (Size: ${size.toFixed(4)} SUI)`
     });
-    if (this.data.history.length > 200) {
+    if (this.data.history.length > 1000) {
       this.data.history.shift();
     }
     await this.save();
@@ -228,9 +228,53 @@ export class Tracker {
     this.data.currentPrice = price;
   }
 
-  setConfig(config: { totalOperationalCapitalUsdc?: number; lpAmountUsdc?: number }) {
-    this.data.positionSize = config.totalOperationalCapitalUsdc || config.lpAmountUsdc || 0;
+  /**
+   * 他の履歴データを統合する
+   */
+  async mergeHistory(otherHistory: any[]) {
+    if (!otherHistory || otherHistory.length === 0) return;
+    
+    // 重複を排除しつつ結合 (timestamp と action をキーにする)
+    const combined = [...this.data.history, ...otherHistory];
+    const unique = Array.from(new Map(combined.map(h => [`${h.timestamp}_${h.action}`, h])).values());
+    
+    // 時間順にソート
+    unique.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    
+    // 最新1000件を保持
+    this.data.history = unique.slice(-1000);
+    await this.save();
   }
+
+  /**
+   * 統計データと残高履歴を統合する
+   */
+  async mergeData(otherData: TrackerData) {
+    if (!otherData) return;
+
+    // 統計の単純加算 (再起動等で重複する可能性があるが、セッションIDが別なら加算)
+    this.data.rebalanceCount += (otherData.rebalanceCount || 0);
+    this.data.successfulRebalances += (otherData.successfulRebalances || 0);
+    this.data.totalFeesEarned += (otherData.totalFeesEarned || 0);
+    this.data.pnlTotal += (otherData.pnlTotal || 0);
+
+    // 残高履歴の統合
+    if (otherData.balanceHistory && otherData.balanceHistory.length > 0) {
+      const combined = [...this.data.balanceHistory, ...otherData.balanceHistory];
+      // 10分以内の重複は排除
+      const unique = combined.filter((item, index, self) =>
+        index === self.findIndex((t) => 
+          Math.abs(new Date(t.timestamp).getTime() - new Date(item.timestamp).getTime()) < 5 * 60 * 1000
+        )
+      );
+      unique.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      this.data.balanceHistory = unique.slice(-500); // 最大500点保持
+    }
+
+    await this.save();
+  }
+
+
 
   getStats() {
     const priceChange = this.data.entryPrice > 0 

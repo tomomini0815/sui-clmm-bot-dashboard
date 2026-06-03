@@ -2,9 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Strategy } from './strategy.js';
-import { PriceMonitor } from './priceMonitor.js';
-import { LpManager } from './lpManager.js';
-import { HedgeManager } from './hedgeManager.js';
+import { PriceMonitor } from './modules/priceMonitor.js';
+import { LpManager } from './modules/lpManager.js';
+import { HedgeManager } from './modules/hedgeManager.js';
 import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
 import { Tracker } from './tracker.js';
@@ -49,9 +49,10 @@ export class SessionManager {
    * @param mnemonic シードフレーズ（オプション - 復元用）
    * @param privateKey 秘密鍵（オプション - ウォレット接続モードでは不要）
    * @param walletAddress ユーザーの接続ウォレットアドレス（オプション）
+   * @param poolObjectId 運用対象のプールID（オプション）
    */
-  static async createSession(sessionId: string, mnemonic: string | null = null, privateKey: string | null = null, walletAddress: string | null = null): Promise<UserSession> {
-    Logger.success(`Creating/Restoring session: ${sessionId}`);
+  static async createSession(sessionId: string, mnemonic: string | null = null, privateKey: string | null = null, walletAddress: string | null = null, poolObjectId: string | null = null): Promise<UserSession> {
+    Logger.success(`Creating/Restoring session: ${sessionId} (Pool: ${poolObjectId || 'default'})`);
 
     // セッション専用のキーペアを準備
     let sessionKeypair: Ed25519Keypair | null = null;
@@ -68,27 +69,18 @@ export class SessionManager {
         const masterAddress = sessionKeypair.getPublicKey().toSuiAddress();
         Logger.success(`[MASTER KEY] Dedicated Bot Wallet FIXED to: ${masterAddress}`);
         
+        // マスターキー使用時は、入力された sessionId にかかわらず、アドレスベースの固定IDを使用する
         const masterSessionId = `master-${masterAddress.slice(0, 8)}`;
         
-        Logger.info(`[DEBUG] masterAddress: ${masterAddress}`);
-        Logger.info(`[DEBUG] connecting walletAddress: ${walletAddress}`);
-        
-        // セッションIDが「default」であるか、接続ウォレットがマスターアドレスと一致する場合、マスターセッションとして扱う
-        const isDefaultMaster = (sessionId === masterSessionId || sessionId === 'default' || walletAddress === masterAddress);
-        
-        Logger.info(`[DEBUG] isDefaultMaster: ${isDefaultMaster} (ID match: ${sessionId === masterSessionId}, default: ${sessionId === 'default'}, wallet match: ${walletAddress === masterAddress})`);
-        
         // メモリ上に既存のセッションがあればそれを返す
-        // ただし、明示的に異なるセッションID（bot2など）が指定されている場合は、シングルトンをバイパスして新規作成を許可する
-        const existingSession = Array.from(this.sessions.values()).find(s => s.sessionId === masterSessionId || s.walletAddress === masterAddress);
-        
-        if (existingSession && isDefaultMaster) {
-          Logger.info(`[SINGLETON] Reusing existing master session [${existingSession.sessionId}] for wallet: ${masterAddress}`);
-          return existingSession;
+        const existingMasterSession = this.sessions.get(masterSessionId) || Array.from(this.sessions.values()).find(s => s.botWalletAddress === masterAddress);
+        if (existingMasterSession) {
+          Logger.info(`[SINGLETON] Reusing existing session [${existingMasterSession.sessionId}] for master wallet: ${masterAddress}`);
+          return existingMasterSession;
         }
 
-        // ここで sessionId をマスター用のものに上書き（マスター判定時のみ）
-        if (isDefaultMaster) sessionId = masterSessionId;
+        // ここで sessionId をマスター用のものに上書き
+        sessionId = masterSessionId;
       } catch (e: any) {
         Logger.error(`Failed to load MASTER PRIVATE_KEY from .env: ${e.message}`);
       }
@@ -104,6 +96,12 @@ export class SessionManager {
           Logger.success(`Found existing session [${existingId}] for provided mnemonic.`);
           targetSessionId = existingId;
         }
+      } else if (walletAddress) {
+        const existingId = this.findSessionIdByWalletAndPool(walletAddress, poolObjectId || '');
+        if (existingId) {
+          Logger.success(`Found existing session [${existingId}] for wallet and pool.`);
+          targetSessionId = existingId;
+        }
       }
 
       // まず既存の永続化ファイルから鍵を復元できるか試みる
@@ -116,7 +114,7 @@ export class SessionManager {
           // シードフレーズがあれば優先的に使用
           if (state.mnemonic) {
             sessionMnemonic = state.mnemonic;
-            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic as string);
+            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic as string, "m/44'/784'/0'/0'/0'");
             Logger.success(`Dedicated Bot Wallet restored from Mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
           } 
           // 秘密鍵のみの場合
@@ -135,7 +133,7 @@ export class SessionManager {
       if (!sessionKeypair) {
         if (sessionMnemonic) {
           try {
-            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
+            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic, "m/44'/784'/0'/0'/0'");
             Logger.success(`Wallet derived from provided mnemonic: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
           } catch (e) {
             Logger.error('Failed to derive wallet from provided mnemonic');
@@ -148,15 +146,17 @@ export class SessionManager {
               ? decodeSuiPrivateKey(privateKey)
               : { secretKey: Buffer.from(privateKey.replace('0x', ''), 'hex') };
             sessionKeypair = Ed25519Keypair.fromSecretKey(secretKey);
+            Logger.success(`Wallet restored from provided private key: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
           } catch (e) {
-            Logger.warn('Invalid private key provided, generating new one with mnemonic.');
-            sessionMnemonic = bip39.generateMnemonic(wordlist);
-            sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
+            Logger.error('Failed to restore wallet from provided private key');
           }
-        } else if (!sessionKeypair) {
+        }
+        
+        if (!sessionKeypair) {
           // 完全新規生成
           sessionMnemonic = bip39.generateMnemonic(wordlist);
-          sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic);
+          sessionKeypair = Ed25519Keypair.deriveKeypair(sessionMnemonic, "m/44'/784'/0'/0'/0'");
+          Logger.info(`Generated new dedicated wallet: ${sessionKeypair.getPublicKey().toSuiAddress()}`);
         }
       }
     }
@@ -167,7 +167,7 @@ export class SessionManager {
     Logger.info(`Dedicated Bot Wallet generated: ${botWalletAddress}`);
 
     // セッション固有の設定（グローバル設定をコピー）
-    const sessionConfig: BotConfig = { ...globalConfig };
+    const sessionConfig: BotConfig = { ...globalConfig, poolObjectId: poolObjectId || globalConfig.poolObjectId };
 
     // 各コンポーネントをインスタンス化
     const priceMonitor = new PriceMonitor(sessionConfig);
@@ -178,7 +178,7 @@ export class SessionManager {
     const pnlEngine = new PnlEngine();
     
     // LpManagerにキーペアとTrackerを注入
-    const lpManager = new LpManager(priceMonitor, gasTracker, tracker, sessionConfig);
+    const lpManager = new LpManager(priceMonitor, gasTracker, sessionConfig);
     lpManager.setKeypair(sessionKeypair);
 
     let hedgeManager = this.hedgeManagers.get(botWalletAddress);
@@ -192,11 +192,10 @@ export class SessionManager {
       lpManager,
       hedgeManager,
       gasTracker,
-      pnlEngine,
       tracker,
       sessionConfig,
-      targetSessionId, // sessionIdを明示的に渡す
-      () => SessionManager.saveSessionState(targetSessionId)
+      () => SessionManager.saveSessionState(targetSessionId),
+      targetSessionId
     );
 
     // Strategyに秘密鍵を設定して初期化 (Bluefin等のセットアップを待機)
@@ -205,13 +204,11 @@ export class SessionManager {
     // 保存された状態があれば復元
     const savedState = this.loadSessionState({ sessionId: targetSessionId, pnlEngine, gasTracker, hedgeManager, tracker, strategy });
     
-    // 保存された状態がある場合、まず保存された設定をベースにする
+    // 保存された設定がある場合、戦略的に重要な設定（運用額など）を .env から最新化する
     if (savedState && savedState.config) {
-      Object.assign(sessionConfig, savedState.config);
-      
-      // その上で、運用額などの動的に変更したい項目のみ .env から最新化する
       sessionConfig.lpAmountUsdc = globalConfig.lpAmountUsdc;
       sessionConfig.totalOperationalCapitalUsdc = globalConfig.totalOperationalCapitalUsdc;
+      sessionConfig.hedgeMode = globalConfig.hedgeMode;
       sessionConfig.rpcUrl = globalConfig.rpcUrl;
       
       // コンポーネントに反映
@@ -219,22 +216,22 @@ export class SessionManager {
       lpManager.refreshConfig(sessionConfig);
       strategy.refreshConfig(sessionConfig);
       
-      Logger.info(`Session [${targetSessionId}] config restored and synced with key .env values.`);
+      Logger.info(`Session [${targetSessionId}] config synced with latest .env values.`);
     }
     
     // ウォレット接続モード（デモ/読み取り専用）
-    let sessionWalletAddress = walletAddress;
-    if (!sessionWalletAddress && privateKey) {
-      sessionWalletAddress = strategy.getWalletAddress();
+    let finalWalletAddress = walletAddress || (savedState && savedState.walletAddress);
+    if (!finalWalletAddress && privateKey) {
+      finalWalletAddress = strategy.getWalletAddress();
     }
-    if (!sessionWalletAddress) {
-      sessionWalletAddress = '0x' + targetSessionId.replace(/-/g, '').slice(0, 40); // フォールバック
+    if (!finalWalletAddress) {
+      finalWalletAddress = botWalletAddress; // フォールバック
     }
 
     const session: UserSession = {
       sessionId: targetSessionId,
-      walletAddress: walletAddress || botWalletAddress,
-      botWalletAddress,
+      walletAddress: finalWalletAddress,
+      botWalletAddress: (savedState && savedState.botWalletAddress) || botWalletAddress,
       keypair: sessionKeypair,
       mnemonic: sessionMnemonic,
       strategy,
@@ -252,33 +249,22 @@ export class SessionManager {
     this.sessions.set(targetSessionId, session);
     Logger.success(`Session [${targetSessionId}] created for wallet: ${session.walletAddress}`);
 
+    // ウォレットに関連する過去の履歴があれば統合（デバイス間での履歴共有を保証）
+    if (session.walletAddress) {
+      await this.consolidateWalletHistory(session.walletAddress, tracker, targetSessionId);
+    }
+
+    // 保存された状態で稼働中だった場合は自動開始
+    if (session.strategy.isRunning) {
+      Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${targetSessionId}`);
+      session.strategy.isRunning = false; // start()内部でtrueにされるため一度戻す
+      await session.strategy.start();
+    }
+
     // 新規作成時も即座に一度保存して鍵を確定させる
     this.saveSessionState(targetSessionId);
 
     return session;
-  }
-
-  /**
-   * ウォレットアドレスに基づいて既存のセッションIDを検索
-   */
-  static findSessionIdByWalletAddress(walletAddress: string): string | null {
-    try {
-      const files = fs.readdirSync(process.cwd());
-      const sessionFiles = files.filter(f => f.startsWith('session_state_') && f.endsWith('.json'));
-
-      for (const file of sessionFiles) {
-        try {
-          const content = fs.readFileSync(path.join(process.cwd(), file), 'utf-8');
-          const state = JSON.parse(content);
-          if (state.walletAddress === walletAddress) {
-            return file.replace('session_state_', '').replace('.json', '');
-          }
-        } catch (e) {}
-      }
-    } catch (e) {
-      Logger.error('Failed to scan session files for wallet address', e);
-    }
-    return null;
   }
 
   /**
@@ -303,13 +289,21 @@ export class SessionManager {
    * ウォレットアドレスでセッションを検索
    */
   static getSessionByWallet(walletAddress: string): UserSession | null {
-    for (const session of this.sessions.values()) {
-      if (session.walletAddress === walletAddress) {
-        session.lastActive = Date.now();
-        return session;
-      }
-    }
-    return null;
+    return Array.from(this.sessions.values()).find(s => s.walletAddress === walletAddress || s.botWalletAddress === walletAddress) || null;
+  }
+
+  static getSessionByMnemonic(mnemonic: string): UserSession | null {
+    return Array.from(this.sessions.values()).find(s => s.mnemonic === mnemonic) || null;
+  }
+
+  /**
+   * ウォレットアドレスに関連するセッションをすべて取得
+   */
+  static listSessionsByWallet(walletAddress: string): UserSession[] {
+    return Array.from(this.sessions.values()).filter(s => 
+      (s.walletAddress && s.walletAddress.toLowerCase() === walletAddress.toLowerCase()) || 
+      (s.botWalletAddress && s.botWalletAddress.toLowerCase() === walletAddress.toLowerCase())
+    );
   }
 
   /**
@@ -321,6 +315,56 @@ export class SessionManager {
       session.strategy.stop();
       this.sessions.delete(sessionId);
       Logger.success(`Session removed: ${sessionId}`);
+    }
+  }
+
+  /**
+   * ウォレットに関連する全てのトラッカー履歴を統合する
+   */
+  public static async consolidateWalletHistory(walletAddress: string, currentTracker: Tracker, currentSessionId: string): Promise<void> {
+    try {
+      const files = fs.readdirSync(process.cwd());
+      const histories: any[] = [];
+      
+      for (const file of files) {
+        if (file.startsWith('session_state_') && file.endsWith('.json')) {
+          const sid = file.replace('session_state_', '').replace('.json', '');
+          if (sid === currentSessionId) continue;
+
+          try {
+            const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (state.walletAddress && state.walletAddress.toLowerCase() === walletAddress.toLowerCase()) {
+              Logger.info(`Found historical session [${sid}] for wallet: ${walletAddress}`);
+              const trackerFile = path.resolve(process.cwd(), `tracker_${sid}.json`);
+              if (fs.existsSync(trackerFile)) {
+                const trackerData = JSON.parse(fs.readFileSync(trackerFile, 'utf8'));
+                if (trackerData.history && Array.isArray(trackerData.history)) {
+                  histories.push(...trackerData.history);
+                }
+              } else if (state.tracker && state.tracker.history && Array.isArray(state.tracker.history)) {
+                // トラッカーファイルがない場合、セッション状態内のデータを使用
+                histories.push(...state.tracker.history);
+              }
+
+              // 統計データと残高履歴も統合
+              if (fs.existsSync(trackerFile)) {
+                const trackerData = JSON.parse(fs.readFileSync(trackerFile, 'utf8'));
+                await currentTracker.mergeData(trackerData);
+              } else if (state.tracker) {
+                await currentTracker.mergeData(state.tracker);
+              }
+              Logger.info(`Successfully merged stats/history from session [${sid}]`);
+            }
+          } catch (e) {}
+        }
+      }
+
+      if (histories.length > 0) {
+        await currentTracker.mergeHistory(histories);
+        Logger.info(`Successfully consolidated ${histories.length} historical events for wallet: ${walletAddress}`);
+      }
+    } catch (e) {
+      Logger.warn(`Failed to consolidate wallet history: ${e}`);
     }
   }
 
@@ -344,48 +388,23 @@ export class SessionManager {
   static getAllSessionsStats(): Array<{
     sessionId: string;
     walletAddress: string;
+    userWalletAddress?: string;
+    botWalletAddress?: string;
     isRunning: boolean;
     createdAt: number;
-    lpAmountUsdc: number;
   }> {
     const stats = [];
     for (const [sessionId, session] of this.sessions.entries()) {
       stats.push({
         sessionId,
         walletAddress: session.walletAddress,
+        userWalletAddress: session.walletAddress,
+        botWalletAddress: session.botWalletAddress || session.walletAddress,
         isRunning: session.strategy.isRunning,
-        createdAt: session.createdAt,
-        lpAmountUsdc: session.config.lpAmountUsdc
+        createdAt: session.createdAt
       });
     }
     return stats;
-  }
-
-  /**
-   * 指定したセッション以外で使用されている総資金を計算
-   */
-  static getCommittedCapital(excludeSessionId: string): number {
-    let total = 0;
-    for (const [sid, session] of this.sessions.entries()) {
-      if (sid !== excludeSessionId && session.strategy.isRunning) {
-        // 設定されたLP運用額を「コミット済み」とみなす
-        total += session.config.lpAmountUsdc;
-      }
-    }
-    return total;
-  }
-
-  /**
-   * 全アクティブセッションの合計希望運用額を計算
-   */
-  static getTotalDesiredCapital(): number {
-    let total = 0;
-    for (const session of this.sessions.values()) {
-      if (session.strategy.isRunning) {
-        total += session.config.lpAmountUsdc;
-      }
-    }
-    return total;
   }
 
   /**
@@ -422,6 +441,31 @@ export class SessionManager {
   }
 
   /**
+   * ウォレットアドレスとプールIDの組み合わせで既存セッションを探す
+   */
+  static findSessionIdByWalletAndPool(walletAddress: string, poolObjectId: string): string | null {
+    const sessions = SessionManager.listSessionsByWallet(walletAddress);
+    
+    // 特定のプールIDに一致するセッションを探す
+    const match = sessions.find(s => s.config.poolObjectId === poolObjectId);
+    if (match) return match.sessionId;
+
+    // 一致するものがない場合は、セッションファイルからも探す
+    const files = fs.readdirSync(process.cwd());
+    for (const file of files) {
+      if (file.startsWith('session_state_') && file.endsWith('.json')) {
+        try {
+          const content = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (content.walletAddress === walletAddress && content.config?.poolObjectId === poolObjectId) {
+            return file.replace('session_state_', '').replace('.json', '');
+          }
+        } catch (e) {}
+      }
+    }
+    return null;
+  }
+
+  /**
    * セッションの状態をファイルに保存
    */
   static saveSessionState(sessionId: string): void {
@@ -430,6 +474,7 @@ export class SessionManager {
 
     try {
       const state = {
+        sessionId: session.sessionId,
         pnl: session.pnlEngine.serialize(),
         gas: session.gasTracker.serialize(),
         hedge: session.hedgeManager.serialize(),
@@ -437,7 +482,8 @@ export class SessionManager {
         strategy: session.strategy.serialize(), // 戦略状態を追加
         botSecretKey: session.keypair.getSecretKey(),
         mnemonic: session.mnemonic,
-        walletAddress: session.walletAddress, // ウォレットアドレスを保存
+        walletAddress: session.walletAddress,
+        botWalletAddress: session.botWalletAddress,
         config: session.config,
         isRunning: session.strategy.isRunning,
         updatedAt: Date.now()
@@ -445,7 +491,7 @@ export class SessionManager {
       
       const filePath = path.resolve(process.cwd(), `session_state_${sessionId}.json`);
       fs.writeFileSync(filePath, JSON.stringify(state, null, 2));
-      Logger.info(`Session state saved (including secret key and wallet address): ${sessionId}`);
+      Logger.info(`Session state saved (including secret key): ${sessionId}`);
     } catch (e) {
       Logger.error(`Failed to save session state: ${sessionId}`, e);
     }

@@ -5,7 +5,6 @@ import { PriceChart } from './components/PriceChart';
 import { BalanceChart } from './components/BalanceChart';
 import { SettingsModal } from './components/SettingsModal';
 import { ActivityLog } from './components/ActivityLog';
-import { SetupWizard } from './components/SetupWizard';
 import { HelpModal } from './components/HelpModal';
 import { PnLCard } from './components/PnLCard';
 import { DeltaGauge } from './components/DeltaGauge';
@@ -25,37 +24,19 @@ function App() {
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [isWizardOpen, setIsWizardOpen] = useState(() => !localStorage.getItem('wizard_completed'));
-
-  const [sessionId, setSessionId] = useState(() => {
-    // 1. URLのクエリパラメータ (?sessionId=...) を優先
-    const params = new URLSearchParams(window.location.search);
-    const urlSessionId = params.get('sessionId');
-    if (urlSessionId) {
-      localStorage.setItem('session_id', urlSessionId);
-      return urlSessionId;
-    }
-    // 2. localStorage から復元
-    return localStorage.getItem('session_id') || '';
-  });
-  const [botWalletAddress, setBotWalletAddress] = useState('');
-  const [apiUrl] = useState('http://127.0.0.1:3002');
+  const [allSessions, setAllSessions] = useState<any[]>([]);
+  
+  const [sessionId, setSessionId] = useState(() => localStorage.getItem('session_id') || '');
+  const [botWalletAddress, setBotWalletAddress] = useState(() => localStorage.getItem('bot_wallet_address') || '');
+  const [apiUrl] = useState(() => 
+    import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
+  );
 
 
 
-  // ウォレット接続時にセッション作成・同期
-  useEffect(() => {
-    if (currentAccount) {
-      console.log('Wallet connected/changed. Syncing session...');
-      createSessionFromWallet();
-    }
-  }, [currentAccount?.address, sessionId, apiUrl]); // サイズを常に3に固定
-
-  const createSessionFromWallet = async () => {
+  const syncWalletSession = async () => {
     if (!currentAccount) return;
-    
     try {
-      // ウォレットアドレスでセッションを作成
       const response = await fetch(`${apiUrl}/api/session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -65,34 +46,55 @@ function App() {
         })
       });
       const data = await response.json();
-      
-      if (data.success) {
+      if (data.success && data.sessionId) {
         setSessionId(data.sessionId);
-        setBotWalletAddress(data.botWalletAddress);
         localStorage.setItem('session_id', data.sessionId);
-        localStorage.setItem('wizard_completed', 'true');
-        setIsWizardOpen(false);
-
-        // 統計データを即座に取得して表示に反映
-        try {
-          const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${data.sessionId}`);
-          const statsData = await statsRes.json();
-          if (statsData.success) {
-            setStats(statsData.data);
-            setIsBotActive(statsData.data.isRunning);
-          }
-        } catch (err) {
-          console.warn('Initial stats fetch failed');
-        }
-      } else {
-        alert('セッションの作成に失敗しました: ' + (data.error || 'Unknown error'));
+        // セッション作成後に一覧も更新
+        refreshSessions(currentAccount.address);
       }
     } catch (e) {
-      console.error('Failed to create session:', e);
-      alert('サーバーとの通信に失敗しました。バックエンドが起動しているか確認してください。');
+      console.warn('Failed to sync wallet session');
+    }
+  }; 
+
+  const refreshSessions = async (addr?: string) => {
+    try {
+      const url = addr ? `${apiUrl}/api/sessions?walletAddress=${addr}` : `${apiUrl}/api/sessions`;
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.success) {
+        setAllSessions(data.sessions);
+        // 現在のsessionIdが一覧になければ、最新のものを選択
+        if (data.sessions.length > 0 && !data.sessions.find((s: any) => s.sessionId === sessionId)) {
+          // localStorageにあるか確認
+          const savedId = localStorage.getItem('session_id');
+          if (savedId && data.sessions.find((s: any) => s.sessionId === savedId)) {
+             setSessionId(savedId);
+          } else {
+             const latest = data.sessions[data.sessions.length - 1];
+             setSessionId(latest.sessionId);
+             localStorage.setItem('session_id', latest.sessionId);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch sessions');
     }
   };
 
+  // マウント時およびウォレット接続時にセッション同期
+  useEffect(() => {
+    if (currentAccount?.address) {
+      syncWalletSession();
+    } else {
+      refreshSessions();
+    }
+  }, [currentAccount?.address]); 
+
+  // const handleWalletSessionSync = async () => {
+  //   if (!currentAccount) return;
+  //   syncWalletSession();
+  // };
   const [stats, setStats] = useState({
     totalPnl: '0.00',
     totalFees: '0.0000',
@@ -105,7 +107,8 @@ function App() {
       hedgeRatio: 0.5, 
       configMode: 'auto' as 'auto' | 'manual',
       strategyMode: 'balanced' as 'balanced' | 'range_order',
-      totalOperationalCapitalUsdc: 0
+      totalOperationalCapitalUsdc: 0,
+      hedgeEnabled: false as boolean
     },
     currentPrice: 0,
     entryPrice: 0,
@@ -115,6 +118,7 @@ function App() {
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
     pythPrice: null as number | null,
+    estimatedApr: 0 as number,
     pnl: null as any,
     delta: null as any,
     gasStats: null as any,
@@ -131,6 +135,7 @@ function App() {
   });
 
   const [bot2, setBot2] = useState<any>(null);
+  const [bot3, setBot3] = useState<any>(null);
 
   // pool価格とPyth価格をフロント側でポーリングごとに同時記録
   const [combinedHistory, setCombinedHistory] = useState<
@@ -139,18 +144,19 @@ function App() {
 
   useEffect(() => {
     const fetchStats = async () => {
-      if (!sessionId) return;
+      if (!sessionId || sessionId === 'undefined') return;
       
       try {
         const response = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
         const result = await response.json();
-        if (result.success) {
+        if (result.success && result.data) {
           // アドレスの同期を強化
           if (result.data.botWalletAddress && result.data.botWalletAddress !== botWalletAddress) {
             setBotWalletAddress(result.data.botWalletAddress);
+            localStorage.setItem('bot_wallet_address', result.data.botWalletAddress);
           }
           
-          setStats(result.data);
+          setStats(prev => ({ ...prev, ...result.data }));
           setIsBotActive(result.data.isRunning);
 
           // データの徹底洗浄：数値であることを保証
@@ -219,11 +225,23 @@ function App() {
         // console.warn('Bot2 stats sync failed');
       }
 
+      // === Bot3のステータス取得 ===
+      try {
+        const res3 = await fetch(`${apiUrl}/api/bot3/status`);
+        const data3 = await res3.json();
+        if (data3.success) {
+          setBot3(data3);
+        } else {
+          setBot3({ active: false, message: data3.message || 'Bot3 inactive' });
+        }
+      } catch (e) {
+        // console.warn('Bot3 stats sync failed');
+      }
     };
     fetchStats();
     const interval = setInterval(fetchStats, 3000);
     return () => clearInterval(interval);
-  }, [apiUrl, sessionId, currentAccount?.address]); // サイズを常に3に固定
+  }, [apiUrl, sessionId]);
 
   const handleApplyAdvisorRecommendation = async (mode: 'LP_ONLY' | 'DELTA_NEUTRAL') => {
     if (!sessionId) return;
@@ -249,7 +267,7 @@ function App() {
 
       const data = await response.json();
       if (data.success) {
-        alert(`AI戦略「${mode === 'LP_ONLY' ? 'LPのみ（ヘッジなし）' : 'デルタニュートラル'}」を適用しました。\n現在、ヘッジの決済とポジションのリセット（再構築）を実行中です。完了まで数十秒お待ちください。`);
+        alert(`AI Strategy Applied: ${mode}. Bot is rebalancing...`);
         // 最新のステータスを取得
         const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
         const statsData = await statsRes.json();
@@ -340,6 +358,78 @@ function App() {
     }
   };
 
+  const handleToggleHedge = async () => {
+    if (!sessionId) return;
+    const nextHedgeEnabled = !stats.config.hedgeEnabled;
+    const nextStrategyMode = nextHedgeEnabled ? 'balanced' : 'range_order';
+    
+    try {
+      const response = await fetch(`${apiUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          strategyMode: nextStrategyMode,
+          hedgeEnabled: nextHedgeEnabled,
+          lpAmountUsdc: stats.config.lpAmountUsdc,
+          rangeWidth: (stats.config.rangeWidth * 100).toString(),
+          hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
+          configMode: stats.config.configMode || 'auto'
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStats(prev => ({ 
+          ...prev, 
+          config: { 
+            ...prev.config, 
+            strategyMode: nextStrategyMode, 
+            hedgeEnabled: nextHedgeEnabled 
+          } 
+        }));
+        
+        if (isBotActive) {
+          alert(`🚀 ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に切り替えました。ボットのリバランス・クローズが即座に実行されます。`);
+        } else {
+          alert(`✅ ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に設定しました。`);
+        }
+      }
+    } catch (e) {
+      alert('ヘッジの切り替えに失敗しました。');
+    }
+  };
+
+  const handleUpdateRangeWidth = async (newWidth: number) => {
+    if (!sessionId) return;
+    try {
+      const response = await fetch(`${apiUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId,
+          strategyMode: stats.config.strategyMode,
+          hedgeEnabled: stats.config.hedgeEnabled,
+          lpAmountUsdc: stats.config.lpAmountUsdc,
+          rangeWidth: newWidth.toString(),
+          hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
+          configMode: stats.config.configMode || 'auto'
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setStats(prev => ({ 
+          ...prev, 
+          config: { 
+            ...prev.config, 
+            rangeWidth: newWidth / 100 
+          } 
+        }));
+      }
+    } catch (e) {
+      console.error('Failed to update range width', e);
+    }
+  };
+
 
   const getMarketConditionText = (condition: string) => {
     switch (condition) {
@@ -363,11 +453,11 @@ function App() {
         <div className="header-title-section">
           <h1>
             <span className="gradient-text">
-              SUI Liquidity Bot
+              SuiBot V3
             </span>
           </h1>
           <p className="header-subtitle">
-            Autonomous Balanced Strategy • V4.0
+            Delta-Neutral Profit Engine • V3.0
             <span style={{ 
                 marginLeft: '12px', 
                 padding: '2px 8px', 
@@ -426,6 +516,61 @@ function App() {
               </>
             )}
           </div>
+
+          {/* Hedge Toggle */}
+          {sessionId && (
+            <button
+              onClick={handleToggleHedge}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                borderColor: stats.config?.hedgeEnabled ? 'rgba(255, 159, 67, 0.3)' : 'rgba(139, 148, 158, 0.25)',
+                color: stats.config?.hedgeEnabled ? '#ff9f43' : 'var(--text-muted)',
+                background: stats.config?.hedgeEnabled ? 'rgba(255, 159, 67, 0.12)' : 'rgba(139, 148, 158, 0.08)',
+                padding: '8px 14px',
+                borderRadius: '12px',
+                fontSize: '0.85rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                border: '1px solid',
+                boxShadow: stats.config?.hedgeEnabled ? '0 0 8px rgba(255, 159, 67, 0.15)' : 'none',
+              }}
+            >
+              <span style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                background: stats.config?.hedgeEnabled ? '#ff9f43' : 'rgba(255, 255, 255, 0.3)',
+                display: 'inline-block',
+                boxShadow: stats.config?.hedgeEnabled ? '0 0 6px #ff9f43' : 'none'
+              }}></span>
+              ヘッジ: {stats.config?.hedgeEnabled ? 'ON' : 'OFF'}
+            </button>
+          )}
+          
+          {/* Bot Selector */}
+          {allSessions.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'rgba(255,255,255,0.05)', padding: '4px 12px', borderRadius: '12px', border: '1px solid var(--border-panel)' }}>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>運用ボット:</span>
+              <select 
+                value={sessionId || ''}                onChange={(e) => {
+                  const sid = e.target.value;
+                  setSessionId(sid);
+                  localStorage.setItem('session_id', sid);
+                }}
+                style={{ background: 'transparent', border: 'none', color: 'white', fontSize: '0.85rem', cursor: 'pointer', outline: 'none' }}
+              >
+                {allSessions.map((s, idx) => (
+                  <option key={s.sessionId || `session-${idx}`} value={s.sessionId || ''} style={{ background: '#0d1117' }}>
+                    {s.poolObjectId?.includes('b8d7d9') ? 'SUI / USDC' : s.poolObjectId?.includes('e01243') ? 'DEEP / SUI' : 'Other Pool'} ({s.sessionId?.slice(0, 6) || 'Unknown'})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div className="sui-connect-wrapper">
             <ConnectButton />
           </div>
@@ -480,11 +625,11 @@ function App() {
               )}
               <div className="market-analysis-item">
                 <div className="market-analysis-label">レンジ下限</div>
-                <div className="market-analysis-value" style={{ color: 'var(--danger)' }}>${stats.currentRange.lower.toFixed(4)}</div>
+                <div className="market-analysis-value" style={{ color: 'var(--danger)' }}>${stats.currentRange?.lower?.toFixed(4) || '0.0000'}</div>
               </div>
               <div className="market-analysis-item">
                 <div className="market-analysis-label">レンジ上限</div>
-                <div className="market-analysis-value" style={{ color: 'var(--success)' }}>${stats.currentRange.upper.toFixed(4)}</div>
+                <div className="market-analysis-value" style={{ color: 'var(--success)' }}>${stats.currentRange?.upper?.toFixed(4) || '0.0000'}</div>
               </div>
               {stats.gasStats && stats.gasStats.txCount > 0 && (
                 <div className="market-analysis-item">
@@ -531,15 +676,38 @@ function App() {
             isBotActive={isBotActive}
             onToggleBot={toggleBotState}
             onOpenSettings={() => setIsSettingsOpen(true)}
-            onOpenWizard={() => setIsWizardOpen(true)}
             onOpenHelp={() => setIsHelpOpen(true)}
             config={stats.config}
             onUpdateCapital={handleUpdateCapital}
+            botWalletSufficient={stats.pnl?.botWalletSufficient ?? false}
+            bot1LpValue={stats.pnl?.bot1LpValue || 0}
+            bot2LpValue={stats.pnl?.bot2LpValue || 0}
+            marginBalance={stats.hedge?.marginBalance || 0}
+            userWalletBalanceSui={stats.pnl?.userWalletBalanceSui || 0}
+            userWalletBalanceUsdc={stats.pnl?.userWalletBalanceUsdc || 0}
+            userWalletSufficient={stats.pnl?.userWalletSufficient ?? false}
+            connectedAddress={currentAccount?.address || ''}
+            currentPrice={stats.currentPrice}
           />
 
           {/* Bot2 (DEEP/SUI) ステータスパネル */}
-          <MultiBotPanel title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`} bot={bot2} />
+          <MultiBotPanel 
+            title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`} 
+            bot={bot2} 
+            onStart={() => {
+              alert('Bot2は自動で稼働中です。個別設定は不要です。');
+            }}
+          />
 
+          {/* Bot3 (Extra) ステータスパネル */}
+          <MultiBotPanel 
+            title={`Bot3 — ${bot3?.pool || 'SUI-PERP'}`} 
+            bot={bot3} 
+            onStart={() => {
+              // SUI-PERPはまだ未実装だが枠だけ用意
+              alert('SUI-PERPは近日公開予定です。');
+            }}
+          />
 
           {/* 安全ゲートパネル */}
           <SafetyGauge
@@ -562,6 +730,7 @@ function App() {
             config={stats.config}
             hedge={stats.hedge}
             onUpdateStrategyMode={handleUpdateStrategyMode}
+            onUpdateRangeWidth={handleUpdateRangeWidth}
           />
 
           {/* PnLカード */}
@@ -578,18 +747,6 @@ function App() {
         apiUrl={apiUrl}
         sessionId={sessionId}
         currentConfig={stats.config}
-      />
-      <SetupWizard
-        isOpen={isWizardOpen}
-        onComplete={() => {
-          const sid = localStorage.getItem('session_id');
-          if (sid) {
-            setSessionId(sid);
-            setIsWizardOpen(false);
-          }
-        }}
-        onClose={() => setIsWizardOpen(false)}
-        apiUrl={apiUrl}
       />
       <HelpModal
         isOpen={isHelpOpen}

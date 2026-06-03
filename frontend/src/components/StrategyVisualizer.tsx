@@ -1,19 +1,30 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Layers, Info, ArrowUpDown } from 'lucide-react';
 
 interface StrategyVisualizerProps {
   totalCapital: number;
-  config?: { strategyMode?: 'balanced' | 'range_order' };
+  config?: { 
+    strategyMode?: 'balanced' | 'range_order';
+    rangeWidth?: number;
+    hedgeEnabled?: boolean;
+  };
   hedge?: { active?: boolean; direction?: string; size?: number };
   onUpdateStrategyMode: (mode: 'balanced' | 'range_order', hedgeEnabled: boolean) => void;
+  onUpdateRangeWidth?: (newWidth: number) => void;
 }
 
 export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({ 
   totalCapital, 
   config, 
   hedge,
-  onUpdateStrategyMode 
+  onUpdateStrategyMode,
+  onUpdateRangeWidth
 }) => {
+  const [localRangeWidth, setLocalRangeWidth] = useState(((config?.rangeWidth || 0.05) * 100));
+
+  useEffect(() => {
+    setLocalRangeWidth(((config?.rangeWidth || 0.05) * 100));
+  }, [config?.rangeWidth]);
   // Delta-Neutral Flip 戦略
   // LP: ~100% (USDC 50% + SUI 50%)
   // ヘッジ: LP内SUI価値の ~50% (レバレッジ活用)
@@ -166,6 +177,58 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
           デルタニュートラル・フリップ: 資産の100%をLPに投入し、レンジ逸脱時にヘッジ方向を自動反転（ショート↔ロング）。トレンド追従とリスク回避を両立する戦略です。
         </p>
       </div>
+
+      {/* レンジ幅調整スライダー */}
+      {config && (
+        <div style={{
+          marginTop: '20px',
+          padding: '12px',
+          background: 'rgba(255, 255, 255, 0.02)',
+          borderRadius: '10px',
+          border: '1px solid rgba(255, 255, 255, 0.04)',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '0.78rem', color: 'var(--text-main)', fontWeight: 600 }}>Cetus レンジ幅</span>
+            <span style={{ fontSize: '0.85rem', color: 'var(--accent)', fontWeight: 800 }}>
+              {localRangeWidth.toFixed(1)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min="1.0"
+            max="15.0"
+            step="0.5"
+            value={localRangeWidth}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value);
+              setLocalRangeWidth(val);
+            }}
+            onMouseUp={() => {
+              if (onUpdateRangeWidth) {
+                onUpdateRangeWidth(localRangeWidth);
+              }
+            }}
+            onTouchEnd={() => {
+              if (onUpdateRangeWidth) {
+                onUpdateRangeWidth(localRangeWidth);
+              }
+            }}
+            style={{
+              width: '100%',
+              accentColor: 'var(--accent)',
+              cursor: 'pointer',
+              height: '4px',
+              borderRadius: '2px',
+              outline: 'none',
+              background: 'rgba(255,255,255,0.1)'
+            }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+            <span>狭い (高APR / 高リスク)</span>
+            <span>広い (低APR / 安定)</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

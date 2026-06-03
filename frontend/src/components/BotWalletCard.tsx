@@ -9,10 +9,20 @@ interface BotWalletCardProps {
   isBotActive: boolean;
   onToggleBot: () => void;
   onOpenSettings: () => void;
-  onOpenWizard: () => void;
-  onOpenHelp: () => void;
+  onOpenWizard?: () => void;
+  onOpenHelp?: () => void;
   config?: { lpAmountUsdc: number; rangeWidth: number; configMode?: 'auto' | 'manual'; strategyMode?: 'balanced' | 'range_order' };
   onUpdateCapital: (amount: number) => void;
+  // 追加のProps
+  botWalletSufficient?: boolean;
+  bot1LpValue?: number;
+  bot2LpValue?: number;
+  marginBalance?: number;
+  userWalletBalanceSui?: number;
+  userWalletBalanceUsdc?: number;
+  userWalletSufficient?: boolean;
+  connectedAddress?: string;
+  currentPrice?: number;
 }
 
 export const BotWalletCard: React.FC<BotWalletCardProps> = ({ 
@@ -23,11 +33,34 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
   onToggleBot,
   onOpenSettings,
   config,
-  onUpdateCapital
+  onUpdateCapital,
+  bot1LpValue = 0,
+  bot2LpValue = 0,
+  marginBalance = 0,
+  userWalletBalanceSui = 0,
+  userWalletBalanceUsdc = 0,
+  connectedAddress = '',
+  currentPrice = 0
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditingCapital, setIsEditingCapital] = useState(false);
   const [capitalInput, setCapitalInput] = useState('');
+  
+  const getSufficientStatus = (sui: number, usdc: number) => {
+    if (sui < 0.2 && usdc < 0.1) {
+      return { text: 'SUI・USDC不足', color: '#ff4757', sufficient: false };
+    }
+    if (sui < 0.2) {
+      return { text: 'SUI不足 (ガス代)', color: '#ff9f43', sufficient: false };
+    }
+    if (usdc < 0.1) {
+      return { text: 'USDC不足 (運用資金)', color: '#ff9f43', sufficient: false };
+    }
+    return { text: '資金十分', color: '#2ed573', sufficient: true };
+  };
+
+  const botStatus = getSufficientStatus(suiBalance, usdcBalance);
+  const userStatus = getSufficientStatus(userWalletBalanceSui, userWalletBalanceUsdc);
   
   const handleEditCapital = () => {
     setCapitalInput(String(config?.lpAmountUsdc || 0));
@@ -83,18 +116,86 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
         >
           <Edit3 size={14} /> 設定
         </button>
-      </div>
+      </div>      {/* 1.5 Connected User Wallet */}
+      {connectedAddress && (
+        <div style={{ 
+          background: 'rgba(255, 255, 255, 0.02)', 
+          borderRadius: '12px', 
+          padding: '12px',
+          border: '1px solid rgba(255, 255, 255, 0.05)',
+          marginBottom: '20px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--accent)', boxShadow: '0 0 6px var(--accent)' }} />
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent)' }}>連携中ウォレット</span>
+            </div>
+            <span style={{ 
+              fontSize: '0.65rem', 
+              color: userStatus.color, 
+              fontWeight: 700,
+              background: `rgba(${userStatus.color === '#2ed573' ? '46, 213, 115' : userStatus.color === '#ff9f43' ? '255, 159, 67' : '255, 71, 87'}, 0.12)`,
+              padding: '2px 6px',
+              borderRadius: '4px',
+              border: `1px solid rgba(${userStatus.color === '#2ed573' ? '46, 213, 115' : userStatus.color === '#ff9f43' ? '255, 159, 67' : '255, 71, 87'}, 0.2)`
+            }}>
+              {userStatus.text}
+            </span>
+          </div>
+
+          <div style={{ 
+            fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'monospace', 
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            background: 'rgba(0,0,0,0.15)', padding: '6px 8px', borderRadius: '6px', marginBottom: '8px'
+          }}>
+            {connectedAddress}
+          </div>
+
+          {/* 連携ウォレット残高 */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.75rem' }}>
+            <div style={{ background: 'rgba(255,255,255,0.01)', padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
+              <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>SUI 残高</div>
+              <div style={{ fontWeight: 700, color: userWalletBalanceSui < 0.2 ? '#ff4757' : 'white' }}>{userWalletBalanceSui.toFixed(2)} SUI</div>
+            </div>
+            <div style={{ background: 'rgba(255,255,255,0.01)', padding: '6px 10px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.02)' }}>
+              <div style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>USDC 残高</div>
+              <div style={{ fontWeight: 700, color: userWalletBalanceUsdc < 0.1 ? '#ff4757' : 'white' }}>${userWalletBalanceUsdc.toFixed(2)}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 2. Wallet Connectivity Indicator & Address */}
       <div style={{ marginBottom: '20px' }}>
          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-             <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#2ed573', boxShadow: '0 0 6px #2ed573' }} />
-             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#2ed573' }}>運用用ウォレット</span>
+             <div style={{ 
+               width: '6px', 
+               height: '6px', 
+               borderRadius: '50%', 
+               background: botStatus.color, 
+               boxShadow: `0 0 6px ${botStatus.color}` 
+             }} />
+             <span style={{ fontSize: '0.75rem', fontWeight: 600, color: botStatus.color }}>
+               運用用ウォレット
+             </span>
            </div>
-           {isFixedAddress && (
-             <span style={{ fontSize: '0.6rem', color: 'var(--accent)', fontWeight: 800, background: 'rgba(88, 166, 255, 0.1)', padding: '2px 6px', borderRadius: '4px' }}>MASTER</span>
-           )}
+           <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+             <span style={{ 
+               fontSize: '0.65rem', 
+               color: botStatus.color, 
+               fontWeight: 700, 
+               background: `rgba(${botStatus.color === '#2ed573' ? '46, 213, 115' : botStatus.color === '#ff9f43' ? '255, 159, 67' : '255, 71, 87'}, 0.12)`, 
+               padding: '3px 8px', 
+               borderRadius: '6px',
+               border: `1px solid rgba(${botStatus.color === '#2ed573' ? '46, 213, 115' : botStatus.color === '#ff9f43' ? '255, 159, 67' : '255, 71, 87'}, 0.25)`
+             }}>
+               {botStatus.text}
+             </span>
+             {isFixedAddress && (
+               <span style={{ fontSize: '0.6rem', color: 'var(--accent)', fontWeight: 800, background: 'rgba(88, 166, 255, 0.1)', padding: '2px 6px', borderRadius: '4px' }}>MASTER</span>
+             )}
+           </div>
          </div>
          <div style={{ 
            background: 'rgba(255, 255, 255, 0.03)', 
@@ -118,6 +219,28 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
              {copied ? <Check size={14} color="#2ed573" /> : <Copy size={14} />}
            </button>
          </div>
+         {!botStatus.sufficient ? (
+           <p style={{ 
+             fontSize: '0.65rem', 
+             color: '#ff4757', 
+             marginTop: '8px', 
+             lineHeight: 1.4, 
+             background: 'rgba(255, 71, 87, 0.08)',
+             padding: '8px',
+             borderRadius: '6px',
+             border: '1px solid rgba(255, 71, 87, 0.15)'
+           }}>
+             🚨 <strong>運用準備未完了:</strong> {
+               botStatus.text === 'SUI・USDC不足' ? 'SUI（ガス代）とUSDC（流動性供給）の両方を送金してください。' :
+               botStatus.text === 'SUI不足 (ガス代)' ? 'ガス代用のSUIが不足しています（最低0.2 SUI）。' :
+               '運用資金用のUSDCが不足しています。'
+             } ボットを開始するには、この専用アドレスに資金を送金してください。
+           </p>
+         ) : (
+           <p style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '8px', lineHeight: 1.4 }}>
+             💡 運用資金が検知されました。ボットを開始する準備ができています。
+           </p>
+         )}
       </div>
 
       {/* 3. Operational Capital Setting */}
@@ -129,7 +252,7 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
         marginBottom: '20px'
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>運用資金</span>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>設定運用資金</span>
           {!isEditingCapital ? (
             <button onClick={handleEditCapital} style={{ background: 'transparent', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: '0.7rem', fontWeight: 600 }}>変更</button>
           ) : (
@@ -162,15 +285,155 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
       </div>
 
       {/* 4. Wallet Balance Summary (Compact) */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
-        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI 残高</div>
-          <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>{suiBalance.toFixed(2)} <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>SUI</span></div>
+      <div style={{ marginBottom: '20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>ウォレット残高</span>
+          {currentPrice > 0 && (
+            <span style={{ fontSize: '0.75rem', color: 'var(--accent)', fontWeight: 700 }}>
+              総ドル価値: ${((suiBalance * currentPrice) + usdcBalance).toFixed(2)}
+            </span>
+          )}
         </div>
-        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC 残高</div>
-          <div style={{ fontSize: '0.9rem', fontWeight: 700 }}>${usdcBalance.toFixed(2)}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>SUI 残高</div>
+            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: suiBalance < 0.2 ? '#ff4757' : 'white' }}>
+              {suiBalance.toFixed(2)} <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>SUI</span>
+            </div>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.03)' }}>
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginBottom: '4px' }}>USDC 残高</div>
+            <div style={{ fontSize: '0.9rem', fontWeight: 700, color: usdcBalance < 0.1 ? '#ff4757' : 'white' }}>
+              ${usdcBalance.toFixed(2)}
+            </div>
+          </div>
         </div>
+      </div>
+
+      {/* 4.5 Capital Allocation Breakdown */}
+      <div style={{ 
+        background: 'rgba(255, 255, 255, 0.02)', 
+        borderRadius: '12px', 
+        padding: '14px',
+        border: '1px solid rgba(255, 255, 255, 0.04)',
+        marginBottom: '20px'
+      }}>
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '12px' }}>
+          ボット別 資金配分 (LP・ヘッジ内訳)
+        </div>
+        
+        {(() => {
+          const totalAllocated = bot1LpValue + bot2LpValue + marginBalance + usdcBalance;
+          
+          const pctBot1 = totalAllocated > 0 ? (bot1LpValue / totalAllocated) * 100 : 0;
+          const pctBot2 = totalAllocated > 0 ? (bot2LpValue / totalAllocated) * 100 : 0;
+          const pctHedge = totalAllocated > 0 ? (marginBalance / totalAllocated) * 100 : 0;
+          const pctUnused = totalAllocated > 0 ? (usdcBalance / totalAllocated) * 100 : 0;
+          
+          return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {/* ビジュアル分割バー */}
+              <div style={{ 
+                height: '8px', 
+                background: 'rgba(255,255,255,0.08)', 
+                borderRadius: '4px', 
+                overflow: 'hidden',
+                display: 'flex'
+              }}>
+                {bot1LpValue > 0 && (
+                  <div style={{ 
+                    height: '100%', 
+                    width: `${pctBot1}%`, 
+                    background: 'linear-gradient(90deg, #58a6ff, #1f6feb)',
+                    transition: 'width 0.3s ease' 
+                  }} title={`Bot1 SUI/USDC: ${pctBot1.toFixed(1)}%`} />
+                )}
+                {bot2LpValue > 0 && (
+                  <div style={{ 
+                    height: '100%', 
+                    width: `${pctBot2}%`, 
+                    background: 'linear-gradient(90deg, #2ed573, #26af5f)',
+                    transition: 'width 0.3s ease' 
+                  }} title={`Bot2 DEEP/SUI: ${pctBot2.toFixed(1)}%`} />
+                )}
+                {marginBalance > 0 && (
+                  <div style={{ 
+                    height: '100%', 
+                    width: `${pctHedge}%`, 
+                    background: 'linear-gradient(90deg, #ff9f43, #ee5253)',
+                    transition: 'width 0.3s ease' 
+                  }} title={`Hedge Margin: ${pctHedge.toFixed(1)}%`} />
+                )}
+                {usdcBalance > 0 && (
+                  <div style={{ 
+                    height: '100%', 
+                    width: `${pctUnused}%`, 
+                    background: 'rgba(255,255,255,0.2)',
+                    transition: 'width 0.3s ease' 
+                  }} title={`Unused USDC: ${pctUnused.toFixed(1)}%`} />
+                )}
+              </div>
+
+              {/* ラベル内訳リスト */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#58a6ff' }} />
+                    <span style={{ color: 'var(--text-main)' }}>Bot1 (SUI/USDC LP)</span>
+                  </div>
+                  <span style={{ fontWeight: 700, color: 'white' }}>
+                    ${bot1LpValue.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctBot1.toFixed(0)}%)</span>
+                  </span>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#2ed573' }} />
+                    <span style={{ color: 'var(--text-main)' }}>Bot2 (DEEP/SUI LP)</span>
+                  </div>
+                  <span style={{ fontWeight: 700, color: 'white' }}>
+                    ${bot2LpValue.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctBot2.toFixed(0)}%)</span>
+                  </span>
+                </div>
+
+                {marginBalance > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff9f43' }} />
+                      <span style={{ color: 'var(--text-main)' }}>Hedge (Bluefin 証拠金)</span>
+                    </div>
+                    <span style={{ fontWeight: 700, color: 'white' }}>
+                      ${marginBalance.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctHedge.toFixed(0)}%)</span>
+                    </span>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'rgba(255,255,255,0.4)' }} />
+                    <span style={{ color: 'var(--text-muted)' }}>未使用 (ウォレットUSDC)</span>
+                  </div>
+                  <span style={{ fontWeight: 700, color: 'var(--text-muted)' }}>
+                    ${usdcBalance.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctUnused.toFixed(0)}%)</span>
+                  </span>
+                </div>
+
+                <div style={{ 
+                  marginTop: '4px', 
+                  paddingTop: '6px', 
+                  borderTop: '1px solid rgba(255,255,255,0.05)', 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  fontSize: '0.75rem',
+                  fontWeight: 700
+                }}>
+                  <span style={{ color: 'var(--text-main)' }}>合計運用資本</span>
+                  <span style={{ color: 'var(--accent)' }}>${totalAllocated.toFixed(2)}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* 5. Bot Execution Control (Start/Stop) - Moved to bottom */}

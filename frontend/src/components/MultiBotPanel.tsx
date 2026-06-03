@@ -22,16 +22,15 @@ interface Bot2Status {
 interface MultiBotPanelProps {
   title: string;
   bot: Bot2Status | null;
+  onStart?: () => void;
 }
 
-export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
+export function MultiBotPanel({ title, bot: bot2, onStart }: MultiBotPanelProps) {
   const isActive = bot2?.active === true;
 
   const rangeInPct = bot2?.currentRange && bot2.currentPrice
     ? ((bot2.currentRange.upper - bot2.currentRange.lower) / bot2.currentPrice * 100).toFixed(2)
     : '—';
-
-  const quoteToken = bot2?.pool?.split('/')[1] || 'SUI';
 
   const inRange = bot2?.currentPrice && bot2?.currentRange
     ? bot2.currentPrice >= bot2.currentRange.lower && bot2.currentPrice <= bot2.currentRange.upper
@@ -50,9 +49,29 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
             <Zap size={16} />
           </div>
           <h3 className="bot2-title">{title}</h3>
-          <div className={`bot2-status-badge ${isActive ? 'active' : 'inactive'}`}>
-            <Circle size={7} fill="currentColor" />
-            {isActive ? '稼働中' : '停止中'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div className={`bot2-status-badge ${isActive ? 'active' : 'inactive'}`}>
+              <Circle size={7} fill="currentColor" />
+              {isActive ? '稼働中' : '停止中'}
+            </div>
+            {!isActive && onStart && (
+              <button 
+                onClick={onStart}
+                style={{ 
+                  background: 'var(--accent)', 
+                  border: 'none', 
+                  borderRadius: '12px', 
+                  color: 'white', 
+                  padding: '4px 12px', 
+                  fontSize: '0.75rem', 
+                  fontWeight: 600, 
+                  cursor: 'pointer',
+                  boxShadow: '0 2px 8px rgba(88, 166, 255, 0.3)'
+                }}
+              >
+                開始
+              </button>
+            )}
           </div>
         </div>
         {bot2?.phase && (
@@ -69,7 +88,7 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
           <div className="bot2-price-section">
             <div className="bot2-price-row">
               <span className="bot2-label">現在価格</span>
-              <span className="bot2-value">{bot2?.currentPrice?.toFixed(6) ?? '—'} {quoteToken}</span>
+              <span className="bot2-value">{bot2?.currentPrice?.toFixed(6) ?? '—'} SUI</span>
             </div>
             {bot2?.currentRange && (
               <>
@@ -123,7 +142,7 @@ export function MultiBotPanel({ title, bot: bot2 }: MultiBotPanelProps) {
             <div className="bot2-stat">
               <Zap size={13} className="bot2-stat-icon" />
               <span className="bot2-stat-label">最大資金</span>
-              <span className="bot2-stat-val">${bot2?.maxCapitalUsdc ?? 3} USD</span>
+              <span className="bot2-stat-val">${bot2?.maxCapitalUsdc ?? 3} USDC</span>
             </div>
           </div>
 
