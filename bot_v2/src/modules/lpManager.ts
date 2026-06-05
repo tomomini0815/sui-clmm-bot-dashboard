@@ -178,27 +178,77 @@ export class LpManager {
     return null;
   }
 
+  async getActivePositionIds(): Promise<string[]> {
+    const poolId = this.priceMonitor.getPoolId();
+    const activeIds: string[] = [];
+
+    try {
+      Logger.info(`LpManager: Scanning wallet for Cetus active positions on pool ${poolId}...`);
+      let hasNextPage = true;
+      let nextCursor: string | null | undefined = null;
+      const allObjects: any[] = [];
+
+      while (hasNextPage) {
+        const response: any = await retryOn429(() => this.suiClient.getOwnedObjects({
+          owner: this.walletAddress,
+          cursor: nextCursor,
+          options: { showType: true, showContent: true }
+        }));
+
+        if (response?.data) {
+          allObjects.push(...response.data);
+        }
+        hasNextPage = response?.hasNextPage ?? false;
+        nextCursor = response?.nextCursor ?? null;
+      }
+
+      const poolPositionNfts = allObjects.filter(o => {
+        const type = o.data?.type || '';
+        const fields = (o.data?.content as any)?.fields;
+        const liquidity = parseInt(fields?.liquidity || '0');
+        return type.endsWith('::position::Position') && fields?.pool === poolId && liquidity > 100;
+      });
+
+      for (const nft of poolPositionNfts) {
+        activeIds.push(nft.data!.objectId);
+      }
+    } catch (e) {
+      Logger.error('LpManager: Failed to scan wallet for multiple Cetus positions', e);
+    }
+    return activeIds;
+  }
+
   async hasExistingPosition(): Promise<boolean> {
     const posId = await this.getActivePositionId();
     return posId !== null;
   }
 
-  async getSuiAmountInLp(): Promise<number> {
+  async getSuiAmountInLp(posId?: string): Promise<number> {
     if (!this.isInitialized) await this.initializePoolData();
     if (!this.isInitialized) return 0;
-    const posId = await this.getActivePositionId();
-    if (!posId) return 0;
+    const targetPosId = posId || await this.getActivePositionId();
+    if (!targetPosId) return 0;
 
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
       const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
-      const position = positionList.find(p => p.pos_object_id === posId);
+      const position = positionList.find(p => p.pos_object_id === targetPosId);
       
       if (!position) return 0;
 
-      const suiAmountRaw = this.usdcIsA ? (position as any).coin_amount_b : (position as any).coin_amount_a;
-      return Number(suiAmountRaw);
+      const isCoinASui = this.coinTypeA.toLowerCase().includes('0x2::sui::sui');
+      const isCoinBSui = this.coinTypeB.toLowerCase().includes('0x2::sui::sui');
+
+      let suiAmountRaw = 0;
+      if (isCoinASui) {
+        suiAmountRaw = Number((position as any).coin_amount_a);
+      } else if (isCoinBSui) {
+        suiAmountRaw = Number((position as any).coin_amount_b);
+      } else {
+        suiAmountRaw = this.usdcIsA ? Number((position as any).coin_amount_b) : Number((position as any).coin_amount_a);
+      }
+      return suiAmountRaw;
     } catch (e) {
       Logger.error('Failed to get SUI amount in LP', e);
       return 0;
@@ -217,10 +267,16 @@ export class LpManager {
     }
   }
 
-  async checkBalance(targetAddress?: string): Promise<{ suiBalance: number; usdcBalance: number; sufficient: boolean }> {
+  async checkBalance(targetAddress?: string): Promise<{ 
+    suiBalance: number; 
+    usdcBalance: number; 
+    sufficient: boolean;
+    coinABalance: number;
+    coinBBalance: number;
+  }> {
     if (!this.isInitialized) await this.initializePoolData();
     if (!this.isInitialized) {
-      return { suiBalance: 0, usdcBalance: 0, sufficient: false };
+      return { suiBalance: 0, usdcBalance: 0, sufficient: false, coinABalance: 0, coinBBalance: 0 };
     }
     const addr = targetAddress || this.walletAddress;
     try {
@@ -265,14 +321,42 @@ export class LpManager {
         }
       }
 
+      // プール固有のCoin AおよびCoin Bの残高を取得
+      let coinABalance = 0;
+      let coinBBalance = 0;
+
+      if (this.coinTypeA) {
+        try {
+          const balA = await retryOn429(() => this.suiClient.getBalance({
+            owner: addr,
+            coinType: this.coinTypeA,
+          }));
+          coinABalance = Number(balA.totalBalance) / Math.pow(10, this.decimalsA);
+        } catch (e) {
+          Logger.warn(`Failed to fetch CoinA balance for ${addr}`);
+        }
+      }
+
+      if (this.coinTypeB) {
+        try {
+          const balB = await retryOn429(() => this.suiClient.getBalance({
+            owner: addr,
+            coinType: this.coinTypeB,
+          }));
+          coinBBalance = Number(balB.totalBalance) / Math.pow(10, this.decimalsB);
+        } catch (e) {
+          Logger.warn(`Failed to fetch CoinB balance for ${addr}`);
+        }
+      }
+
       const MIN_OPERATIONAL_USDC = 0.1;
       const sufficient = suiAmount >= 0.01 && usdcAmount >= MIN_OPERATIONAL_USDC;
 
-      Logger.info(`💰 Balance for ${addr}: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)}`);
-      return { suiBalance: suiAmount, usdcBalance: usdcAmount, sufficient };
+      Logger.info(`💰 Balance for ${addr}: SUI=${suiAmount.toFixed(4)}, USDC=${usdcAmount.toFixed(4)}, CoinA=${coinABalance.toFixed(4)}, CoinB=${coinBBalance.toFixed(4)}`);
+      return { suiBalance: suiAmount, usdcBalance: usdcAmount, sufficient, coinABalance, coinBBalance };
     } catch (e: any) {
       Logger.error(`Balance check failed for ${addr}`, e);
-      return { suiBalance: 0, usdcBalance: 0, sufficient: false };
+      return { suiBalance: 0, usdcBalance: 0, sufficient: false, coinABalance: 0, coinBBalance: 0 };
     }
   }
 
@@ -308,24 +392,12 @@ export class LpManager {
         upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
       }
 
-      if (lowerTick > upperTick) {
-        const tmp = lowerTick;
-        lowerTick = upperTick;
-        upperTick = tmp;
-      }
       if (lowerTick === upperTick) {
         upperTick += tickSpacing;
       }
 
-      const poolTick = pool.current_tick_index;
-      if (lowerTick >= poolTick) {
-        lowerTick = lowerTick - tickSpacing;
-      }
-      if (upperTick <= poolTick) {
-        upperTick = upperTick + tickSpacing;
-      }
+      Logger.info(`[Blockchain] Range Ticks: [${lowerTick}, ${upperTick}], Current: ${pool.current_tick_index}`);
 
-      Logger.info(`[Blockchain] Range Ticks: [${lowerTick}, ${upperTick}], Current: ${poolTick}`);
 
       const decimals = isUsdc ? this.usdcDecimals : (this.usdcIsA ? this.decimalsB : this.decimalsA);
       const amountBN = new BN(new Decimal(amount).mul(Math.pow(10, decimals)).toFixed(0));
@@ -348,20 +420,38 @@ export class LpManager {
       const amountA_Needed = new Decimal(estResult.coinAmountA.toString()).div(Math.pow(10, this.decimalsA));
       const amountB_Needed = new Decimal(estResult.coinAmountB.toString()).div(Math.pow(10, this.decimalsB));
       
-      const usdcNeeded = this.usdcIsA ? amountA_Needed : amountB_Needed;
-      const suiNeeded = this.usdcIsA ? amountB_Needed : amountA_Needed;
-      
       let scale = 1.0;
-      const suiNeededMax = suiNeeded.toNumber() * 1.03;
-      const usdcNeededMax = usdcNeeded.toNumber() * 1.03;
+      const amountA_Max = amountA_Needed.toNumber() * 1.03;
+      const amountB_Max = amountB_Needed.toNumber() * 1.03;
 
-      if (suiNeededMax > safeSuiBalance) {
-        scale = Math.min(scale, safeSuiBalance / suiNeededMax);
-        Logger.warn(`SUI balance warning: Scaling LP to ${(scale * 100).toFixed(1)}%`);
+      // Coin Aの残高チェック
+      const isCoinASui = this.coinTypeA.toLowerCase().includes('0x2::sui::sui');
+      if (isCoinASui) {
+        if (amountA_Max > safeSuiBalance) {
+          scale = Math.min(scale, safeSuiBalance / amountA_Max);
+          Logger.warn(`SUI (CoinA) balance warning: Scaling LP to ${(scale * 100).toFixed(1)}%`);
+        }
+      } else {
+        const balA = balances.coinABalance;
+        if (amountA_Max > balA) {
+          scale = Math.min(scale, balA / amountA_Max);
+          Logger.warn(`${this.coinTypeA.split('::').pop()} (CoinA) balance warning: Scaling LP to ${(scale * 100).toFixed(1)}% (Needed: ${amountA_Max.toFixed(4)}, Available: ${balA.toFixed(4)})`);
+        }
       }
-      if (usdcNeededMax > balances.usdcBalance) {
-        scale = Math.min(scale, balances.usdcBalance / usdcNeededMax);
-        Logger.warn(`USDC balance warning: Scaling LP to ${(scale * 100).toFixed(1)}%`);
+
+      // Coin Bの残高チェック
+      const isCoinBSui = this.coinTypeB.toLowerCase().includes('0x2::sui::sui');
+      if (isCoinBSui) {
+        if (amountB_Max > safeSuiBalance) {
+          scale = Math.min(scale, safeSuiBalance / amountB_Max);
+          Logger.warn(`SUI (CoinB) balance warning: Scaling LP to ${(scale * 100).toFixed(1)}%`);
+        }
+      } else {
+        const balB = balances.coinBBalance;
+        if (amountB_Max > balB) {
+          scale = Math.min(scale, balB / amountB_Max);
+          Logger.warn(`${this.coinTypeB.split('::').pop()} (CoinB) balance warning: Scaling LP to ${(scale * 100).toFixed(1)}% (Needed: ${amountB_Max.toFixed(4)}, Available: ${balB.toFixed(4)})`);
+        }
       }
 
       const finalLiquidity = scale < 1.0 
@@ -375,6 +465,10 @@ export class LpManager {
       const finalAmountB = scale < 1.0
         ? estResult.coinAmountB.muln(Math.floor(scale * 1000)).divn(1000)
         : estResult.coinAmountB;
+        
+      if (finalLiquidity.isZero()) {
+        throw new Error('Calculated liquidity is zero. Insufficient SUI balance (below gas reserve) or USDC/DEEP balance.');
+      }
         
       const txPayload = await sdk.Position.createAddLiquidityPayload({
         pool_id:            pool.poolAddress,
@@ -503,6 +597,62 @@ export class LpManager {
       this.currentPositionNft = null;
     } catch (error) {
       Logger.error('Failed in forceCloseAllPositions', error);
+      throw error;
+    }
+  }
+
+  async closePosition(posId: string): Promise<void> {
+    Logger.info(`--- closePosition: Closing position ${posId} on chain ---`);
+    if (!this.isInitialized) await this.initializePoolData();
+    if (!this.isInitialized) throw new Error('LpManager is not initialized');
+    
+    try {
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const pos = positionList.find(p => p.pos_object_id === posId);
+      
+      if (!pos) {
+        Logger.warn(`Position ${posId} not found in wallet active list.`);
+        return;
+      }
+
+      Logger.info(`Closing position: ${pos.pos_object_id} (Liquidity: ${pos.liquidity})`);
+
+      // 流動性が0のポジションはremove_liquidityを呼ぶとCetusがerror code 3で失敗する
+      // スキップして正常終了（stateから削除できるよう成功扱いにする）
+      if (pos.liquidity.toString() === '0' || Number(pos.liquidity) === 0) {
+        Logger.warn(`Position ${pos.pos_object_id} has zero liquidity. Skipping removeLiquidity (already empty/expired).`);
+        return;
+      }
+
+      const pool = await sdk.Pool.getPool(poolId);
+      const txPayload = await sdk.Position.removeLiquidityTransactionPayload({
+        pool_id:             pool.poolAddress,
+        pos_id:              pos.pos_object_id,
+        coinTypeA:           pool.coinTypeA,
+        coinTypeB:           pool.coinTypeB,
+        delta_liquidity:     pos.liquidity.toString(),
+        min_amount_a:        '0',
+        min_amount_b:        '0',
+        collect_fee:         true,
+        rewarder_coin_types: [],
+      });
+
+      const response = await this.txQueue.execute(
+        () => this.suiClient.signAndExecuteTransaction({
+          transaction: txPayload as any,
+          signer: this.keypair,
+          options: { showEffects: true },
+        }),
+        'closePosition'
+      );
+
+      if (response.effects?.status?.status === 'success') {
+        Logger.success(`Successfully closed position ${pos.pos_object_id}`);
+      }
+    } catch (error) {
+      Logger.error(`Failed to close position ${posId}`, error);
       throw error;
     }
   }

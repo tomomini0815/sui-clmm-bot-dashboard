@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet, CheckCircle, AlertCircle, Loader } from 'lucide-react';
 import { StatCard } from './components/StatCard';
 import { PriceChart } from './components/PriceChart';
 import { BalanceChart } from './components/BalanceChart';
@@ -18,6 +18,13 @@ import { MultiBotPanel } from './components/MultiBotPanel';
 import MarketAdvisor from './components/MarketAdvisor';
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
 
+// トースト通知の型
+interface Toast {
+  id: number;
+  message: string;
+  type: 'success' | 'error' | 'loading';
+}
+
 function App() {
   const currentAccount = useCurrentAccount();
   
@@ -25,6 +32,22 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [allSessions, setAllSessions] = useState<any[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isActionPending, setIsActionPending] = useState(false);
+  const toastIdRef = useRef(0);
+
+  const showToast = useCallback((message: string, type: Toast['type'] = 'success', duration = 3000) => {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [...prev, { id, message, type }]);
+    if (type !== 'loading') {
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
+    }
+    return id;
+  }, []);
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
   
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('session_id') || '');
   const [botWalletAddress, setBotWalletAddress] = useState(() => localStorage.getItem('bot_wallet_address') || '');
@@ -239,21 +262,19 @@ function App() {
       }
     };
     fetchStats();
-    const interval = setInterval(fetchStats, 3000);
+    const interval = setInterval(fetchStats, 5000); // 5秒間隔でポーリング（ボタン操作との競合を減らす）
     return () => clearInterval(interval);
   }, [apiUrl, sessionId]);
 
   const handleApplyAdvisorRecommendation = async (mode: 'LP_ONLY' | 'DELTA_NEUTRAL') => {
-    if (!sessionId) return;
+    if (!sessionId || isActionPending) return;
+    const isHedge = mode === 'DELTA_NEUTRAL';
+    const updatedConfig = { ...stats.config, hedgeEnabled: isHedge, hedgeMode: isHedge ? 'bluefin' : 'simulate', rangeWidth: 0.04 };
+    // 楽観的UI更新
+    setStats(prev => ({ ...prev, config: { ...prev.config, ...updatedConfig } }));
+    setIsActionPending(true);
+    const loadingId = showToast(`AI戦略「${mode}」を適用中...`, 'loading');
     try {
-      const isHedge = mode === 'DELTA_NEUTRAL';
-      const updatedConfig = {
-        ...stats.config,
-        hedgeEnabled: isHedge,
-        hedgeMode: isHedge ? 'bluefin' : 'simulate',
-        rangeWidth: 0.04 
-      };
-
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -264,44 +285,57 @@ function App() {
           hedgeRatio: (updatedConfig.hedgeRatio * 100).toString(),
         }),
       });
-
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        alert(`AI Strategy Applied: ${mode}. Bot is rebalancing...`);
-        // 最新のステータスを取得
-        const statsRes = await fetch(`${apiUrl}/api/stats?sessionId=${sessionId}`);
-        const statsData = await statsRes.json();
-        if (statsData.success) {
-          setStats(statsData.data);
-        }
+        showToast(`✅ AI戦略「${mode}」を適用しました。ボットがリバランス中...`);
+      } else {
+        showToast('AI戦略の適用に失敗しました', 'error');
       }
     } catch (err) {
-      console.error('Failed to apply strategy', err);
-      alert('Failed to apply AI strategy.');
+      dismissToast(loadingId);
+      showToast('AI戦略の適用に失敗しました', 'error');
+    } finally {
+      setIsActionPending(false);
     }
   };
 
   const toggleBotState = async () => {
-    if (!sessionId) return;
-    
+    if (!sessionId || isActionPending) return;
+    const nextActive = !isBotActive;
+    // 楽観的UI更新（即時反応）
+    setIsBotActive(nextActive);
+    setIsActionPending(true);
+    const loadingId = showToast(nextActive ? 'ボットを起動中...⚙️' : 'ボットを停止中...', 'loading');
     try {
-      const endpoint = isBotActive ? '/api/stop' : '/api/start';
+      const endpoint = nextActive ? '/api/start' : '/api/stop';
       const response = await fetch(`${apiUrl}${endpoint}`, { 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId })
       });
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        setIsBotActive(!isBotActive);
+        showToast(nextActive ? '✅ ボットを起動しました' : '⏹️ ボットを停止しました', 'success');
+      } else {
+        // ロールバック
+        setIsBotActive(!nextActive);
+        showToast('操作に失敗しました', 'error');
       }
     } catch (e) {
-      console.error('Failed to communicate with bot backend', e);
-      alert('Network Error: Make sure your backend API is running at ' + apiUrl);
+      dismissToast(loadingId);
+      setIsBotActive(!nextActive); // ロールバック
+      showToast('通信エラー: バックエンドが起動中か確認してください', 'error', 5000);
+    } finally {
+      setIsActionPending(false);
     }
   };
 
   const handleUpdateCapital = async (newAmount: number) => {
+    // 楽観的UI更新
+    setStats(prev => ({ ...prev, config: { ...prev.config, lpAmountUsdc: newAmount } }));
+    const loadingId = showToast('運用資金を更新中...', 'loading');
     try {
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
@@ -316,18 +350,26 @@ function App() {
         }),
       });
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        setStats(prev => ({ ...prev, config: { ...prev.config, lpAmountUsdc: newAmount } }));
-        alert(`✅ 運用資金を ${newAmount} USDC に更新しました`);
+        showToast(`✅ 運用資金を ${newAmount} USDC に更新しました`);
+      } else {
+        showToast('更新に失敗しました', 'error');
       }
     } catch (e) {
-      alert('更新に失敗しました。バックエンドが起動中か確認してください。');
+      dismissToast(loadingId);
+      showToast('更新に失敗しました。バックエンドが起動中か確認してください。', 'error', 5000);
     }
   };
 
   const handleUpdateStrategyMode = async (mode: 'balanced' | 'range_order', hedgeEnabled: boolean) => {
-    if (!sessionId) return;
-    
+    if (!sessionId || isActionPending) return;
+    // 楽観的UI更新（即時反応）
+    const prevConfig = stats.config;
+    setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode, hedgeEnabled } }));
+    setIsActionPending(true);
+    const modeText = mode === 'balanced' ? 'ヘッジあり' : 'ヘッジなし';
+    const loadingId = showToast(`戦略を「${modeText}」に切り替え中...`, 'loading');
     try {
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
@@ -335,7 +377,7 @@ function App() {
         body: JSON.stringify({
           sessionId,
           strategyMode: mode,
-          hedgeEnabled: hedgeEnabled,
+          hedgeEnabled,
           lpAmountUsdc: stats.config.lpAmountUsdc,
           rangeWidth: (stats.config.rangeWidth * 100).toString(),
           hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
@@ -343,26 +385,31 @@ function App() {
         }),
       });
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: mode, hedgeEnabled: hedgeEnabled } }));
-        // ボットが稼働中の場合はリバランスがトリガーされる旨を通知
-        const modeText = mode === 'balanced' ? 'ヘッジあり (バランス型)' : 'ヘッジなし (指値レンジ型)';
-        if (isBotActive) {
-          alert(`🚀 戦略を 「${modeText}」 に切り替えました。即座にリセット・再構築が実行されます。`);
-        } else {
-          alert(`✅ 戦略を 「${modeText}」 に設定しました。`);
-        }
+        showToast(isBotActive ? `🚀 「${modeText}」に切り替えました。再構築を実行します。` : `✅ 「${modeText}」に設定しました。`);
+      } else {
+        setStats(prev => ({ ...prev, config: prevConfig })); // ロールバック
+        showToast('戦略の切り替えに失敗しました', 'error');
       }
     } catch (e) {
-      alert('戦略の切り替えに失敗しました。');
+      dismissToast(loadingId);
+      setStats(prev => ({ ...prev, config: prevConfig })); // ロールバック
+      showToast('戦略の切り替えに失敗しました', 'error');
+    } finally {
+      setIsActionPending(false);
     }
   };
 
   const handleToggleHedge = async () => {
-    if (!sessionId) return;
+    if (!sessionId || isActionPending) return;
     const nextHedgeEnabled = !stats.config.hedgeEnabled;
     const nextStrategyMode = nextHedgeEnabled ? 'balanced' : 'range_order';
-    
+    // 楽観的UI更新（即時反応）
+    const prevConfig = stats.config;
+    setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: nextStrategyMode, hedgeEnabled: nextHedgeEnabled } }));
+    setIsActionPending(true);
+    const loadingId = showToast(`ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に切り替え中...`, 'loading');
     try {
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
@@ -378,29 +425,29 @@ function App() {
         }),
       });
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        setStats(prev => ({ 
-          ...prev, 
-          config: { 
-            ...prev.config, 
-            strategyMode: nextStrategyMode, 
-            hedgeEnabled: nextHedgeEnabled 
-          } 
-        }));
-        
-        if (isBotActive) {
-          alert(`🚀 ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に切り替えました。ボットのリバランス・クローズが即座に実行されます。`);
-        } else {
-          alert(`✅ ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に設定しました。`);
-        }
+        showToast(isBotActive
+          ? `🚀 ヘッジ「${nextHedgeEnabled ? 'ON' : 'OFF'}」。リバランスを実行します。`
+          : `✅ ヘッジを「${nextHedgeEnabled ? 'ON' : 'OFF'}」に設定しました。`);
+      } else {
+        setStats(prev => ({ ...prev, config: prevConfig })); // ロールバック
+        showToast('ヘッジの切り替えに失敗しました', 'error');
       }
     } catch (e) {
-      alert('ヘッジの切り替えに失敗しました。');
+      dismissToast(loadingId);
+      setStats(prev => ({ ...prev, config: prevConfig })); // ロールバック
+      showToast('ヘッジの切り替えに失敗しました', 'error');
+    } finally {
+      setIsActionPending(false);
     }
   };
 
   const handleUpdateRangeWidth = async (newWidth: number) => {
     if (!sessionId) return;
+    // 楽観的UI更新
+    setStats(prev => ({ ...prev, config: { ...prev.config, rangeWidth: newWidth / 100 } }));
+    const loadingId = showToast(`レンジ幅を ±${newWidth.toFixed(1)}% に更新中...`, 'loading');
     try {
       const response = await fetch(`${apiUrl}/api/config`, {
         method: 'POST',
@@ -416,17 +463,15 @@ function App() {
         }),
       });
       const data = await response.json();
+      dismissToast(loadingId);
       if (data.success) {
-        setStats(prev => ({ 
-          ...prev, 
-          config: { 
-            ...prev.config, 
-            rangeWidth: newWidth / 100 
-          } 
-        }));
+        showToast(`✅ レンジ幅を ±${newWidth.toFixed(1)}% に設定しました`);
+      } else {
+        showToast('レンジ幅の更新に失敗しました', 'error');
       }
     } catch (e) {
-      console.error('Failed to update range width', e);
+      dismissToast(loadingId);
+      showToast('レンジ幅の更新に失敗しました', 'error');
     }
   };
 
@@ -449,6 +494,37 @@ function App() {
 
   return (
     <div className="dashboard-container">
+      {/* トースト通知システム */}
+      <div style={{
+        position: 'fixed', top: '20px', right: '20px', zIndex: 9999,
+        display: 'flex', flexDirection: 'column', gap: '8px', pointerEvents: 'none'
+      }}>
+        {toasts.map(toast => (
+          <div key={toast.id} style={{
+            display: 'flex', alignItems: 'center', gap: '10px',
+            padding: '12px 16px', borderRadius: '12px',
+            background: toast.type === 'success' ? 'rgba(34, 197, 94, 0.15)'
+              : toast.type === 'error' ? 'rgba(239, 68, 68, 0.15)'
+              : 'rgba(88, 166, 255, 0.15)',
+            border: `1px solid ${
+              toast.type === 'success' ? 'rgba(34, 197, 94, 0.4)'
+              : toast.type === 'error' ? 'rgba(239, 68, 68, 0.4)'
+              : 'rgba(88, 166, 255, 0.4)'
+            }`,
+            backdropFilter: 'blur(12px)',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            color: 'white', fontSize: '0.85rem', fontWeight: 600,
+            minWidth: '260px', maxWidth: '360px',
+            animation: 'slideInRight 0.25s ease-out',
+            pointerEvents: 'auto'
+          }}>
+            {toast.type === 'success' && <CheckCircle size={16} color="#22c55e" style={{ flexShrink: 0 }} />}
+            {toast.type === 'error' && <AlertCircle size={16} color="#ef4444" style={{ flexShrink: 0 }} />}
+            {toast.type === 'loading' && <Loader size={16} color="#58a6ff" style={{ flexShrink: 0, animation: 'spin 1s linear infinite' }} />}
+            <span style={{ flex: 1 }}>{toast.message}</span>
+          </div>
+        ))}
+      </div>
       <header className="header">
         <div className="header-title-section">
           <h1>
@@ -521,6 +597,7 @@ function App() {
           {sessionId && (
             <button
               onClick={handleToggleHedge}
+              disabled={isActionPending}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -532,8 +609,9 @@ function App() {
                 borderRadius: '12px',
                 fontSize: '0.85rem',
                 fontWeight: 700,
-                cursor: 'pointer',
-                transition: 'all 0.2s',
+                cursor: isActionPending ? 'not-allowed' : 'pointer',
+                opacity: isActionPending ? 0.7 : 1,
+                transition: 'all 0.15s',
                 border: '1px solid',
                 boxShadow: stats.config?.hedgeEnabled ? '0 0 8px rgba(255, 159, 67, 0.15)' : 'none',
               }}

@@ -46,11 +46,13 @@ export interface BotConfig {
   // === 指値レンジ戦略 (Range Order) 設定 ===
   strategyMode: 'balanced' | 'range_order' | 'bluefin_grid';
   rangeOrderSide: 'above' | 'below';
-  rangeOrderOffsetPct: number;      // 現在価格からのオフセット (%)
-  rangeOrderWidthPct: number;       // レンジ幅 (%)
+  rangeOrderOffset1Pct: number;     // 1段階目のオフセット (%)
+  rangeOrderOffset2Pct: number;     // 2段階目のオフセット (%)
+  rangeOrderWidthPct: number;       // 各レンジ幅 (%)
   rangeOrderHedgeEnabled: boolean;  // デルタヘッジを有効にするか（指値注文中は通常false）
   hedgeEnabled: boolean;           // 全体的なヘッジの有効・無効
   poolObjectId: string;            // 運用対象のプールID
+  rangeOrderBreachDurationMs?: number; // レンジはみ出し判定継続時間 (ms)
 }
 
 function loadConfig(): BotConfig {
@@ -79,7 +81,8 @@ function loadConfig(): BotConfig {
     // 戦略
     STRATEGY_MODE,
     RANGE_ORDER_SIDE,
-    RANGE_ORDER_OFFSET_PCT,
+    RANGE_ORDER_OFFSET_1_PCT,
+    RANGE_ORDER_OFFSET_2_PCT,
     RANGE_ORDER_WIDTH_PCT,
     RANGE_ORDER_HEDGE_ENABLED,
     HEDGE_ENABLED,
@@ -120,11 +123,13 @@ function loadConfig(): BotConfig {
     // 戦略設定
     strategyMode: (STRATEGY_MODE as 'balanced' | 'range_order') || 'balanced',
     rangeOrderSide: (RANGE_ORDER_SIDE as 'above' | 'below') || 'above',
-    rangeOrderOffsetPct: parseFloat(RANGE_ORDER_OFFSET_PCT || '0.005'), // デフォルト 0.5%
+    rangeOrderOffset1Pct: parseFloat(RANGE_ORDER_OFFSET_1_PCT || '0.005'), // デフォルト 0.5%
+    rangeOrderOffset2Pct: parseFloat(RANGE_ORDER_OFFSET_2_PCT || '0.015'), // デフォルト 1.5%
     rangeOrderWidthPct: parseFloat(RANGE_ORDER_WIDTH_PCT || '0.001'),  // デフォルト 0.1%
     rangeOrderHedgeEnabled: RANGE_ORDER_HEDGE_ENABLED === 'true',     // 指値レンジではデフォルト false
     hedgeEnabled: HEDGE_ENABLED !== 'false',                         // デフォルトは true
     poolObjectId: process.env.POOL_OBJECT_ID || (SUI_RPC_URL?.includes('testnet') ? '0xf4f9663f288049ede73a9f19e3a655c74be8a9a84dd3e2c7f04c190c5c9f1fba' : '0xb8d7d9e66a60c239e7a60110efcf8de6c705580ed924d0dde141f4a0e2c90105'),
+    rangeOrderBreachDurationMs: parseInt(process.env.RANGE_ORDER_BREACH_DURATION_MS || '60000', 10),
   };
 }
 

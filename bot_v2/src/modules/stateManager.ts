@@ -4,17 +4,43 @@ import { Logger } from './logger.js';
 
 export interface BotState {
   phase: 'A' | 'B' | 'C' | 'D';
-  lpPositionId: string | null;
+  lpPositionId: string | null;          // 互換性のため残す
+  lpPositionIdBelow: string | null;     // 互換性のため残す
+  lpPositionIdAbove: string | null;     // 互換性のため残す
+  
+  // 新規4ポジションID (Bot1/Bot2各4ポジション、合計8ポジション)
+  lpPositionIdBelow1: string | null;
+  lpPositionIdBelow2: string | null;
+  lpPositionIdAbove1: string | null;
+  lpPositionIdAbove2: string | null;
+
   bluefinOrderId: string | null;
   bluefinSide: 'short' | 'long' | 'none';
   basePrice: number;
-  rangeLower: number;
-  rangeUpper: number;
+  rangeLower: number;                   // 互換性のため残す
+  rangeUpper: number;                   // 互換性のため残す
+  rangeLowerBelow: number;              // 互換性のため残す
+  rangeUpperBelow: number;              // 互換性のため残す
+  rangeLowerAbove: number;              // 互換性のため残す
+  rangeUpperAbove: number;              // 互換性のため残す
+
+  // 新規価格境界
+  rangeLowerBelow1: number;
+  rangeUpperBelow1: number;
+  rangeLowerBelow2: number;
+  rangeUpperBelow2: number;
+  rangeLowerAbove1: number;
+  rangeUpperAbove1: number;
+  rangeLowerAbove2: number;
+  rangeUpperAbove2: number;
+
   rangeWidth: number;
   totalCapital: number;
   rebalanceCount24h: number;
   lastRebalanceAt: number;
   rebalanceHistory: number[]; 
+  breachStartAt?: number;
+  missingPositionsStartAt?: number;
 }
 
 export class StateManager {

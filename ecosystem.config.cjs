@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'sui-bot-backend',
-      script: 'bot_v2/dist/index.js',
+      script: 'dist/index.js',
       cwd: 'bot_v2',
       watch: false,
       autorestart: true,
