@@ -561,7 +561,7 @@ export class Strategy {
         // ══ Bot1: 現在価格中心に1%幅4ポジション隣接配置 ══
         // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
         // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
-        const offset = 0.008; 
+        const offset = 0.002; 
         const bot1LowerBelow1 = price1 * (1 - width - offset);
         const bot1UpperBelow1 = price1 * (1 - offset);
         const bot1LowerBelow2 = price1 * (1 - 2 * width - offset);
@@ -1685,12 +1685,26 @@ export class Strategy {
 
       // 3. 状態をクリアして保存
       this.bot1.state.lpPositionId = null;
+      this.bot1.state.lpPositionIdBelow = null;
+      this.bot1.state.lpPositionIdAbove = null;
+      this.bot1.state.lpPositionIdBelow1 = null;
+      this.bot1.state.lpPositionIdBelow2 = null;
+      this.bot1.state.lpPositionIdAbove1 = null;
+      this.bot1.state.lpPositionIdAbove2 = null;
+      this.bot1.state.lastSlideDirection = null;
       this.bot1.state.bluefinOrderId = null;
       this.bot1.state.bluefinSide = 'none';
       this.bot1.state.phase = 'A';
       this.bot1.stateManager.saveState(this.bot1.state);
 
       this.bot2.state.lpPositionId = null;
+      this.bot2.state.lpPositionIdBelow = null;
+      this.bot2.state.lpPositionIdAbove = null;
+      this.bot2.state.lpPositionIdBelow1 = null;
+      this.bot2.state.lpPositionIdBelow2 = null;
+      this.bot2.state.lpPositionIdAbove1 = null;
+      this.bot2.state.lpPositionIdAbove2 = null;
+      this.bot2.state.lastSlideDirection = null;
       this.bot2.state.bluefinOrderId = null;
       this.bot2.state.bluefinSide = 'none';
       this.bot2.state.phase = 'A';
@@ -1839,6 +1853,26 @@ export class Strategy {
       // 強制リバランス: フェーズCではなく統合フェーズA（全資金再配分）を実行
       Logger.info('[STRATEGY] 手動リバランス: 両ボットの全資金を再配分します（統合フェーズA）');
       const price2 = await this.bot2.priceMonitor.getCurrentPrice();
+      
+      // ポジションIDをクリアして強制再構築を促す
+      this.bot1.state.lpPositionId = null;
+      this.bot1.state.lpPositionIdBelow = null;
+      this.bot1.state.lpPositionIdAbove = null;
+      this.bot1.state.lpPositionIdBelow1 = null;
+      this.bot1.state.lpPositionIdBelow2 = null;
+      this.bot1.state.lpPositionIdAbove1 = null;
+      this.bot1.state.lpPositionIdAbove2 = null;
+      this.bot1.state.lastSlideDirection = null;
+
+      this.bot2.state.lpPositionId = null;
+      this.bot2.state.lpPositionIdBelow = null;
+      this.bot2.state.lpPositionIdAbove = null;
+      this.bot2.state.lpPositionIdBelow1 = null;
+      this.bot2.state.lpPositionIdBelow2 = null;
+      this.bot2.state.lpPositionIdAbove1 = null;
+      this.bot2.state.lpPositionIdAbove2 = null;
+      this.bot2.state.lastSlideDirection = null;
+
       this.bot1.state.phase = 'A';
       this.bot2.state.phase = 'A';
       this.bot1.currentPhase = CyclePhase.A;
