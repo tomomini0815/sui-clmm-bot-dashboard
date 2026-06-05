@@ -41,6 +41,7 @@ export class Strategy {
   private riskGuard: RiskGuard;
   private timer: NodeJS.Timeout | null = null;
   private isPhaseARunning: boolean = false; // 統合フェーズAの二重起動防止フラグ
+  private isRolling: { [key: string]: boolean } = {}; // 各ボットのスライドローリング重複起動防止フラグ
 
   // PnL データのキャッシュ機構（429 Too Many Requestsの防止）
   private lastPnlData: any = null;
@@ -405,6 +406,7 @@ export class Strategy {
         this.bot1.state.lpPositionIdBelow2 = null;
         this.bot1.state.lpPositionIdAbove1 = null;
         this.bot1.state.lpPositionIdAbove2 = null;
+        this.bot1.state.lastSlideDirection = null;
 
         this.bot2.currentPhase = CyclePhase.A;
         await this.bot2.lpManager.forceCloseAllPositions().catch(e => Logger.warn(`[PHASE_A] Bot2 forceCloseエラー: ${e.message}`));
@@ -415,6 +417,7 @@ export class Strategy {
         this.bot2.state.lpPositionIdBelow2 = null;
         this.bot2.state.lpPositionIdAbove1 = null;
         this.bot2.state.lpPositionIdAbove2 = null;
+        this.bot2.state.lastSlideDirection = null;
 
         this.bot1.stateManager.saveState(this.bot1.state);
         this.bot2.stateManager.saveState(this.bot2.state);
@@ -1064,17 +1067,53 @@ export class Strategy {
   }
 
   private async checkAndRollPositions(bot: BotInstance, price: number): Promise<boolean> {
+    if (this.isRolling[bot.name]) {
+      return false;
+    }
     const isBot1 = bot.name.includes('Bot1');
     const width = this.config.rangeOrderWidthPct || 0.01;
     const GAS_RESERVE = 0.5;
 
+    // ─── 0. スライド方向ロック解除（中央エリアへの復帰判定） ───
+    // 現在価格が Below1 の上限と Above1 の下限の間（中央の安全地帯）に戻った場合、
+    // 逆方向へのスライド抑制を解除する。
+    if (bot.state.lastSlideDirection) {
+      const upperBelow1 = bot.state.rangeUpperBelow1 || 0;
+      const lowerAbove1 = bot.state.rangeLowerAbove1 || Infinity;
+      if (price > upperBelow1 && price < lowerAbove1) {
+        Logger.info(`[${bot.name}] 価格が中央の安全エリアに戻りました（価格: $${price.toFixed(6)}, Below1上限: $${upperBelow1.toFixed(6)}, Above1下限: $${lowerAbove1.toFixed(6)}）。スライド方向ロックをリセットします。`);
+        bot.state.lastSlideDirection = null;
+        bot.stateManager.saveState(bot.state);
+      }
+    }
 
-    // ─── 1. Below2 下限を下抜けした場合 → 下落方向スライドローリング ───
-    // 価格が全4ポジションの最下限(Below2下限)を下回った = 2%下落した
+    // ─── スライドしきい値の動的決定 ───
+    let upperBelow1Trigger = bot.state.rangeUpperBelow1 || 0;
+    let lowerAbove1Trigger = bot.state.rangeLowerAbove1 || Infinity;
+
+    // もし直前のスライドが「下落方向（down）」だった場合：
+    // 現在価格は新 Above1 (旧 Below1) の中にいるはず。
+    // 上昇スライド（逆方向）のトリガーをしきい値の上限（rangeUpperAbove1）に引き上げる。
+    // これにより、完全に中央に戻る（または上抜ける）まで上昇スライドを抑制する。
+    if (bot.state.lastSlideDirection === 'down') {
+      lowerAbove1Trigger = bot.state.rangeUpperAbove1 || Infinity;
+    }
+
+    // もし直前のスライドが「上昇方向（up）」だった場合：
+    // 現在価格は新 Below1 (旧 Above1) の中にいるはず。
+    // 下落スライド（逆方向）のトリガーをしきい値の下限（rangeLowerBelow1）に引き下げる。
+    // これにより、完全に中央に戻る（または下抜ける）まで下落スライドを抑制する。
+    if (bot.state.lastSlideDirection === 'up') {
+      upperBelow1Trigger = bot.state.rangeLowerBelow1 || 0;
+    }
+
+    // ─── 1. Below1 下限を下抜けした場合 → 下落方向スライドローリング ───
+    // 価格が Below1 の上限を下回った = 1%下落した（Below1がアクティブになった）瞬間
     // → Above2をクローズし、グリッドを下にスライドさせ、新しいBelow2を構築
-    if (bot.state.lpPositionIdBelow2 && price <= (bot.state.rangeUpperBelow2 || 0)) {
-      Logger.warn(`[${bot.name}] 🔻 価格が Below2 の上限を下抜け（Below2がアクティブに）しました。下落方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Below2上限: $${(bot.state.rangeUpperBelow2 || 0).toFixed(6)}`);
+    if (bot.state.lpPositionIdBelow1 && price <= upperBelow1Trigger) {
+      Logger.warn(`[${bot.name}] 🔻 価格が Below1 の上限を下抜け（Below1がアクティブに）しました。下落方向スライドローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Below1上限: $${(bot.state.rangeUpperBelow1 || 0).toFixed(6)}`);
+      this.isRolling[bot.name] = true;
 
       try {
         // 全ポジションから金利を回収して再投資資金にする
@@ -1177,6 +1216,7 @@ export class Strategy {
             bot.state.lpPositionIdBelow2   = newPosId;
             bot.state.rangeLowerBelow2     = newLower;
             bot.state.rangeUpperBelow2     = finalUpper;
+            bot.state.lastSlideDirection   = 'down'; // 方向ロックを設定
             Logger.success(`[${bot.name}] ✅ 新 Below2 構築完了: ${newPosId} (${newLower.toFixed(6)}-${finalUpper.toFixed(6)})`);
             await this.tracker.recordEvent('指値ローリング（下落）',
               `Below2下限突破のためAbove2をクローズし、新Below2(${newLower.toFixed(6)}-${finalUpper.toFixed(6)})を構築。`,
@@ -1187,6 +1227,8 @@ export class Strategy {
             this.bot1.currentPhase = CyclePhase.A;
             this.bot2.state.phase = 'A';
             this.bot2.currentPhase = CyclePhase.A;
+            this.bot1.state.lastSlideDirection = null;
+            this.bot2.state.lastSlideDirection = null;
             this.bot1.stateManager.saveState(this.bot1.state);
             this.bot2.stateManager.saveState(this.bot2.state);
             return true;
@@ -1197,6 +1239,8 @@ export class Strategy {
           this.bot1.currentPhase = CyclePhase.A;
           this.bot2.state.phase = 'A';
           this.bot2.currentPhase = CyclePhase.A;
+          this.bot1.state.lastSlideDirection = null;
+          this.bot2.state.lastSlideDirection = null;
           this.bot1.stateManager.saveState(this.bot1.state);
           this.bot2.stateManager.saveState(this.bot2.state);
           return true;
@@ -1205,15 +1249,18 @@ export class Strategy {
         return true;
       } catch (e: any) {
         Logger.error(`[${bot.name}] 下落スライドローリング中にエラー: ${e.message}`, e);
+      } finally {
+        this.isRolling[bot.name] = false;
       }
     }
 
-    // ─── 2. Above2 上限を上抜けした場合 → 上昇方向スライドローリング ───
-    // 価格が全4ポジションの最上限(Above2上限)を上回った = 2%上昇した
+    // ─── 2. Above1 上限を上抜けした場合 → 上昇方向スライドローリング ───
+    // 価格が Above1 の下限を上回った = 1%上昇した（Above1がアクティブになった）瞬間
     // → Below2をクローズし、グリッドを上にスライドさせ、新しいAbove2を構築
-    if (bot.state.lpPositionIdAbove2 && price >= (bot.state.rangeLowerAbove2 || Infinity)) {
-      Logger.warn(`[${bot.name}] 🔺 価格が Above2 の下限を上抜け（Above2がアクティブに）しました。上昇方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Above2下限: $${(bot.state.rangeLowerAbove2 || 0).toFixed(6)}`);
+    if (bot.state.lpPositionIdAbove1 && price >= lowerAbove1Trigger) {
+      Logger.warn(`[${bot.name}] 🔺 価格が Above1 の下限を上抜け（Above1がアクティブに）しました。上昇方向スライドローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Above1下限: $${(bot.state.rangeLowerAbove1 || 0).toFixed(6)}`);
+      this.isRolling[bot.name] = true;
 
       try {
         // 全ポジションから金利を回収して再投資資金にする
@@ -1317,6 +1364,7 @@ export class Strategy {
             bot.state.lpPositionIdAbove2   = newPosId;
             bot.state.rangeLowerAbove2     = finalLower;
             bot.state.rangeUpperAbove2     = newUpper;
+            bot.state.lastSlideDirection   = 'up'; // 方向ロックを設定
             Logger.success(`[${bot.name}] ✅ 新 Above2 構築完了: ${newPosId} (${finalLower.toFixed(6)}-${newUpper.toFixed(6)})`);
             await this.tracker.recordEvent('指値ローリング（上昇）',
               `Above2上限突破のためBelow2をクローズし、新Above2(${finalLower.toFixed(6)}-${newUpper.toFixed(6)})を構築。`,
@@ -1327,6 +1375,8 @@ export class Strategy {
             this.bot1.currentPhase = CyclePhase.A;
             this.bot2.state.phase = 'A';
             this.bot2.currentPhase = CyclePhase.A;
+            this.bot1.state.lastSlideDirection = null;
+            this.bot2.state.lastSlideDirection = null;
             this.bot1.stateManager.saveState(this.bot1.state);
             this.bot2.stateManager.saveState(this.bot2.state);
             return true;
@@ -1337,6 +1387,8 @@ export class Strategy {
           this.bot1.currentPhase = CyclePhase.A;
           this.bot2.state.phase = 'A';
           this.bot2.currentPhase = CyclePhase.A;
+          this.bot1.state.lastSlideDirection = null;
+          this.bot2.state.lastSlideDirection = null;
           this.bot1.stateManager.saveState(this.bot1.state);
           this.bot2.stateManager.saveState(this.bot2.state);
           return true;
@@ -1345,6 +1397,8 @@ export class Strategy {
         return true;
       } catch (e: any) {
         Logger.error(`[${bot.name}] 上昇スライドローリング中にエラー: ${e.message}`, e);
+      } finally {
+        this.isRolling[bot.name] = false;
       }
     }
 

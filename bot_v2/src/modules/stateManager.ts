@@ -41,6 +41,7 @@ export interface BotState {
   rebalanceHistory: number[]; 
   breachStartAt?: number;
   missingPositionsStartAt?: number;
+  lastSlideDirection?: 'up' | 'down' | null;
 }
 
 export class StateManager {
