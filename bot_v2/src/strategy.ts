@@ -556,18 +556,17 @@ export class Strategy {
         const allocatedIds1: string[] = [];
 
         // ══ Bot1: 現在価格中心に1%幅4ポジション隣接配置 ══
-        // Below1: [price*0.99, price]         ← 現在価格すぐ下の買い指値
-        // Below2: [price*0.98, price*0.99]    ← さらに1%下の買い指値
-        // Above1: [price, price*1.01]         ← 現在価格すぐ上の売り指値
-        // Above2: [price*1.01, price*1.02]    ← さらに1%上の売り指値
-        const bot1LowerBelow1 = price1 * (1 - width);
-        const bot1UpperBelow1 = price1;
-        const bot1LowerBelow2 = price1 * (1 - 2 * width);
-        const bot1UpperBelow2 = price1 * (1 - width);
-        const bot1LowerAbove1 = price1;
-        const bot1UpperAbove1 = price1 * (1 + width);
-        const bot1LowerAbove2 = price1 * (1 + width);
-        const bot1UpperAbove2 = price1 * (1 + 2 * width);
+        // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
+        // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
+        const offset = 0.008; 
+        const bot1LowerBelow1 = price1 * (1 - width - offset);
+        const bot1UpperBelow1 = price1 * (1 - offset);
+        const bot1LowerBelow2 = price1 * (1 - 2 * width - offset);
+        const bot1UpperBelow2 = price1 * (1 - width - offset);
+        const bot1LowerAbove1 = price1 * (1 + offset);
+        const bot1UpperAbove1 = price1 * (1 + width + offset);
+        const bot1LowerAbove2 = price1 * (1 + width + offset);
+        const bot1UpperAbove2 = price1 * (1 + 2 * width + offset);
 
         Logger.info(`[Bot1] レンジ構成:`);
         Logger.info(`  Below2: $${bot1LowerBelow2.toFixed(4)} - $${bot1UpperBelow2.toFixed(4)}`);
@@ -650,14 +649,17 @@ export class Strategy {
         // Below2: [price2*(1-2w), price2*(1-w)]   ← さらに下の買い指値
         // Above1: [price2, price2*(1+w)]           ← DEEP売り指値（DEEPを投入）
         // Above2: [price2*(1+w), price2*(1+2w)]   ← さらに上の売り指値
-        const bot2LowerBelow1 = price2 * (1 - width);
-        const bot2UpperBelow1 = price2;
-        const bot2LowerBelow2 = price2 * (1 - 2 * width);
-        const bot2UpperBelow2 = price2 * (1 - width);
-        const bot2LowerAbove1 = price2;
-        const bot2UpperAbove1 = price2 * (1 + width);
-        const bot2LowerAbove2 = price2 * (1 + width);
-        const bot2UpperAbove2 = price2 * (1 + 2 * width);
+        // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
+        // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
+        // offset は上で宣言された 0.008 を再利用
+        const bot2LowerBelow1 = price2 * (1 - width - offset);
+        const bot2UpperBelow1 = price2 * (1 - offset);
+        const bot2LowerBelow2 = price2 * (1 - 2 * width - offset);
+        const bot2UpperBelow2 = price2 * (1 - width - offset);
+        const bot2LowerAbove1 = price2 * (1 + offset);
+        const bot2UpperAbove1 = price2 * (1 + width + offset);
+        const bot2LowerAbove2 = price2 * (1 + width + offset);
+        const bot2UpperAbove2 = price2 * (1 + 2 * width + offset);
 
         Logger.info(`[Bot2] レンジ構成:`);
         Logger.info(`  Below2: ${bot2LowerBelow2.toFixed(6)} - ${bot2UpperBelow2.toFixed(6)}`);
