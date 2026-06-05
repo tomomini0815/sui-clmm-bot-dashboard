@@ -1070,11 +1070,28 @@ export class Strategy {
     // ─── 1. Below2 下限を下抜けした場合 → 下落方向スライドローリング ───
     // 価格が全4ポジションの最下限(Below2下限)を下回った = 2%下落した
     // → Above2をクローズし、グリッドを下にスライドさせ、新しいBelow2を構築
-    if (bot.state.lpPositionIdBelow2 && price <= (bot.state.rangeLowerBelow2 || 0)) {
-      Logger.warn(`[${bot.name}] 🔻 価格が Below2 の下限を下抜けしました。下落方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Below2下限: $${(bot.state.rangeLowerBelow2 || 0).toFixed(6)}`);
+    if (bot.state.lpPositionIdBelow2 && price <= (bot.state.rangeUpperBelow2 || 0)) {
+      Logger.warn(`[${bot.name}] 🔻 価格が Below2 の上限を下抜け（Below2がアクティブに）しました。下落方向スライドローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Below2上限: $${(bot.state.rangeUpperBelow2 || 0).toFixed(6)}`);
 
       try {
+        // 全ポジションから金利を回収して再投資資金にする
+        const allActivePosIds = [
+          bot.state.lpPositionIdBelow1,
+          bot.state.lpPositionIdBelow2,
+          bot.state.lpPositionIdAbove1,
+          bot.state.lpPositionIdAbove2
+        ].filter(Boolean) as string[];
+        for (const posId of allActivePosIds) {
+          try {
+            Logger.info(`[${bot.name}] スライド前にポジション ${posId} から金利を回収し再投資へ...`);
+            await bot.lpManager.collectFees(posId);
+          } catch (e: any) {
+            Logger.warn(`[${bot.name}] 金利自動回収失敗（続行します）: ${e.message}`);
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
         // Step 1: 遠方ポジション Above2 をクローズして資金を回収
         const closePosId = bot.state.lpPositionIdAbove2;
         if (closePosId) {
@@ -1162,7 +1179,25 @@ export class Strategy {
             await this.tracker.recordEvent('指値ローリング（下落）',
               `Below2下限突破のためAbove2をクローズし、新Below2(${newLower.toFixed(6)}-${finalUpper.toFixed(6)})を構築。`,
               price, lpRes.digest).catch(() => {});
+          } else {
+            Logger.error(`[${bot.name}] ⚠️ 新 Below2 の構築（ID取得）に失敗しました。即座に統合フェーズAに移行して再構築します。`);
+            this.bot1.state.phase = 'A';
+            this.bot1.currentPhase = CyclePhase.A;
+            this.bot2.state.phase = 'A';
+            this.bot2.currentPhase = CyclePhase.A;
+            this.bot1.stateManager.saveState(this.bot1.state);
+            this.bot2.stateManager.saveState(this.bot2.state);
+            return true;
           }
+        } else {
+          Logger.error(`[${bot.name}] ⚠️ 新 Below2 構築用資金 (${amountToInvest.toFixed(4)}) が不足しています。即座に統合フェーズAに移行して再構築します。`);
+          this.bot1.state.phase = 'A';
+          this.bot1.currentPhase = CyclePhase.A;
+          this.bot2.state.phase = 'A';
+          this.bot2.currentPhase = CyclePhase.A;
+          this.bot1.stateManager.saveState(this.bot1.state);
+          this.bot2.stateManager.saveState(this.bot2.state);
+          return true;
         }
         bot.stateManager.saveState(bot.state);
         return true;
@@ -1174,11 +1209,28 @@ export class Strategy {
     // ─── 2. Above2 上限を上抜けした場合 → 上昇方向スライドローリング ───
     // 価格が全4ポジションの最上限(Above2上限)を上回った = 2%上昇した
     // → Below2をクローズし、グリッドを上にスライドさせ、新しいAbove2を構築
-    if (bot.state.lpPositionIdAbove2 && price >= (bot.state.rangeUpperAbove2 || Infinity)) {
-      Logger.warn(`[${bot.name}] 🔺 価格が Above2 の上限を上抜けしました。上昇方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Above2上限: $${(bot.state.rangeUpperAbove2 || 0).toFixed(6)}`);
+    if (bot.state.lpPositionIdAbove2 && price >= (bot.state.rangeLowerAbove2 || Infinity)) {
+      Logger.warn(`[${bot.name}] 🔺 価格が Above2 の下限を上抜け（Above2がアクティブに）しました。上昇方向スライドローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Above2下限: $${(bot.state.rangeLowerAbove2 || 0).toFixed(6)}`);
 
       try {
+        // 全ポジションから金利を回収して再投資資金にする
+        const allActivePosIds = [
+          bot.state.lpPositionIdBelow1,
+          bot.state.lpPositionIdBelow2,
+          bot.state.lpPositionIdAbove1,
+          bot.state.lpPositionIdAbove2
+        ].filter(Boolean) as string[];
+        for (const posId of allActivePosIds) {
+          try {
+            Logger.info(`[${bot.name}] スライド前にポジション ${posId} から金利を回収し再投資へ...`);
+            await bot.lpManager.collectFees(posId);
+          } catch (e: any) {
+            Logger.warn(`[${bot.name}] 金利自動回収失敗（続行します）: ${e.message}`);
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
         // Step 1: 遠方ポジション Below2 をクローズして資金を回収
         const closePosId = bot.state.lpPositionIdBelow2;
         if (closePosId) {
@@ -1267,7 +1319,25 @@ export class Strategy {
             await this.tracker.recordEvent('指値ローリング（上昇）',
               `Above2上限突破のためBelow2をクローズし、新Above2(${finalLower.toFixed(6)}-${newUpper.toFixed(6)})を構築。`,
               price, lpRes.digest).catch(() => {});
+          } else {
+            Logger.error(`[${bot.name}] ⚠️ 新 Above2 の構築（ID取得）に失敗しました。即座に統合フェーズAに移行して再構築します。`);
+            this.bot1.state.phase = 'A';
+            this.bot1.currentPhase = CyclePhase.A;
+            this.bot2.state.phase = 'A';
+            this.bot2.currentPhase = CyclePhase.A;
+            this.bot1.stateManager.saveState(this.bot1.state);
+            this.bot2.stateManager.saveState(this.bot2.state);
+            return true;
           }
+        } else {
+          Logger.error(`[${bot.name}] ⚠️ 新 Above2 構築用資金 (${amountToInvest.toFixed(4)}) が不足しています。即座に統合フェーズAに移行して再構築します。`);
+          this.bot1.state.phase = 'A';
+          this.bot1.currentPhase = CyclePhase.A;
+          this.bot2.state.phase = 'A';
+          this.bot2.currentPhase = CyclePhase.A;
+          this.bot1.stateManager.saveState(this.bot1.state);
+          this.bot2.stateManager.saveState(this.bot2.state);
+          return true;
         }
         bot.stateManager.saveState(bot.state);
         return true;
