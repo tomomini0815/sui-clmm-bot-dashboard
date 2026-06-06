@@ -17,15 +17,17 @@ interface Bot2Status {
   gasStats?: any;
   phase?: string;
   message?: string;
+  isUnbalanced?: boolean;
 }
 
 interface MultiBotPanelProps {
   title: string;
   bot: Bot2Status | null;
   onStart?: () => void;
+  onRebuild?: () => void;
 }
 
-export function MultiBotPanel({ title, bot: bot2, onStart }: MultiBotPanelProps) {
+export function MultiBotPanel({ title, bot: bot2, onStart, onRebuild }: MultiBotPanelProps) {
   const isActive = bot2?.active === true;
 
   const rangeInPct = bot2?.currentRange && bot2.currentPrice
@@ -84,6 +86,48 @@ export function MultiBotPanel({ title, bot: bot2, onStart }: MultiBotPanelProps)
 
       {isActive && (
         <>
+          {/* 資金偏り警告 */}
+          {bot2?.isUnbalanced && (
+            <div style={{
+              background: 'rgba(255, 159, 67, 0.12)',
+              border: '1px solid rgba(255, 159, 67, 0.35)',
+              borderRadius: '8px',
+              padding: '12px',
+              margin: '0 12px 16px 12px',
+              color: '#ff9f43',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px'
+            }}>
+              <div>⚠️ DEEP/SUI 資金偏り検知</div>
+              <p style={{ margin: 0, fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 400, lineHeight: 1.4 }}>
+                ポジション間の資金バランスに大きな偏りが発生しています。流動性を均等に再配分することをお勧めします。
+              </p>
+              {onRebuild && (
+                <button
+                  onClick={onRebuild}
+                  style={{
+                    alignSelf: 'flex-start',
+                    background: '#ff9f43',
+                    border: 'none',
+                    borderRadius: '4px',
+                    color: '#0d1117',
+                    padding: '5px 10px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    boxShadow: '0 2px 4px rgba(255, 159, 67, 0.25)',
+                    marginTop: '2px'
+                  }}
+                >
+                  今すぐ資金を均等化する
+                </button>
+              )}
+            </div>
+          )}
+
           {/* 価格・レンジ */}
           <div className="bot2-price-section">
             <div className="bot2-price-row">
@@ -141,6 +185,11 @@ export function MultiBotPanel({ title, bot: bot2, onStart }: MultiBotPanelProps)
             </div>
             <div className="bot2-stat">
               <Zap size={13} className="bot2-stat-icon" />
+              <span className="bot2-stat-label">LP評価額</span>
+              <span className="bot2-stat-val">${bot2?.pnl?.bot2LpValue?.toFixed(2) ?? '0.00'}</span>
+            </div>
+            <div className="bot2-stat">
+              <Zap size={13} className="bot2-stat-icon" />
               <span className="bot2-stat-label">最大資金</span>
               <span className="bot2-stat-val">${bot2?.maxCapitalUsdc ?? 3} USDC</span>
             </div>
@@ -161,6 +210,33 @@ export function MultiBotPanel({ title, bot: bot2, onStart }: MultiBotPanelProps)
                   )}
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* 資金の均等化 (手動再配置) ボタン */}
+          {isActive && onRebuild && (
+            <div style={{ padding: '0 12px 12px 12px', marginTop: '12px' }}>
+              <button
+                onClick={onRebuild}
+                style={{
+                  width: '100%',
+                  padding: '8px',
+                  borderRadius: '8px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  color: 'var(--text-muted)',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '4px'
+                }}
+              >
+                🔄 資金の均等化 (再配置)
+              </button>
             </div>
           )}
         </>

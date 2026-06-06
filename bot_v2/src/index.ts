@@ -526,11 +526,31 @@ app.get('/api/stats', async (req, res) => {
     // PnLデータを強制再計算
     const pnlData = await session.strategy.getPnlData(currentPrice, session.walletAddress);
 
+    // Bot1の偏り判定 (isUnbalanced)
+    let isUnbalanced = false;
+    try {
+      const p1 = session.strategy.bot1.state;
+      const posIds1 = [p1.lpPositionIdBelow1, p1.lpPositionIdBelow2, p1.lpPositionIdAbove1, p1.lpPositionIdAbove2].filter(Boolean) as string[];
+      if (posIds1.length === 4) {
+        const posValues1: number[] = [];
+        for (const id of posIds1) {
+          const details = await session.strategy.bot1.lpManager.getPositionDetails(id).catch(() => null);
+          posValues1.push(details?.usdValue || 0);
+        }
+        const maxVal1 = Math.max(...posValues1);
+        const minVal1 = Math.min(...posValues1);
+        if (maxVal1 > 0.3 && (minVal1 / maxVal1 < 0.4)) {
+          isUnbalanced = true;
+        }
+      }
+    } catch (e) {}
+
     res.json({
       success: true,
       data: {
         ...stats,
         isRunning: session.strategy.isRunning,
+        isUnbalanced,
         currentPrice: currentPrice,
         ...pnlData,
         currentPhase: session.strategy.currentPhase,
@@ -628,10 +648,72 @@ app.get('/api/market-regime', (req, res) => {
 });
 
 // Bot2ステータス専用 (後方互換用)
-app.get('/api/bot2/status', (req, res) => {
-  const stats = SessionManager.getAllSessionsStats();
-  if (stats.length < 2) return res.json({ success: false, message: 'Bot2 not running' });
-  res.json({ success: true, ...stats[1] });
+app.get('/api/bot2/status', async (req, res) => {
+  const sessions = SessionManager.getAllSessions();
+  if (sessions.length === 0) {
+    return res.json({ success: false, message: 'No active session' });
+  }
+  const session = sessions[0];
+  const bot2 = session.strategy.bot2;
+  if (!bot2) {
+    return res.json({ success: false, message: 'Bot2 instance not found in strategy' });
+  }
+
+  try {
+    const currentPrice = await bot2.priceMonitor.getCurrentPrice().catch(() => 0);
+    
+    // LP価値の取得
+    let lpValue = 0;
+    const p2 = bot2.state;
+    const posValues: number[] = [];
+    
+    if (session.config.strategyMode === 'range_order') {
+      const posIds = [p2.lpPositionIdBelow1, p2.lpPositionIdBelow2, p2.lpPositionIdAbove1, p2.lpPositionIdAbove2].filter(Boolean) as string[];
+      for (const id of posIds) {
+        const details = await bot2.lpManager.getPositionDetails(id).catch(() => null);
+        const val = details?.usdValue || 0;
+        lpValue += val;
+        posValues.push(val);
+      }
+    } else {
+      const lpDetails = p2.lpPositionId 
+        ? await bot2.lpManager.getPositionDetails(p2.lpPositionId).catch(() => null)
+        : null;
+      lpValue = lpDetails?.usdValue || 0;
+    }
+
+    const maxVal = posValues.length > 0 ? Math.max(...posValues) : 0;
+    const minVal = posValues.length > 0 ? Math.min(...posValues) : 0;
+    const isUnbalanced = posValues.length === 4 && maxVal > 0.3 && (minVal / maxVal < 0.4);
+
+    res.json({
+      success: true,
+      active: session.strategy.isRunning,
+      isUnbalanced,
+      pool: 'DEEP/SUI',
+      poolId: bot2.lpManager.config.poolObjectId,
+      maxCapitalUsdc: p2.totalCapital || 3,
+      currentPrice: currentPrice,
+      currentRange: {
+        lower: p2.rangeLower || 0,
+        upper: p2.rangeUpper || 0
+      },
+      tracker: {
+        rebalanceCount: p2.rebalanceCount24h || 0,
+        totalFeesEarned: 0,
+        successfulRebalances: p2.rebalanceCount24h || 0,
+        history: []
+      },
+      pnl: {
+        netPnl: 0,
+        bot2LpValue: lpValue
+      },
+      phase: p2.phase,
+      message: session.strategy.isRunning ? '稼働中 (監視)' : '停止中'
+    });
+  } catch (e: any) {
+    res.json({ success: false, message: e.message });
+  }
 });
 
 // Bot3ステータス専用 (後方互換用)

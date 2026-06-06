@@ -23,6 +23,8 @@ interface BotWalletCardProps {
   userWalletSufficient?: boolean;
   connectedAddress?: string;
   currentPrice?: number;
+  isUnbalanced?: boolean;
+  onRebuild?: () => void;
 }
 
 export const BotWalletCard: React.FC<BotWalletCardProps> = ({ 
@@ -40,7 +42,9 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
   userWalletBalanceSui = 0,
   userWalletBalanceUsdc = 0,
   connectedAddress = '',
-  currentPrice = 0
+  currentPrice = 0,
+  isUnbalanced = false,
+  onRebuild
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditingCapital, setIsEditingCapital] = useState(false);
@@ -116,7 +120,51 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
         >
           <Edit3 size={14} /> 設定
         </button>
-      </div>      {/* 1.5 Connected User Wallet */}
+      </div>      {/* 資金の偏り警告 */}
+      {isUnbalanced && (
+        <div style={{
+          background: 'rgba(255, 159, 67, 0.12)',
+          border: '1px solid rgba(255, 159, 67, 0.35)',
+          borderRadius: '12px',
+          padding: '14px',
+          marginBottom: '20px',
+          color: '#ff9f43',
+          fontSize: '0.8rem',
+          fontWeight: 600,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '8px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span>⚠️ SUI/USDC 資金偏り検知</span>
+          </div>
+          <p style={{ margin: 0, fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 400, lineHeight: 1.4 }}>
+            レンジ移動やスライドにより、ポジション間の資金バランスに大きな偏りが発生しています。流動性を均等に再配分することをお勧めします。
+          </p>
+          {onRebuild && (
+            <button
+              onClick={onRebuild}
+              style={{
+                alignSelf: 'flex-start',
+                background: '#ff9f43',
+                border: 'none',
+                borderRadius: '6px',
+                color: '#0d1117',
+                padding: '5px 12px',
+                fontSize: '0.75rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 2px 6px rgba(255, 159, 67, 0.3)',
+                marginTop: '4px'
+              }}
+            >
+              今すぐ資金を均等化する
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 1.5 Connected User Wallet */}
       {connectedAddress && (
         <div style={{ 
           background: 'rgba(255, 255, 255, 0.02)', 
@@ -437,7 +485,30 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
       </div>
 
       {/* 5. Bot Execution Control (Start/Stop) - Moved to bottom */}
-      <div style={{ marginTop: 'auto', paddingTop: '10px' }}>
+      <div style={{ marginTop: 'auto', paddingTop: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        {onRebuild && (
+          <button
+            onClick={onRebuild}
+            style={{
+              width: '100%',
+              padding: '10px',
+              borderRadius: '12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              background: 'rgba(255, 255, 255, 0.04)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              color: 'var(--text-muted)',
+              fontWeight: 600,
+              fontSize: '0.85rem',
+            }}
+          >
+            🔄 資金の均等化 (再配置)
+          </button>
+        )}
         <button
           onClick={onToggleBot}
           style={{

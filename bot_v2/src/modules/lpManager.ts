@@ -43,7 +43,7 @@ export class LpManager {
   constructor(
     private priceMonitor: PriceMonitor,
     private gasTracker: GasTracker,
-    private config: BotConfig = globalConfig,
+    public config: BotConfig = globalConfig,
     txQueue?: WalletTxQueue
   ) {
     this.suiClient = new SuiClient({ url: this.config.rpcUrl });

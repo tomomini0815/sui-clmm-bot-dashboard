@@ -51,9 +51,10 @@ function App() {
   
   const [sessionId, setSessionId] = useState(() => localStorage.getItem('session_id') || '');
   const [botWalletAddress, setBotWalletAddress] = useState(() => localStorage.getItem('bot_wallet_address') || '');
-  const [apiUrl] = useState(() => 
-    import.meta.env.PROD ? 'https://sui-clmm-bot-backend.fly.dev' : 'http://localhost:3002'
-  );
+  const [apiUrl] = useState(() => {
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    return isLocal ? 'http://localhost:3002' : 'https://sui-clmm-bot-backend.fly.dev';
+  });
 
 
 
@@ -155,6 +156,7 @@ function App() {
     hourlySummary: null as any,
     mtf: null as any,
     advisor: null as any,
+    isUnbalanced: false as boolean,
   });
 
   const [bot2, setBot2] = useState<any>(null);
@@ -295,6 +297,35 @@ function App() {
     } catch (err) {
       dismissToast(loadingId);
       showToast('AI戦略の適用に失敗しました', 'error');
+    } finally {
+      setIsActionPending(false);
+    }
+  };
+
+  const handleRebuild = async () => {
+    if (!sessionId || isActionPending) return;
+    
+    const confirm = window.confirm("すべてのポジションを一度クローズし、資金を均等（25%ずつ）にスワップ調整して再構築します。よろしいですか？");
+    if (!confirm) return;
+
+    setIsActionPending(true);
+    const loadingId = showToast("全ポジションの再配置を実行中...⚙️ (しばらくお待ちください)", "loading");
+    try {
+      const response = await fetch(`${apiUrl}/api/rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, rangeWidth: (stats.config.rangeWidth * 100) })
+      });
+      const data = await response.json();
+      dismissToast(loadingId);
+      if (data.success) {
+        showToast("✅ 再配置を開始しました。数分でポジション構築が完了します。", "success", 5000);
+      } else {
+        showToast(`再配置に失敗しました: ${data.error}`, "error");
+      }
+    } catch (e) {
+      dismissToast(loadingId);
+      showToast("通信エラーが発生しました", "error");
     } finally {
       setIsActionPending(false);
     }
@@ -668,7 +699,12 @@ function App() {
             />
             <StatCard title="リバランス回数" value={(stats.totalRebalances ?? 0).toString()} icon={<Repeat size={18} />} subtitle="自動再配置" change={`${stats.avgHoldingTime || '0分'}`} />
             <StatCard title="勝率" value={`${stats.winRate ?? '0'}%`} trend={parseFloat(stats.winRate ?? '0') >= 50 ? "up" : "down"} icon={<TrendingUp size={18} />} subtitle="利益確定確率" />
-            <StatCard title="ポジション規模" value={`${stats.positionSize || stats.config?.lpAmountUsdc || 0} USDC`} icon={<Wallet size={18} />} subtitle="運用資金" />
+            <StatCard 
+              title="ポジション規模" 
+              value={`$${((stats.pnl?.bot1LpValue || 0) + (stats.pnl?.bot2LpValue || 0)).toFixed(2)}`} 
+              icon={<Wallet size={18} />} 
+              subtitle={`SUI-USDC: $${(stats.pnl?.bot1LpValue || 0).toFixed(2)} / DEEP-SUI: $${(stats.pnl?.bot2LpValue || 0).toFixed(2)}`} 
+            />
             <StatCard title="Bot状態" value={isBotActive ? "運用中" : "停止中"} icon={<Activity size={18} color={isBotActive ? "var(--accent)" : "var(--text-muted)"} />} subtitle={isBotActive ? "手数料収集中" : "Startで開始"} />
             <StatCard title="市場状況" value={getMarketConditionText(stats.marketCondition || 'sideways').split(' ')[0]} icon={<BarChart3 size={18} />} subtitle={getMarketConditionText(stats.marketCondition || 'sideways').split(' ').slice(1).join(' ')} />
           </div>
@@ -766,6 +802,8 @@ function App() {
             userWalletSufficient={stats.pnl?.userWalletSufficient ?? false}
             connectedAddress={currentAccount?.address || ''}
             currentPrice={stats.currentPrice}
+            isUnbalanced={stats.isUnbalanced}
+            onRebuild={handleRebuild}
           />
 
           {/* Bot2 (DEEP/SUI) ステータスパネル */}
@@ -775,6 +813,7 @@ function App() {
             onStart={() => {
               alert('Bot2は自動で稼働中です。個別設定は不要です。');
             }}
+            onRebuild={handleRebuild}
           />
 
           {/* Bot3 (Extra) ステータスパネル */}

@@ -6,7 +6,7 @@ module.exports = {
       cwd: 'bot_v2',
       watch: false,
       autorestart: true,
-      max_memory_restart: '800M',
+      max_memory_restart: '2G',
       env: {
         NODE_ENV: 'production',
         PORT: 3002
