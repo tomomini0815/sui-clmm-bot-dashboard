@@ -10,15 +10,20 @@ import { PriceMonitor } from './priceMonitor.js';
 import { GasTracker } from '../gasTracker.js';
 import { WalletTxQueue, globalTxQueue } from '../walletTxQueue.js';
 
-async function retryOn429<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+async function retryOnRpcError<T>(fn: () => Promise<T>, retries = 5, delay = 1000): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
     const errorStr = String(error.message || error);
-    if (retries > 0 && (errorStr.includes('429') || errorStr.includes('Too Many Requests'))) {
-      Logger.warn(`RPC 429 Rate Limit hit. Retrying in ${delay}ms... (${retries} retries left)`);
+    const isRateLimit = errorStr.includes('429') || errorStr.includes('Too Many Requests');
+    const isNetworkError = errorStr.includes('500') || errorStr.includes('502') || errorStr.includes('503') || errorStr.includes('504') ||
+                          errorStr.includes('ECONNRESET') || errorStr.includes('ETIMEDOUT') || errorStr.includes('fetch') ||
+                          errorStr.includes('Timeout') || errorStr.includes('timeout');
+                          
+    if (retries > 0 && (isRateLimit || isNetworkError)) {
+      Logger.warn(`RPC temporary error hit (${errorStr.slice(0, 100)}). Retrying in ${delay}ms... (${retries} retries left)`);
       await new Promise(resolve => setTimeout(resolve, delay));
-      return retryOn429(fn, retries - 1, delay * 2);
+      return retryOnRpcError(fn, retries - 1, delay * 1.5);
     }
     throw error;
   }
@@ -87,14 +92,14 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const pool = await retryOn429(() => sdk.Pool.getPool(poolId));
+      const pool = await retryOnRpcError(() => sdk.Pool.getPool(poolId));
       
       if (pool) {
         this.coinTypeA = pool.coinTypeA;
         this.coinTypeB = pool.coinTypeB;
         
-        const coinAMeta = await retryOn429(() => this.suiClient.getCoinMetadata({ coinType: this.coinTypeA }));
-        const coinBMeta = await retryOn429(() => this.suiClient.getCoinMetadata({ coinType: this.coinTypeB }));
+        const coinAMeta = await retryOnRpcError(() => this.suiClient.getCoinMetadata({ coinType: this.coinTypeA }));
+        const coinBMeta = await retryOnRpcError(() => this.suiClient.getCoinMetadata({ coinType: this.coinTypeB }));
         
         this.decimalsA = coinAMeta?.decimals ?? 9;
         this.decimalsB = coinBMeta?.decimals ?? 9;
@@ -142,7 +147,7 @@ export class LpManager {
       const allObjects: any[] = [];
 
       while (hasNextPage) {
-        const response: any = await retryOn429(() => this.suiClient.getOwnedObjects({
+        const response: any = await retryOnRpcError(() => this.suiClient.getOwnedObjects({
           owner: this.walletAddress,
           cursor: nextCursor,
           options: { showType: true, showContent: true }
@@ -189,7 +194,7 @@ export class LpManager {
       const allObjects: any[] = [];
 
       while (hasNextPage) {
-        const response: any = await retryOn429(() => this.suiClient.getOwnedObjects({
+        const response: any = await retryOnRpcError(() => this.suiClient.getOwnedObjects({
           owner: this.walletAddress,
           cursor: nextCursor,
           options: { showType: true, showContent: true }
@@ -232,7 +237,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
       const position = positionList.find(p => p.pos_object_id === targetPosId);
       
       if (!position) return 0;
@@ -280,7 +285,7 @@ export class LpManager {
     }
     const addr = targetAddress || this.walletAddress;
     try {
-      const suiBalance = await retryOn429(() => this.suiClient.getBalance({
+      const suiBalance = await retryOnRpcError(() => this.suiClient.getBalance({
         owner: addr,
       }));
       const suiAmount = Number(suiBalance.totalBalance) / 1e9;
@@ -303,7 +308,7 @@ export class LpManager {
         
         for (const coinType of usdcTypes) {
           try {
-            const bal = await retryOn429(() => this.suiClient.getBalance({
+            const bal = await retryOnRpcError(() => this.suiClient.getBalance({
               owner: addr,
               coinType: coinType,
             }));
@@ -327,7 +332,7 @@ export class LpManager {
 
       if (this.coinTypeA) {
         try {
-          const balA = await retryOn429(() => this.suiClient.getBalance({
+          const balA = await retryOnRpcError(() => this.suiClient.getBalance({
             owner: addr,
             coinType: this.coinTypeA,
           }));
@@ -339,7 +344,7 @@ export class LpManager {
 
       if (this.coinTypeB) {
         try {
-          const balB = await retryOn429(() => this.suiClient.getBalance({
+          const balB = await retryOnRpcError(() => this.suiClient.getBalance({
             owner: addr,
             coinType: this.coinTypeB,
           }));
@@ -532,7 +537,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
       return positionList.some(pos => pos.pool === poolId && Number(pos.liquidity) > 0);
     } catch (error) {
       Logger.error('Failed to check active positions', error);
@@ -548,7 +553,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
       
       if (positionList.length === 0) {
         Logger.info('No active position found.');
@@ -609,7 +614,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
       const pos = positionList.find(p => p.pos_object_id === posId);
       
       if (!pos) {
@@ -720,7 +725,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOn429(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
       const pos = positionList.find(p => p.pos_object_id === posId);
       
       if (!pos) return null;

@@ -25,7 +25,11 @@ export class WalletTxQueue {
       Logger.info(`[TxQueue] ${label} 開始`);
       const start = Date.now();
       try {
-        const res = await fn();
+        // 60秒のタイムアウトを設ける（RPCノード無応答によるキュー全体の永久フリーズを防止）
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`TX_TIMEOUT: ${label} timed out after 60s`)), 60000)
+        );
+        const res = await Promise.race([fn(), timeoutPromise]);
         const elapsed = Date.now() - start;
         Logger.info(`[TxQueue] ${label} 完了 (${elapsed}ms)`);
         return res;

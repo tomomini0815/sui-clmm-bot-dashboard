@@ -558,6 +558,10 @@ export class Strategy {
 
         const allocatedIds1: string[] = [];
 
+        // 構築直前に最新価格を再取得して、価格変動によるインレンジ構築バグを防ぐ
+        price1 = await this.bot1.priceMonitor.getCurrentPrice();
+        Logger.info(`[PHASE_A] Bot1の構築を開始します。最新価格 price1: $${price1.toFixed(4)}`);
+
         // ══ Bot1: 現在価格中心に1%幅4ポジション隣接配置 ══
         // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
         // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
@@ -646,6 +650,10 @@ export class Strategy {
         // ── Bot2 (SUI / DEEP) LP構築 ──
         const finalBal3 = await this.bot1.lpManager.checkBalance();
         const allocatedIds2: string[] = [];
+
+        // 構築直前に最新価格を再取得して、価格変動によるインレンジ構築バグを防ぐ
+        price2 = await this.bot2.priceMonitor.getCurrentPrice();
+        Logger.info(`[PHASE_A] Bot2の構築を開始します。最新価格 price2: ${price2.toFixed(6)}`);
 
         // ══ Bot2: 現在価格中心に1%幅4ポジション隣接配置 ══
         // Below1: [price2*(1-w), price2]          ← SUI買い指値（SUIを投入）

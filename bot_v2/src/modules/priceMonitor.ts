@@ -7,15 +7,20 @@ import { Logger } from './logger.js';
 const PYTH_SUI_USD_FEED_ID = '23d7315113f5b1d3ba7a83604c44b94d79f4fd69af77f804fc7f920a6dc65744';
 const PYTH_HERMES_URL = 'https://hermes.pyth.network';
 
-async function retryOn429<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+async function retryOnRpcError<T>(fn: () => Promise<T>, retries = 5, delay = 1000): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
     const errorStr = String(error.message || error);
-    if (retries > 0 && (errorStr.includes('429') || errorStr.includes('Too Many Requests'))) {
-      Logger.warn(`RPC 429 Rate Limit hit. Retrying in ${delay}ms... (${retries} retries left)`);
+    const isRateLimit = errorStr.includes('429') || errorStr.includes('Too Many Requests');
+    const isNetworkError = errorStr.includes('500') || errorStr.includes('502') || errorStr.includes('503') || errorStr.includes('504') ||
+                          errorStr.includes('ECONNRESET') || errorStr.includes('ETIMEDOUT') || errorStr.includes('fetch') ||
+                          errorStr.includes('Timeout') || errorStr.includes('timeout');
+                          
+    if (retries > 0 && (isRateLimit || isNetworkError)) {
+      Logger.warn(`RPC temporary error hit (${errorStr.slice(0, 100)}). Retrying in ${delay}ms... (${retries} retries left)`);
       await new Promise(resolve => setTimeout(resolve, delay));
-      return retryOn429(fn, retries - 1, delay * 2);
+      return retryOnRpcError(fn, retries - 1, delay * 1.5);
     }
     throw error;
   }
@@ -63,13 +68,13 @@ export class PriceMonitor {
     if (this.isInitialized) return;
     
     try {
-      const pool = await retryOn429(() => this.sdk.Pool.getPool(this.poolObjectId));
+      const pool = await retryOnRpcError(() => this.sdk.Pool.getPool(this.poolObjectId));
       if (pool) {
         this.coinTypeA = pool.coinTypeA;
         this.coinTypeB = pool.coinTypeB;
         
-        const coinAMeta = await retryOn429(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }));
-        const coinBMeta = await retryOn429(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }));
+        const coinAMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }));
+        const coinBMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }));
         
         if (coinAMeta) this.decimalsA = coinAMeta.decimals;
         if (coinBMeta) this.decimalsB = coinBMeta.decimals;
@@ -151,7 +156,7 @@ export class PriceMonitor {
         throw new Error('PriceMonitor is not initialized');
       }
 
-      const pool = await retryOn429(() => this.sdk.Pool.getPool(this.poolObjectId));
+      const pool = await retryOnRpcError(() => this.sdk.Pool.getPool(this.poolObjectId));
       if (!pool || !pool.current_sqrt_price) {
         throw new Error('Pool data unavailable');
       }
@@ -203,8 +208,8 @@ export class PriceMonitor {
         }
       }
 
-      const coinAMeta = await retryOn429(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }));
-      const coinBMeta = await retryOn429(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }));
+      const coinAMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }));
+      const coinBMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }));
       const coinASymbol = coinAMeta?.symbol || 'A';
       const coinBSymbol = coinBMeta?.symbol || 'B';
       

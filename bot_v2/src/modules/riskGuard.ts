@@ -45,9 +45,9 @@ export class RiskGuard {
       Logger.warn(`[RISK_GUARD] SUI残高が 0.1 SUI を下回っています (現在: ${suiBalance.toFixed(4)} SUI)。ガス欠アラート。`);
     }
 
-    // 4. APIエラー3回連続失敗
-    if (this.consecutiveErrors >= 3) {
-      const msg = `[RISK_GUARD] API接続エラーが3回連続で発生しました。安全のため手動確認待ちモードへ移行します。`;
+    // 4. APIエラー10回連続失敗 (約5分間の接続エラー)
+    if (this.consecutiveErrors >= 10) {
+      const msg = `[RISK_GUARD] API接続エラーが10回連続で発生しました。安全のため手動確認待ちモードへ移行します。`;
       Logger.error(msg);
       return { isEmergency: true, reason: msg };
     }
