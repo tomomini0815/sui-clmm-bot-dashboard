@@ -40,8 +40,10 @@ export class Strategy {
   public bot2!: BotInstance;
   private riskGuard: RiskGuard;
   private timer: NodeJS.Timeout | null = null;
+  private isCycleRunning: boolean = false;
   private isPhaseARunning: boolean = false; // 統合フェーズAの二重起動防止フラグ
   private isRolling: { [key: string]: boolean } = {}; // 各ボットのスライドローリング重複起動防止フラグ
+  private lastSurgeRebuildAt: number = 0;
 
   // PnL データのキャッシュ機構（429 Too Many Requestsの防止）
   private lastPnlData: any = null;
@@ -91,8 +93,13 @@ export class Strategy {
       totalCapital: 0,
       rebalanceCount24h: 0,
       lastRebalanceAt: 0,
-      rebalanceHistory: []
+      rebalanceHistory: [],
+      isRebuilding: false
     };
+    if (bot1State.isRebuilding) {
+      Logger.warn('[STATE_MANAGER][Bot1] 前回の再構築中フラグが残っていたため、起動時に解除します。');
+    }
+    bot1State.isRebuilding = false;
 
     this.bot1 = {
       name: 'Bot1 (SUI-USDC)',
@@ -144,8 +151,13 @@ export class Strategy {
       totalCapital: 0,
       rebalanceCount24h: 0,
       lastRebalanceAt: 0,
-      rebalanceHistory: []
+      rebalanceHistory: [],
+      isRebuilding: false
     };
+    if (bot2State.isRebuilding) {
+      Logger.warn('[STATE_MANAGER][Bot2] 前回の再構築中フラグが残っていたため、起動時に解除します。');
+    }
+    bot2State.isRebuilding = false;
 
     this.bot2 = {
       name: 'Bot2 (DEEP-SUI)',
@@ -222,6 +234,13 @@ export class Strategy {
   public async start() {
     // 起動する際は緊急停止状態を自動で解除（リセット）
     this.isEmergencyStopped = false;
+    if (this.bot1.state.isRebuilding || this.bot2.state.isRebuilding) {
+      Logger.warn('[STRATEGY] 起動時に残っていた再構築中フラグを解除して保存します。');
+      this.bot1.state.isRebuilding = false;
+      this.bot2.state.isRebuilding = false;
+      this.bot1.stateManager.saveState(this.bot1.state);
+      this.bot2.stateManager.saveState(this.bot2.state);
+    }
 
     if (this.isRunning) return;
     this.isRunning = true;
@@ -253,6 +272,11 @@ export class Strategy {
    */
   private async cycle() {
     if (!this.isRunning) return;
+    if (this.isCycleRunning) {
+      Logger.warn('[STRATEGY] 前回サイクルが実行中のため、この監視サイクルをスキップします。');
+      return;
+    }
+    this.isCycleRunning = true;
     try {
       // 1. 各ボットの現在価格を取得
       const price1 = await this.bot1.priceMonitor.getCurrentPrice();
@@ -302,17 +326,41 @@ export class Strategy {
         return;
       }
 
+      if (this.isAnyBotRebuilding()) {
+        Logger.warn('[SURGE_REBUILD] 再構築中のため、監視ループとヘッジ計算をスキップします。');
+        this.bot1.stateManager.saveState(this.bot1.state);
+        this.bot2.stateManager.saveState(this.bot2.state);
+        return;
+      }
+
       // ── Bot1 / Bot2 サイクル ──
       // どちらかがフェーズAにいる場合、全資金をバランス配分して両ボットを同時セットアップ
       if (this.bot1.state.phase === 'A' || this.bot2.state.phase === 'A') {
         await this.executeCombinedPhaseA(price1, price2);
       } else {
+        const surgeRebuildVersion = this.lastSurgeRebuildAt;
         await this.runSingleBotCycle(this.bot1, price1, balance.usdcBalance);
+        if (this.lastSurgeRebuildAt !== surgeRebuildVersion) {
+          Logger.info('[SURGE_REBUILD] 再構築直後のため、残りの監視とヘッジ計算は次サイクルに回します。');
+          this.bot1.stateManager.saveState(this.bot1.state);
+          this.bot2.stateManager.saveState(this.bot2.state);
+          return;
+        }
         await this.runSingleBotCycle(this.bot2, price2, balance.usdcBalance);
+        if (this.lastSurgeRebuildAt !== surgeRebuildVersion) {
+          Logger.info('[SURGE_REBUILD] 再構築直後のため、ヘッジ計算は次サイクルに回します。');
+          this.bot1.stateManager.saveState(this.bot1.state);
+          this.bot2.stateManager.saveState(this.bot2.state);
+          return;
+        }
       }
 
       // ── 統合ヘッジ管理 ──
-      await this.maintainHedge(price1);
+      if (this.isAnyBotRebuilding()) {
+        Logger.warn('[SURGE_REBUILD] 再構築中のため、ヘッジ計算をスキップします。');
+      } else {
+        await this.maintainHedge(price1);
+      }
 
       // 状態の保存
       this.bot1.stateManager.saveState(this.bot1.state);
@@ -328,6 +376,8 @@ export class Strategy {
       Logger.error(`[CYCLE_ERROR] ${e.message}`, e);
       this.riskGuard.recordError();
       this.tracker.recordEvent('システムエラー', `サイクル実行エラー: ${e.message}`, this.bot1.state.basePrice).catch(() => {});
+    } finally {
+      this.isCycleRunning = false;
     }
   }
 
@@ -353,6 +403,268 @@ export class Strategy {
     }
   }
 
+  private isAnyBotRebuilding(): boolean {
+    return !!(this.bot1?.state?.isRebuilding || this.bot2?.state?.isRebuilding);
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private async waitForBalanceIncrease(
+    label: string,
+    before: number,
+    readBalance: () => Promise<number>
+  ): Promise<number> {
+    let latest = before;
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      latest = await readBalance();
+      if (latest > before + 0.000001) {
+        return latest - before;
+      }
+      Logger.info(`[${label}] クローズ資金の残高反映待ち (${attempt}/8)...`);
+      await this.sleep(1000);
+    }
+    return Math.max(0, latest - before);
+  }
+
+  private async addLiquidityWithRpcRetry(
+    bot: BotInstance,
+    lower: number,
+    upper: number,
+    amount: number,
+    isCoinA: boolean
+  ) {
+    const maxAttempts = 5;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await bot.lpManager.addLiquidity(lower, upper, amount, isCoinA);
+      } catch (e: any) {
+        const retryable = String(e?.message || e).includes('429');
+        if (!retryable || attempt === maxAttempts) {
+          throw e;
+        }
+        const delayMs = attempt * 15000;
+        Logger.warn(`[${bot.name}] RPC 429のためLP作成を${delayMs / 1000}秒後に再試行します (${attempt}/${maxAttempts})。`);
+        await this.sleep(delayMs);
+      }
+    }
+    throw new Error('LP作成の再試行回数を超えました。');
+  }
+
+  private getRangeOrderPositionSnapshot(bot: BotInstance) {
+    return [
+      { slot: 'Below2', id: bot.state.lpPositionIdBelow2, lower: bot.state.rangeLowerBelow2, upper: bot.state.rangeUpperBelow2 },
+      { slot: 'Below1', id: bot.state.lpPositionIdBelow1, lower: bot.state.rangeLowerBelow1, upper: bot.state.rangeUpperBelow1 },
+      { slot: 'Above1', id: bot.state.lpPositionIdAbove1, lower: bot.state.rangeLowerAbove1, upper: bot.state.rangeUpperAbove1 },
+      { slot: 'Above2', id: bot.state.lpPositionIdAbove2, lower: bot.state.rangeLowerAbove2, upper: bot.state.rangeUpperAbove2 },
+    ];
+  }
+
+  private formatPositionSnapshot(bot: BotInstance): string {
+    return this.getRangeOrderPositionSnapshot(bot)
+      .map(p => `${p.slot}: id=${p.id || 'null'}, range=${p.lower?.toFixed?.(6) || '0.000000'}-${p.upper?.toFixed?.(6) || '0.000000'}`)
+      .join(' | ');
+  }
+
+  private resetRangeOrderState(bot: BotInstance) {
+    bot.state.lpPositionId = null;
+    bot.state.lpPositionIdBelow = null;
+    bot.state.lpPositionIdAbove = null;
+    bot.state.lpPositionIdBelow1 = null;
+    bot.state.lpPositionIdBelow2 = null;
+    bot.state.lpPositionIdAbove1 = null;
+    bot.state.lpPositionIdAbove2 = null;
+    bot.state.rangeLowerBelow1 = 0;
+    bot.state.rangeUpperBelow1 = 0;
+    bot.state.rangeLowerBelow2 = 0;
+    bot.state.rangeUpperBelow2 = 0;
+    bot.state.rangeLowerAbove1 = 0;
+    bot.state.rangeUpperAbove1 = 0;
+    bot.state.rangeLowerAbove2 = 0;
+    bot.state.rangeUpperAbove2 = 0;
+    bot.state.breachStartAt = undefined;
+    bot.state.missingPositionsStartAt = undefined;
+    bot.state.lastSlideDirection = null;
+    bot.state.phase = 'A';
+    bot.currentPhase = CyclePhase.A;
+  }
+
+  private calculateSurgeStepDrift(bot: BotInstance, price: number): { steps: number; centerPrice: number; stepWidth: number } {
+    const centerFromRanges = bot.state.rangeUpperBelow1 > 0 && bot.state.rangeLowerAbove1 > 0
+      ? (bot.state.rangeUpperBelow1 + bot.state.rangeLowerAbove1) / 2
+      : bot.state.basePrice;
+    const centerPrice = centerFromRanges > 0 ? centerFromRanges : price;
+    const widthPct = this.config.rangeOrderWidthPct || 0.01;
+    const measuredWidths = [
+      bot.state.rangeUpperBelow2 - bot.state.rangeLowerBelow2,
+      bot.state.rangeUpperBelow1 - bot.state.rangeLowerBelow1,
+      bot.state.rangeUpperAbove1 - bot.state.rangeLowerAbove1,
+      bot.state.rangeUpperAbove2 - bot.state.rangeLowerAbove2,
+    ].filter(v => Number.isFinite(v) && v > 0);
+    const stepWidth = measuredWidths.length > 0
+      ? measuredWidths.reduce((sum, v) => sum + v, 0) / measuredWidths.length
+      : centerPrice * widthPct;
+    const steps = stepWidth > 0 ? Math.round((price - centerPrice) / stepWidth) : 0;
+    return { steps, centerPrice, stepWidth };
+  }
+
+  private validateRangeOrderState(bot: BotInstance): boolean {
+    const slots = this.getRangeOrderPositionSnapshot(bot);
+    const allPresent = slots.every(p => !!p.id && p.lower > 0 && p.upper > p.lower);
+    const noOverlap = slots.every((p, idx) => idx === 0 || p.lower >= slots[idx - 1].upper);
+    return allPresent && noOverlap;
+  }
+
+  private async getLiveRangeOrderPositionCount(bot: BotInstance): Promise<number> {
+    const activeIds = await bot.lpManager.getActivePositionIds();
+    const activeIdSet = new Set(activeIds);
+    return this.getRangeOrderPositionSnapshot(bot)
+      .filter(p => !!p.id && activeIdSet.has(p.id as string))
+      .length;
+  }
+
+  private async validateRangeOrderStateOnChain(bot: BotInstance): Promise<boolean> {
+    if (!this.validateRangeOrderState(bot)) {
+      return false;
+    }
+
+    try {
+      const liveCount = await this.getLiveRangeOrderPositionCount(bot);
+      if (liveCount !== 4) {
+        const trackedIds = this.getRangeOrderPositionSnapshot(bot).map(p => p.id as string);
+        const activeIds = await bot.lpManager.getActivePositionIds();
+        Logger.warn(`[PHASE_A][${bot.name}] state上の指値ポジションIDがチェーン上の有効ポジションに揃っていません。live=${liveCount}/4 state=${trackedIds.join(', ')} active=${activeIds.join(', ')}`);
+      }
+      return liveCount === 4;
+    } catch (e: any) {
+      Logger.warn(`[PHASE_A][${bot.name}] チェーン上ポジション確認に失敗したため再構築します: ${e.message}`);
+      return false;
+    }
+  }
+
+  private markBothBotsForRangeOrderRebuild() {
+    this.bot1.state.phase = 'A';
+    this.bot1.currentPhase = CyclePhase.A;
+    this.bot2.state.phase = 'A';
+    this.bot2.currentPhase = CyclePhase.A;
+    this.bot1.state.missingPositionsStartAt = undefined;
+    this.bot2.state.missingPositionsStartAt = undefined;
+    this.bot1.state.breachStartAt = undefined;
+    this.bot2.state.breachStartAt = undefined;
+    this.bot1.state.lastSlideDirection = null;
+    this.bot2.state.lastSlideDirection = null;
+    this.bot1.stateManager.saveState(this.bot1.state);
+    this.bot2.stateManager.saveState(this.bot2.state);
+  }
+
+  private async closeTrackedRangeOrderPositions(bot: BotInstance) {
+    const positions = this.getRangeOrderPositionSnapshot(bot).filter(p => p.id);
+    for (const pos of positions) {
+      try {
+        Logger.info(`[SURGE_REBUILD][${bot.name}] ${pos.slot} (${pos.id}) をクローズします...`);
+        await bot.lpManager.closePosition(pos.id as string);
+      } catch (e: any) {
+        Logger.error(`[SURGE_REBUILD][${bot.name}] ${pos.slot} (${pos.id}) のクローズに失敗しました。処理は継続します: ${e.message}`, e);
+      }
+    }
+  }
+
+  private async rebuildAllRangeOrderPositionsForSurge(detectedPrice: number, driftSteps: number): Promise<void> {
+    if (this.isAnyBotRebuilding() || this.isPhaseARunning) {
+      Logger.warn('[SURGE_REBUILD] 再構築またはフェーズAが既に実行中のため、急騰対応をスキップします。');
+      return;
+    }
+
+    const startedAt = Date.now();
+    const detectedAt = new Date(startedAt).toISOString();
+    const beforeBot1 = this.formatPositionSnapshot(this.bot1);
+    const beforeBot2 = this.formatPositionSnapshot(this.bot2);
+    const maxRetries = Math.max(1, this.config.surgeMaxRetries || 3);
+
+    this.bot1.state.isRebuilding = true;
+    this.bot2.state.isRebuilding = true;
+    this.isRolling[this.bot1.name] = true;
+    this.isRolling[this.bot2.name] = true;
+    this.bot1.stateManager.saveState(this.bot1.state);
+    this.bot2.stateManager.saveState(this.bot2.state);
+
+    Logger.warn(`[SURGE_REBUILD] ===== 急騰・急落対応を開始 =====`);
+    Logger.warn(`[SURGE_REBUILD] 検出時刻=${detectedAt}, 検出価格=$${detectedPrice.toFixed(6)}, ずれ段数=${driftSteps}`);
+    Logger.warn(`[SURGE_REBUILD] 再構築前 Bot1: ${beforeBot1}`);
+    Logger.warn(`[SURGE_REBUILD] 再構築前 Bot2: ${beforeBot2}`);
+    await this.tracker.recordEvent(
+      '急騰・急落検出',
+      `検出時刻=${detectedAt}, 価格=$${detectedPrice.toFixed(6)}, ずれ段数=${driftSteps}. 再構築前 Bot1=[${beforeBot1}] Bot2=[${beforeBot2}]`,
+      detectedPrice
+    ).catch(() => {});
+
+    try {
+      await this.sleep(this.config.surgeRebuildDelayMs || 3000);
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          Logger.info(`[SURGE_REBUILD] 再構築試行 ${attempt}/${maxRetries} を開始します。`);
+
+          await this.closeTrackedRangeOrderPositions(this.bot1);
+          await this.closeTrackedRangeOrderPositions(this.bot2);
+
+          this.resetRangeOrderState(this.bot1);
+          this.resetRangeOrderState(this.bot2);
+          this.bot1.stateManager.saveState(this.bot1.state);
+          this.bot2.stateManager.saveState(this.bot2.state);
+
+          const latestPrice1 = await this.bot1.priceMonitor.getCurrentPrice();
+          const latestPrice2 = await this.bot2.priceMonitor.getCurrentPrice();
+          Logger.info(`[SURGE_REBUILD] 待機後の最新価格でレンジを再計算します。Bot1=$${latestPrice1.toFixed(6)}, Bot2=${latestPrice2.toFixed(6)}`);
+
+          await this.executeCombinedPhaseA(latestPrice1, latestPrice2);
+
+          const bot1Valid = await this.validateRangeOrderStateOnChain(this.bot1);
+          const bot2Valid = await this.validateRangeOrderStateOnChain(this.bot2);
+          if (!bot1Valid || !bot2Valid) {
+            throw new Error('再構築後の8ポジション状態が不完全、レンジが重複、またはチェーン上で有効ではありません。');
+          }
+
+          const elapsedMs = Date.now() - startedAt;
+          const afterBot1 = this.formatPositionSnapshot(this.bot1);
+          const afterBot2 = this.formatPositionSnapshot(this.bot2);
+          Logger.success(`[SURGE_REBUILD] ===== 急騰・急落対応 完了 (${elapsedMs}ms) =====`);
+          Logger.success(`[SURGE_REBUILD] 再構築後 Bot1: ${afterBot1}`);
+          Logger.success(`[SURGE_REBUILD] 再構築後 Bot2: ${afterBot2}`);
+          this.lastSurgeRebuildAt = Date.now();
+          await this.tracker.recordEvent(
+            '急騰・急落再構築完了',
+            `所要時間=${elapsedMs}ms, ずれ段数=${driftSteps}. 再構築後 Bot1=[${afterBot1}] Bot2=[${afterBot2}]`,
+            latestPrice1
+          ).catch(() => {});
+          return;
+        } catch (e: any) {
+          Logger.error(`[SURGE_REBUILD] 再構築試行 ${attempt}/${maxRetries} に失敗しました: ${e.message}`, e);
+          await this.tracker.recordEvent('急騰・急落再構築失敗', `試行 ${attempt}/${maxRetries}: ${e.message}`, detectedPrice).catch(() => {});
+          if (attempt < maxRetries) {
+            await this.sleep(this.config.surgeRebuildDelayMs || 3000);
+          }
+        }
+      }
+
+      Logger.error('[SURGE_REBUILD] 最大リトライ回数に到達しました。フェーズAからの再実行にフォールバックします。');
+      this.resetRangeOrderState(this.bot1);
+      this.resetRangeOrderState(this.bot2);
+      this.bot1.stateManager.saveState(this.bot1.state);
+      this.bot2.stateManager.saveState(this.bot2.state);
+      this.lastSurgeRebuildAt = Date.now();
+      await this.tracker.recordEvent('急騰・急落フォールバック', '再構築に失敗したため、フェーズAからの再実行へフォールバックしました。', detectedPrice).catch(() => {});
+    } finally {
+      this.bot1.state.isRebuilding = false;
+      this.bot2.state.isRebuilding = false;
+      this.isRolling[this.bot1.name] = false;
+      this.isRolling[this.bot2.name] = false;
+      this.bot1.stateManager.saveState(this.bot1.state);
+      this.bot2.stateManager.saveState(this.bot2.state);
+    }
+  }
+
   /**
    * 両ボット統合フェーズ A:
    * ウォレット内の全資金（USDC + DEEP + SUI）を把握し、50:50で自動配分。
@@ -370,18 +682,8 @@ export class Strategy {
 
       // ── Step 0: 既存ポジションの確認および古いポジションのクリア ──
       if (this.config.strategyMode === 'range_order') {
-        const hasBot1Positions = !!(
-          this.bot1.state.lpPositionIdBelow1 &&
-          this.bot1.state.lpPositionIdBelow2 &&
-          this.bot1.state.lpPositionIdAbove1 &&
-          this.bot1.state.lpPositionIdAbove2
-        );
-        const hasBot2Positions = !!(
-          this.bot2.state.lpPositionIdBelow1 &&
-          this.bot2.state.lpPositionIdBelow2 &&
-          this.bot2.state.lpPositionIdAbove1 &&
-          this.bot2.state.lpPositionIdAbove2
-        );
+        const hasBot1Positions = await this.validateRangeOrderStateOnChain(this.bot1);
+        const hasBot2Positions = await this.validateRangeOrderStateOnChain(this.bot2);
 
         if (hasBot1Positions && hasBot2Positions) {
           Logger.info(`[PHASE_A] ✅ 指値レンジ戦略の既存ポジションがすべて存在するため再構築をスキップ → フェーズBに移行します。`);
@@ -399,25 +701,11 @@ export class Strategy {
         
         this.bot1.currentPhase = CyclePhase.A;
         await this.bot1.lpManager.forceCloseAllPositions().catch(e => Logger.warn(`[PHASE_A] Bot1 forceCloseエラー: ${e.message}`));
-        this.bot1.state.lpPositionId = null;
-        this.bot1.state.lpPositionIdBelow = null;
-        this.bot1.state.lpPositionIdAbove = null;
-        this.bot1.state.lpPositionIdBelow1 = null;
-        this.bot1.state.lpPositionIdBelow2 = null;
-        this.bot1.state.lpPositionIdAbove1 = null;
-        this.bot1.state.lpPositionIdAbove2 = null;
-        this.bot1.state.lastSlideDirection = null;
+        this.resetRangeOrderState(this.bot1);
 
         this.bot2.currentPhase = CyclePhase.A;
         await this.bot2.lpManager.forceCloseAllPositions().catch(e => Logger.warn(`[PHASE_A] Bot2 forceCloseエラー: ${e.message}`));
-        this.bot2.state.lpPositionId = null;
-        this.bot2.state.lpPositionIdBelow = null;
-        this.bot2.state.lpPositionIdAbove = null;
-        this.bot2.state.lpPositionIdBelow1 = null;
-        this.bot2.state.lpPositionIdBelow2 = null;
-        this.bot2.state.lpPositionIdAbove1 = null;
-        this.bot2.state.lpPositionIdAbove2 = null;
-        this.bot2.state.lastSlideDirection = null;
+        this.resetRangeOrderState(this.bot2);
 
         this.bot1.stateManager.saveState(this.bot1.state);
         this.bot2.stateManager.saveState(this.bot2.state);
@@ -563,9 +851,9 @@ export class Strategy {
         Logger.info(`[PHASE_A] Bot1の構築を開始します。最新価格 price1: $${price1.toFixed(4)}`);
 
         // ══ Bot1: 現在価格中心に1%幅4ポジション隣接配置 ══
-        // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
-        // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
-        const offset = 0.002; 
+        // ティック丸めで現在価格をまたがない最小限の空白だけを確保する。
+        // 指値が長時間 Inactive になりにくいよう、最寄りレンジを現在価格の 0.05% 外側に置く。
+        const offset = 0.0005;
         const bot1LowerBelow1 = price1 * (1 - width - offset);
         const bot1UpperBelow1 = price1 * (1 - offset);
         const bot1LowerBelow2 = price1 * (1 - 2 * width - offset);
@@ -585,9 +873,8 @@ export class Strategy {
         // ── Bot1 Below1: USDC 50%を投入（買い指値）──
         const bot1LpUsdc1 = Math.min(finalBal.usdcBalance * 0.50, bot1UsdcNeeded * 1.02);
         Logger.info(`[Bot1] Below1 LP構築 (レンジ: $${bot1LowerBelow1.toFixed(4)}-$${bot1UpperBelow1.toFixed(4)}, USDC: $${bot1LpUsdc1.toFixed(2)})...`);
-        const lpRes1Below1 = await this.bot1.lpManager.addLiquidity(bot1LowerBelow1, bot1UpperBelow1, bot1LpUsdc1, true);
-        const activeIds1_b1 = await this.bot1.lpManager.getActivePositionIds();
-        const pos1Below1 = lpRes1Below1.positionId || activeIds1_b1.find(id => !allocatedIds1.includes(id));
+        const lpRes1Below1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow1, bot1UpperBelow1, bot1LpUsdc1, true);
+        const pos1Below1 = lpRes1Below1.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
         if (pos1Below1) {
           allocatedIds1.push(pos1Below1);
           this.bot1.state.lpPositionIdBelow1 = pos1Below1;
@@ -600,9 +887,8 @@ export class Strategy {
         const finalBal_b2 = await this.bot1.lpManager.checkBalance();
         const bot1LpUsdc2 = Math.min(finalBal_b2.usdcBalance * 0.98, bot1UsdcNeeded * 1.02);
         Logger.info(`[Bot1] Below2 LP構築 (レンジ: $${bot1LowerBelow2.toFixed(4)}-$${bot1UpperBelow2.toFixed(4)}, USDC: $${bot1LpUsdc2.toFixed(2)})...`);
-        const lpRes1Below2 = await this.bot1.lpManager.addLiquidity(bot1LowerBelow2, bot1UpperBelow2, bot1LpUsdc2, true);
-        const activeIds1_b2 = await this.bot1.lpManager.getActivePositionIds();
-        const pos1Below2 = lpRes1Below2.positionId || activeIds1_b2.find(id => !allocatedIds1.includes(id));
+        const lpRes1Below2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow2, bot1UpperBelow2, bot1LpUsdc2, true);
+        const pos1Below2 = lpRes1Below2.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
         if (pos1Below2) {
           allocatedIds1.push(pos1Below2);
           this.bot1.state.lpPositionIdBelow2 = pos1Below2;
@@ -617,9 +903,8 @@ export class Strategy {
 
         if (bot1LpSui1 > 0.05) {
           Logger.info(`[Bot1] Above1 LP構築 (レンジ: $${bot1LowerAbove1.toFixed(4)}-$${bot1UpperAbove1.toFixed(4)}, SUI: ${bot1LpSui1.toFixed(4)})...`);
-          const lpRes1Above1 = await this.bot1.lpManager.addLiquidity(bot1LowerAbove1, bot1UpperAbove1, bot1LpSui1, false);
-          const activeIds1_a1 = await this.bot1.lpManager.getActivePositionIds();
-          const pos1Above1 = lpRes1Above1.positionId || activeIds1_a1.find(id => !allocatedIds1.includes(id));
+          const lpRes1Above1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove1, bot1UpperAbove1, bot1LpSui1, false);
+          const pos1Above1 = lpRes1Above1.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
           if (pos1Above1) {
             allocatedIds1.push(pos1Above1);
             this.bot1.state.lpPositionIdAbove1 = pos1Above1;
@@ -635,9 +920,8 @@ export class Strategy {
 
         if (bot1LpSui2 > 0.05) {
           Logger.info(`[Bot1] Above2 LP構築 (レンジ: $${bot1LowerAbove2.toFixed(4)}-$${bot1UpperAbove2.toFixed(4)}, SUI: ${bot1LpSui2.toFixed(4)})...`);
-          const lpRes1Above2 = await this.bot1.lpManager.addLiquidity(bot1LowerAbove2, bot1UpperAbove2, bot1LpSui2, false);
-          const activeIds1_a2 = await this.bot1.lpManager.getActivePositionIds();
-          const pos1Above2 = lpRes1Above2.positionId || activeIds1_a2.find(id => !allocatedIds1.includes(id));
+          const lpRes1Above2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove2, bot1UpperAbove2, bot1LpSui2, false);
+          const pos1Above2 = lpRes1Above2.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
           if (pos1Above2) {
             allocatedIds1.push(pos1Above2);
             this.bot1.state.lpPositionIdAbove2 = pos1Above2;
@@ -660,9 +944,7 @@ export class Strategy {
         // Below2: [price2*(1-2w), price2*(1-w)]   ← さらに下の買い指値
         // Above1: [price2, price2*(1+w)]           ← DEEP売り指値（DEEPを投入）
         // Above2: [price2*(1+w), price2*(1+2w)]   ← さらに上の売り指値
-        // 構築時の現在価格と境界の重なり（両建トークン不足による構築量制限バグ）を防ぐため、
-        // 0.8% のオフセットを現在価格との間に挟み、すべて Inactive な指値として綺麗に等分配分します。
-        // offset は上で宣言された 0.008 を再利用
+        // Bot1 と同じく、現在価格から 0.05% 外側に最寄りレンジを配置する。
         const bot2LowerBelow1 = price2 * (1 - width - offset);
         const bot2UpperBelow1 = price2 * (1 - offset);
         const bot2LowerBelow2 = price2 * (1 - 2 * width - offset);
@@ -684,9 +966,8 @@ export class Strategy {
 
         if (bot2LpSui1 > 0.05) {
           Logger.info(`[Bot2] Below1 LP構築 (レンジ: ${bot2LowerBelow1.toFixed(6)}-${bot2UpperBelow1.toFixed(6)}, SUI: ${bot2LpSui1.toFixed(4)})...`);
-          const lpRes2Below1 = await this.bot2.lpManager.addLiquidity(bot2LowerBelow1, bot2UpperBelow1, bot2LpSui1, false);
-          const activeIds2_b1 = await this.bot2.lpManager.getActivePositionIds();
-          const pos2Below1 = lpRes2Below1.positionId || activeIds2_b1.find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+          const lpRes2Below1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow1, bot2UpperBelow1, bot2LpSui1, false);
+          const pos2Below1 = lpRes2Below1.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
           if (pos2Below1) {
             allocatedIds2.push(pos2Below1);
             this.bot2.state.lpPositionIdBelow1 = pos2Below1;
@@ -702,9 +983,8 @@ export class Strategy {
 
         if (bot2LpSui2 > 0.05) {
           Logger.info(`[Bot2] Below2 LP構築 (レンジ: ${bot2LowerBelow2.toFixed(6)}-${bot2UpperBelow2.toFixed(6)}, SUI: ${bot2LpSui2.toFixed(4)})...`);
-          const lpRes2Below2 = await this.bot2.lpManager.addLiquidity(bot2LowerBelow2, bot2UpperBelow2, bot2LpSui2, false);
-          const activeIds2_b2 = await this.bot2.lpManager.getActivePositionIds();
-          const pos2Below2 = lpRes2Below2.positionId || activeIds2_b2.find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+          const lpRes2Below2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow2, bot2UpperBelow2, bot2LpSui2, false);
+          const pos2Below2 = lpRes2Below2.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
           if (pos2Below2) {
             allocatedIds2.push(pos2Below2);
             this.bot2.state.lpPositionIdBelow2 = pos2Below2;
@@ -718,9 +998,8 @@ export class Strategy {
         const bot2LpDeep1 = Math.min(finalDeep * 0.50, bot2DeepNeeded * 1.02);
 
         Logger.info(`[Bot2] Above1 LP構築 (レンジ: ${bot2LowerAbove1.toFixed(6)}-${bot2UpperAbove1.toFixed(6)}, DEEP: ${bot2LpDeep1.toFixed(2)})...`);
-        const lpRes2Above1 = await this.bot2.lpManager.addLiquidity(bot2LowerAbove1, bot2UpperAbove1, bot2LpDeep1, true);
-        const activeIds2_a1 = await this.bot2.lpManager.getActivePositionIds();
-        const pos2Above1 = lpRes2Above1.positionId || activeIds2_a1.find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+        const lpRes2Above1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove1, bot2UpperAbove1, bot2LpDeep1, true);
+        const pos2Above1 = lpRes2Above1.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
         if (pos2Above1) {
           allocatedIds2.push(pos2Above1);
           this.bot2.state.lpPositionIdAbove1 = pos2Above1;
@@ -738,9 +1017,8 @@ export class Strategy {
         const bot2LpDeep2 = Math.min(finalDeep_a2 * 0.98, bot2DeepNeeded * 1.02);
 
         Logger.info(`[Bot2] Above2 LP構築 (レンジ: ${bot2LowerAbove2.toFixed(6)}-${bot2UpperAbove2.toFixed(6)}, DEEP: ${bot2LpDeep2.toFixed(2)})...`);
-        const lpRes2Above2 = await this.bot2.lpManager.addLiquidity(bot2LowerAbove2, bot2UpperAbove2, bot2LpDeep2, true);
-        const activeIds2_a2 = await this.bot2.lpManager.getActivePositionIds();
-        const pos2Above2 = lpRes2Above2.positionId || activeIds2_a2.find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+        const lpRes2Above2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove2, bot2UpperAbove2, bot2LpDeep2, true);
+        const pos2Above2 = lpRes2Above2.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
         if (pos2Above2) {
           allocatedIds2.push(pos2Above2);
           this.bot2.state.lpPositionIdAbove2 = pos2Above2;
@@ -914,49 +1192,42 @@ export class Strategy {
    */
   private async executePhaseB(bot: BotInstance, price: number) {
     bot.currentPhase = CyclePhase.B;
+
+    if (this.isAnyBotRebuilding()) {
+      Logger.warn(`[${bot.name}] 急騰対応の再構築中のため、フェーズB監視をスキップします。`);
+      return;
+    }
     
     if (this.config.strategyMode === 'range_order') {
-      // 0. アクティブポジション数のチェックと自己修復（常に4ポジションを維持。欠落が続けば再構築）
-      const activePositionsCount = [
+      // 0. アクティブポジション数のチェックと自己修復（常にチェーン上で4ポジションを維持）
+      const trackedPositionsCount = [
         bot.state.lpPositionIdBelow1,
         bot.state.lpPositionIdBelow2,
         bot.state.lpPositionIdAbove1,
         bot.state.lpPositionIdAbove2
       ].filter(Boolean).length;
-
-      if (activePositionsCount === 0) {
-        Logger.error(`[${bot.name}] アクティブな指値ポジションが0個になりました。即座にフェーズAへ移行し、ポジションを再構築します。`);
-        this.bot1.state.phase = 'A';
-        this.bot1.currentPhase = CyclePhase.A;
-        this.bot2.state.phase = 'A';
-        this.bot2.currentPhase = CyclePhase.A;
-        this.bot1.state.missingPositionsStartAt = undefined;
-        this.bot2.state.missingPositionsStartAt = undefined;
-        this.bot1.stateManager.saveState(this.bot1.state);
-        this.bot2.stateManager.saveState(this.bot2.state);
+      let livePositionsCount = 0;
+      try {
+        livePositionsCount = await this.getLiveRangeOrderPositionCount(bot);
+      } catch (e: any) {
+        Logger.warn(`[${bot.name}] チェーン上の指値ポジション確認に失敗しました。安全側として統合フェーズAで再確認します: ${e.message}`);
+        this.markBothBotsForRangeOrderRebuild();
         return;
       }
 
-      if (activePositionsCount < 4) {
-        if (!bot.state.missingPositionsStartAt) {
-          bot.state.missingPositionsStartAt = Date.now();
-          Logger.warn(`[${bot.name}] ポジションの欠落を検知しました (現在: ${activePositionsCount}/4)。自己修復タイマーを開始します。`);
-        } else {
-          const duration = Date.now() - bot.state.missingPositionsStartAt;
-          Logger.warn(`[${bot.name}] ポジション欠落継続中: ${(duration / 1000).toFixed(1)}秒 / 90秒`);
-          if (duration >= 90000) { // 90秒継続で再構築
-            Logger.error(`[${bot.name}] ポジションの欠落が90秒間継続したため、自動自己修復（統合フェーズA）を実行します。`);
-            bot.state.missingPositionsStartAt = undefined;
-            this.bot1.state.phase = 'A';
-            this.bot1.currentPhase = CyclePhase.A;
-            this.bot2.state.phase = 'A';
-            this.bot2.currentPhase = CyclePhase.A;
-            this.bot1.stateManager.saveState(this.bot1.state);
-            this.bot2.stateManager.saveState(this.bot2.state);
-            return;
-          }
-        }
-      } else {
+      if (trackedPositionsCount === 0 || livePositionsCount === 0) {
+        Logger.error(`[${bot.name}] アクティブな指値ポジションが0個になりました (state=${trackedPositionsCount}/4, live=${livePositionsCount}/4)。即座に両Botを再構築します。`);
+        await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
+        return;
+      }
+
+      if (trackedPositionsCount < 4 || livePositionsCount < 4) {
+        Logger.error(`[${bot.name}] 指値ポジションの欠落を検知しました (state=${trackedPositionsCount}/4, live=${livePositionsCount}/4)。常時アクティブ維持のため即座に両Botを再構築します。`);
+        await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
+        return;
+      }
+
+      if (trackedPositionsCount === 4 && livePositionsCount === 4) {
         if (bot.state.missingPositionsStartAt) {
           Logger.info(`[${bot.name}] ポジション数が正常(4/4)に戻りました。欠落タイマーをリセットします。`);
           bot.state.missingPositionsStartAt = undefined;
@@ -992,7 +1263,7 @@ export class Strategy {
         rangeUpper = bot.state.basePrice * 1.03;
       }
 
-      Logger.info(`[${bot.name}] 監視中(指値)... 価格=$${price.toFixed(4)}, はみ出し監視レンジ=[$${rangeLower.toFixed(4)} - $${rangeUpper.toFixed(4)}], 生存数: ${activePositionsCount}/4`);
+      Logger.info(`[${bot.name}] 監視中(指値)... 価格=$${price.toFixed(4)}, はみ出し監視レンジ=[$${rangeLower.toFixed(4)} - $${rangeUpper.toFixed(4)}], state=${trackedPositionsCount}/4, live=${livePositionsCount}/4`);
 
       // 3. レンジはみ出し監視 (はみ出したまま一定時間経過したら緊急リバランス)
       if (price < rangeLower || price > rangeUpper) {
@@ -1004,11 +1275,9 @@ export class Strategy {
           const limit = this.config.rangeOrderBreachDurationMs || 60000;
           Logger.warn(`[${bot.name}] レンジ外はみ出し継続中: ${(duration / 1000).toFixed(1)}秒 / ${(limit / 1000).toFixed(0)}秒`);
           if (duration >= limit) {
-            Logger.error(`[${bot.name}] レンジ外はみ出しが設定時間以上継続したため、緊急リバランスを実行します。`);
-            bot.state.breachStartAt = undefined;
-            bot.state.phase = 'C';
-            bot.currentPhase = CyclePhase.C;
-            await this.executePhaseC(bot, price);
+            const surge = this.calculateSurgeStepDrift(bot, price);
+            Logger.error(`[${bot.name}] レンジ外はみ出しが設定時間以上継続したため、全ポジションクローズ後に4本ずつ再配置します。`);
+            await this.rebuildAllRangeOrderPositionsForSurge(price, surge.steps);
             return;
           }
         }
@@ -1019,22 +1288,8 @@ export class Strategy {
         }
       }
 
-      // 4. 手数料自動回収 (4つのポジションすべて対象)
-      const positionsToCollect = [
-        bot.state.lpPositionIdBelow1,
-        bot.state.lpPositionIdBelow2,
-        bot.state.lpPositionIdAbove1,
-        bot.state.lpPositionIdAbove2
-      ].filter(Boolean) as string[];
-
-      const gasCostUsd = this.gasTracker.getAvgGasUsdc();
-      for (const posId of positionsToCollect) {
-        const feesUsd = await bot.lpManager.getAccumulatedFeesUsd(posId).catch(() => 0);
-        if (feesUsd > gasCostUsd * 20) {
-          Logger.info(`[${bot.name}] ポジション ${posId} の手数料自動回収を実行します。累積手数料: $${feesUsd.toFixed(4)}`);
-          await bot.lpManager.collectFees(posId).catch(e => Logger.error(`手数料回収エラー: ${e.message}`));
-        }
-      }
+      // 手数料はポジションのローリングまたはクローズ時にまとめて回収する。
+      // 監視ループから単独の回収TXは送らず、ガス代を抑える。
     } else {
       // 既存の1ポジション監視（balancedモード）
       Logger.info(`[${bot.name}] 監視中... 価格=$${price.toFixed(4)}, レンジ=[$${bot.state.rangeLower.toFixed(4)} - $${bot.state.rangeUpper.toFixed(4)}]`);
@@ -1060,27 +1315,34 @@ export class Strategy {
         bot.currentPhase = CyclePhase.D;
         await this.executePhaseD(bot, price);
       }
-      else {
-        // レンジ内: 手数料自動回収
-        if (bot.state.lpPositionId) {
-          const feesUsd = await bot.lpManager.getAccumulatedFeesUsd(bot.state.lpPositionId);
-          const gasCostUsd = this.gasTracker.getAvgGasUsdc();
-          if (feesUsd > gasCostUsd * 20) {
-            Logger.info(`[${bot.name}] 手数料累積回収を実行します。`);
-            await bot.lpManager.collectFees(bot.state.lpPositionId);
-          }
-        }
-      }
+      // レンジ内では監視のみ。手数料はポジションのクローズ時にまとめて回収する。
     }
   }
 
   private async checkAndRollPositions(bot: BotInstance, price: number): Promise<boolean> {
+    if (this.isAnyBotRebuilding()) {
+      return false;
+    }
     if (this.isRolling[bot.name]) {
       return false;
     }
     const isBot1 = bot.name.includes('Bot1');
     const width = this.config.rangeOrderWidthPct || 0.01;
     const GAS_RESERVE = 0.5;
+
+    const surge = this.calculateSurgeStepDrift(bot, price);
+    const jumpedBelowOuterRange = bot.state.rangeLowerBelow2 > 0 && price < bot.state.rangeLowerBelow2;
+    const jumpedAboveOuterRange = bot.state.rangeUpperAbove2 > 0 && price > bot.state.rangeUpperAbove2;
+    const surgeStepThreshold = Math.max(3, this.config.surgeTriggerSteps || 3);
+    if (
+      jumpedBelowOuterRange ||
+      jumpedAboveOuterRange ||
+      Math.abs(surge.steps) >= surgeStepThreshold
+    ) {
+      Logger.warn(`[${bot.name}] 🚨 急騰・急落を検出しました。価格=$${price.toFixed(6)}, 中央=$${surge.centerPrice.toFixed(6)}, ずれ段数=${surge.steps}`);
+      await this.rebuildAllRangeOrderPositionsForSurge(price, surge.steps);
+      return true;
+    }
 
     // ─── 0. スライド方向ロック解除（中央エリアへの復帰判定） ───
     // 現在価格が Below1 の上限と Above1 の下限の間（中央の安全地帯）に戻った場合、
@@ -1095,16 +1357,20 @@ export class Strategy {
       }
     }
 
-    // ─── スライドしきい値の動的決定 ───
-    let upperBelow1Trigger = bot.state.rangeUpperBelow1 || 0;
-    let lowerAbove1Trigger = bot.state.rangeLowerAbove1 || Infinity;
+    // 外側レンジを抜ける前に、その中央で次の外側ポジションを先回りして配置する。
+    let downRollTrigger = bot.state.rangeLowerBelow2 > 0 && bot.state.rangeUpperBelow2 > 0
+      ? (bot.state.rangeLowerBelow2 + bot.state.rangeUpperBelow2) / 2
+      : bot.state.rangeUpperBelow1 || 0;
+    let upRollTrigger = bot.state.rangeLowerAbove2 > 0 && bot.state.rangeUpperAbove2 > 0
+      ? (bot.state.rangeLowerAbove2 + bot.state.rangeUpperAbove2) / 2
+      : bot.state.rangeLowerAbove1 || Infinity;
 
     // もし直前のスライドが「下落方向（down）」だった場合：
     // 現在価格は新 Above1 (旧 Below1) の中にいるはず。
     // 上昇スライド（逆方向）のトリガーをしきい値の上限（rangeUpperAbove1）に引き上げる。
     // これにより、完全に中央に戻る（または上抜ける）まで上昇スライドを抑制する。
     if (bot.state.lastSlideDirection === 'down') {
-      lowerAbove1Trigger = bot.state.rangeUpperAbove1 || Infinity;
+      upRollTrigger = bot.state.rangeUpperAbove1 || Infinity;
     }
 
     // もし直前のスライドが「上昇方向（up）」だった場合：
@@ -1112,34 +1378,26 @@ export class Strategy {
     // 下落スライド（逆方向）のトリガーをしきい値の下限（rangeLowerBelow1）に引き下げる。
     // これにより、完全に中央に戻る（または下抜ける）まで下落スライドを抑制する。
     if (bot.state.lastSlideDirection === 'up') {
-      upperBelow1Trigger = bot.state.rangeLowerBelow1 || 0;
+      downRollTrigger = bot.state.rangeLowerBelow1 || 0;
     }
 
-    // ─── 1. Below1 下限を下抜けした場合 → 下落方向スライドローリング ───
-    // 価格が Below1 の上限を下回った = 1%下落した（Below1がアクティブになった）瞬間
-    // → Above2をクローズし、グリッドを下にスライドさせ、新しいBelow2を構築
-    if (bot.state.lpPositionIdBelow1 && price <= upperBelow1Trigger) {
-      Logger.warn(`[${bot.name}] 🔻 価格が Below1 の上限を下抜け（Below1がアクティブに）しました。下落方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Below1上限: $${(bot.state.rangeUpperBelow1 || 0).toFixed(6)}`);
+    // ─── 1. Below2中央へ到達した場合 → 下落方向の先回りローリング ───
+    if (bot.state.lpPositionIdBelow2 && price <= downRollTrigger) {
+      Logger.warn(`[${bot.name}] 🔻 価格が外側Below2の中央へ到達しました。レンジ下抜け前に先回りローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${downRollTrigger.toFixed(6)}, 外側下限: $${bot.state.rangeLowerBelow2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
 
       try {
-        // 全ポジションから金利を回収して再投資資金にする
-        const allActivePosIds = [
-          bot.state.lpPositionIdBelow1,
-          bot.state.lpPositionIdBelow2,
-          bot.state.lpPositionIdAbove1,
-          bot.state.lpPositionIdAbove2
-        ].filter(Boolean) as string[];
-        for (const posId of allActivePosIds) {
-          try {
-            Logger.info(`[${bot.name}] スライド前にポジション ${posId} から金利を回収し再投資へ...`);
-            await bot.lpManager.collectFees(posId);
-          } catch (e: any) {
-            Logger.warn(`[${bot.name}] 金利自動回収失敗（続行します）: ${e.message}`);
-          }
+        const beforeCloseBalance = await bot.lpManager.checkBalance();
+        let beforeCloseDeepBalance = 0;
+        if (!isBot1) {
+          const deepCoinType = bot.lpManager.coinTypeA || '';
+          const deepBalObj = await bot.lpManager.suiClient.getBalance({
+            owner: bot.lpManager.getWalletAddress(),
+            coinType: deepCoinType
+          });
+          beforeCloseDeepBalance = Number(deepBalObj.totalBalance) / 1e6;
         }
-        await new Promise(resolve => setTimeout(resolve, 1500));
 
         // Step 1: 遠方ポジション Above2 をクローズして資金を回収
         const closePosId = bot.state.lpPositionIdAbove2;
@@ -1171,26 +1429,40 @@ export class Strategy {
         bot.state.rangeUpperBelow2     = 0;
 
         // Step 3: 回収したトークンをスワップ（新 Below2 の資金を準備）
+        let rollFundingAmount = 0;
         if (isBot1) {
           // Bot1 (SUI-USDC): Above2クローズで得たSUI → USDC に換えてBelow2資金にする
+          const closedSui = await this.waitForBalanceIncrease(
+            `${bot.name} Above2`,
+            beforeCloseBalance.suiBalance,
+            async () => (await this.bot1.lpManager.checkBalance()).suiBalance
+          );
           const balance1 = await this.bot1.lpManager.checkBalance();
-          const suiToSwap = Math.max(0, balance1.suiBalance - GAS_RESERVE);
+          const suiToSwap = Math.min(closedSui, Math.max(0, balance1.suiBalance - GAS_RESERVE));
           if (suiToSwap > 0.05) {
-            Logger.info(`[${bot.name}] SUI → USDC スワップ: ${suiToSwap.toFixed(4)} SUI`);
-            await bot.swapManager.swapSuiToUsdc(suiToSwap);
+            Logger.info(`[${bot.name}] SUI → USDC スワップ（今回クローズ分のみ）: ${suiToSwap.toFixed(4)} SUI`);
+            const swapRes = await bot.swapManager.swapSuiToUsdc(suiToSwap);
+            rollFundingAmount = swapRes.amountOut;
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
         } else {
           // Bot2 (DEEP-SUI): Above2クローズで得たDEEP → SUI に換えてBelow2資金にする
           const deepCoinType = bot.lpManager.coinTypeA || '';
-          const deepBalObj = await bot.lpManager.suiClient.getBalance({
-            owner: bot.lpManager.getWalletAddress(),
-            coinType: deepCoinType
-          });
-          const deepBalance = Number(deepBalObj.totalBalance) / 1e6;
-          if (deepBalance > 0.5) {
-            Logger.info(`[${bot.name}] DEEP → SUI スワップ: ${deepBalance.toFixed(2)} DEEP`);
-            await bot.swapManager.swapDeepToSui(deepBalance);
+          const closedDeep = await this.waitForBalanceIncrease(
+            `${bot.name} Above2`,
+            beforeCloseDeepBalance,
+            async () => {
+              const deepBalObj = await bot.lpManager.suiClient.getBalance({
+                owner: bot.lpManager.getWalletAddress(),
+                coinType: deepCoinType
+              });
+              return Number(deepBalObj.totalBalance) / 1e6;
+            }
+          );
+          if (closedDeep > 0.5) {
+            Logger.info(`[${bot.name}] DEEP → SUI スワップ（今回クローズ分のみ）: ${closedDeep.toFixed(2)} DEEP`);
+            const swapRes = await bot.swapManager.swapDeepToSui(closedDeep);
+            rollFundingAmount = swapRes.amountOut;
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
         }
@@ -1203,12 +1475,10 @@ export class Strategy {
         let isCoinA = false;
 
         if (isBot1) {
-          const balance1 = await this.bot1.lpManager.checkBalance();
-          amountToInvest = balance1.usdcBalance * 0.98;
+          amountToInvest = rollFundingAmount * 0.98;
           isCoinA = true;
         } else {
-          const balance2 = await bot.lpManager.checkBalance();
-          amountToInvest = Math.max(0, balance2.suiBalance - GAS_RESERVE) * 0.98;
+          amountToInvest = rollFundingAmount * 0.98;
           isCoinA = false;
         }
 
@@ -1262,31 +1532,14 @@ export class Strategy {
       }
     }
 
-    // ─── 2. Above1 上限を上抜けした場合 → 上昇方向スライドローリング ───
-    // 価格が Above1 の下限を上回った = 1%上昇した（Above1がアクティブになった）瞬間
-    // → Below2をクローズし、グリッドを上にスライドさせ、新しいAbove2を構築
-    if (bot.state.lpPositionIdAbove1 && price >= lowerAbove1Trigger) {
-      Logger.warn(`[${bot.name}] 🔺 価格が Above1 の下限を上抜け（Above1がアクティブに）しました。上昇方向スライドローリングを実行します。`);
-      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, Above1下限: $${(bot.state.rangeLowerAbove1 || 0).toFixed(6)}`);
+    // ─── 2. Above2中央へ到達した場合 → 上昇方向の先回りローリング ───
+    if (bot.state.lpPositionIdAbove2 && price >= upRollTrigger) {
+      Logger.warn(`[${bot.name}] 🔺 価格が外側Above2の中央へ到達しました。レンジ上抜け前に先回りローリングを実行します。`);
+      Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${upRollTrigger.toFixed(6)}, 外側上限: $${bot.state.rangeUpperAbove2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
 
       try {
-        // 全ポジションから金利を回収して再投資資金にする
-        const allActivePosIds = [
-          bot.state.lpPositionIdBelow1,
-          bot.state.lpPositionIdBelow2,
-          bot.state.lpPositionIdAbove1,
-          bot.state.lpPositionIdAbove2
-        ].filter(Boolean) as string[];
-        for (const posId of allActivePosIds) {
-          try {
-            Logger.info(`[${bot.name}] スライド前にポジション ${posId} から金利を回収し再投資へ...`);
-            await bot.lpManager.collectFees(posId);
-          } catch (e: any) {
-            Logger.warn(`[${bot.name}] 金利自動回収失敗（続行します）: ${e.message}`);
-          }
-        }
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        const beforeCloseBalance = await bot.lpManager.checkBalance();
 
         // Step 1: 遠方ポジション Below2 をクローズして資金を回収
         const closePosId = bot.state.lpPositionIdBelow2;
@@ -1318,22 +1571,33 @@ export class Strategy {
         bot.state.rangeUpperAbove2     = 0;
 
         // Step 3: 回収したトークンをスワップ（新 Above2 の資金を準備）
+        let rollFundingAmount = 0;
         if (isBot1) {
           // Bot1 (SUI-USDC): Below2クローズで得たUSDC → SUI に換えてAbove2資金にする
-          const balance1 = await this.bot1.lpManager.checkBalance();
-          const usdcToSwap = balance1.usdcBalance;
+          const usdcToSwap = await this.waitForBalanceIncrease(
+            `${bot.name} Below2`,
+            beforeCloseBalance.usdcBalance,
+            async () => (await this.bot1.lpManager.checkBalance()).usdcBalance
+          );
           if (usdcToSwap > 0.1) {
-            Logger.info(`[${bot.name}] USDC → SUI スワップ: $${usdcToSwap.toFixed(2)} USDC`);
-            await bot.swapManager.swapUsdcToSui(usdcToSwap);
+            Logger.info(`[${bot.name}] USDC → SUI スワップ（今回クローズ分のみ）: $${usdcToSwap.toFixed(2)} USDC`);
+            const swapRes = await bot.swapManager.swapUsdcToSui(usdcToSwap);
+            rollFundingAmount = swapRes.amountOut;
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
         } else {
           // Bot2 (DEEP-SUI): Below2クローズで得たSUI → DEEP に換えてAbove2資金にする
+          const closedSui = await this.waitForBalanceIncrease(
+            `${bot.name} Below2`,
+            beforeCloseBalance.suiBalance,
+            async () => (await bot.lpManager.checkBalance()).suiBalance
+          );
           const balance2 = await bot.lpManager.checkBalance();
-          const suiToSwap = Math.max(0, balance2.suiBalance - GAS_RESERVE);
+          const suiToSwap = Math.min(closedSui, Math.max(0, balance2.suiBalance - GAS_RESERVE));
           if (suiToSwap > 0.05) {
-            Logger.info(`[${bot.name}] SUI → DEEP スワップ: ${suiToSwap.toFixed(4)} SUI`);
-            await bot.swapManager.swapSuiToDeep(suiToSwap);
+            Logger.info(`[${bot.name}] SUI → DEEP スワップ（今回クローズ分のみ）: ${suiToSwap.toFixed(4)} SUI`);
+            const swapRes = await bot.swapManager.swapSuiToDeep(suiToSwap);
+            rollFundingAmount = swapRes.amountOut;
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
         }
@@ -1346,17 +1610,10 @@ export class Strategy {
         let isCoinA = false;
 
         if (isBot1) {
-          const balance1 = await this.bot1.lpManager.checkBalance();
-          amountToInvest = Math.max(0, balance1.suiBalance - GAS_RESERVE) * 0.98;
+          amountToInvest = rollFundingAmount * 0.98;
           isCoinA = false;
         } else {
-          const deepCoinType = bot.lpManager.coinTypeA || '';
-          const deepBalObj = await bot.lpManager.suiClient.getBalance({
-            owner: bot.lpManager.getWalletAddress(),
-            coinType: deepCoinType
-          });
-          const deepBalance = Number(deepBalObj.totalBalance) / 1e6;
-          amountToInvest = deepBalance * 0.98;
+          amountToInvest = rollFundingAmount * 0.98;
           isCoinA = true;
         }
 
@@ -1605,6 +1862,11 @@ export class Strategy {
    * 統合デルタヘッジの実行・調整およびON/OFF制御
    */
   private async maintainHedge(suiPrice: number) {
+    if (this.isAnyBotRebuilding()) {
+      Logger.warn('[HEDGE] 急騰対応の再構築中のため、ヘッジ計算をスキップします。');
+      return;
+    }
+
     const isHedgeEnabled = this.config.hedgeEnabled !== false;
 
     if (!isHedgeEnabled) {
@@ -1744,6 +2006,8 @@ export class Strategy {
       this.isEmergencyStopped = state.isEmergencyStopped || false;
       if (state.bot1State) this.bot1.state = state.bot1State;
       if (state.bot2State) this.bot2.state = state.bot2State;
+      this.bot1.state.isRebuilding = false;
+      this.bot2.state.isRebuilding = false;
     }
   }
 
@@ -1752,6 +2016,83 @@ export class Strategy {
     // 15秒間キャッシュを利用する（同一の連携アドレスに対してのみ）
     if (this.lastPnlData && (now - this.lastPnlDataTime < 15000) && (this.lastPnlData.userWalletAddress === userWalletAddress)) {
       return this.lastPnlData.data;
+    }
+
+    if (!this.isRunning) {
+      if (this.lastPnlData && this.lastPnlData.userWalletAddress === userWalletAddress) {
+        return { ...this.lastPnlData.data, isStopped: true };
+      }
+      const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
+      return {
+        isStopped: true,
+        pnl: {
+          netPnl: 0,
+          dailyPnl: 0,
+          lpPnl: 0,
+          hedgePnl: hedgeStatus.cumulativePnl + hedgeStatus.currentPnl,
+          feesCollected: 0,
+          gasSpent: this.gasTracker.getStats().totalGasUsdc || 0,
+          botWalletBalanceSui: 0,
+          botWalletBalanceUsdc: 0,
+          botWalletSufficient: false,
+          bot1LpValue: 0,
+          bot2LpValue: 0,
+          userWalletBalanceSui: 0,
+          userWalletBalanceUsdc: 0,
+          userWalletSufficient: false,
+        },
+        delta: {
+          hedgeActive: hedgeStatus.active,
+          hedgeSize: hedgeStatus.size,
+          direction: hedgeStatus.direction,
+          lpSuiAmount: 0,
+        },
+        hedge: hedgeStatus,
+        dailySnapshots: []
+      };
+    }
+
+    if (this.isAnyBotRebuilding()) {
+      Logger.warn('[PNL] 急騰対応の再構築中のため、LP詳細取得をスキップして直近キャッシュまたは暫定値を返します。');
+      if (this.lastPnlData && this.lastPnlData.userWalletAddress === userWalletAddress) {
+        return { ...this.lastPnlData.data, isRebuilding: true };
+      }
+
+      const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
+      const balance = await this.bot1.lpManager.checkBalance().catch(() => ({
+        suiBalance: 0,
+        usdcBalance: 0,
+        sufficient: false,
+        coinABalance: 0,
+        coinBBalance: 0,
+      }));
+      return {
+        isRebuilding: true,
+        pnl: {
+          netPnl: 0,
+          dailyPnl: 0,
+          lpPnl: 0,
+          hedgePnl: hedgeStatus.cumulativePnl + hedgeStatus.currentPnl,
+          feesCollected: 0,
+          gasSpent: this.gasTracker.getStats().totalGasUsdc || 0,
+          botWalletBalanceSui: balance.suiBalance,
+          botWalletBalanceUsdc: balance.usdcBalance,
+          botWalletSufficient: balance.sufficient,
+          bot1LpValue: 0,
+          bot2LpValue: 0,
+          userWalletBalanceSui: 0,
+          userWalletBalanceUsdc: 0,
+          userWalletSufficient: false,
+        },
+        delta: {
+          hedgeActive: hedgeStatus.active,
+          hedgeSize: hedgeStatus.size,
+          direction: hedgeStatus.direction,
+          lpSuiAmount: 0,
+        },
+        hedge: hedgeStatus,
+        dailySnapshots: []
+      };
     }
 
     const stats = this.tracker.getStats();
@@ -1858,34 +2199,39 @@ export class Strategy {
 
   public async runRebalance(currentPrice: number, force: boolean = false) {
     if (force) {
-      // 強制リバランス: フェーズCではなく統合フェーズA（全資金再配分）を実行
-      Logger.info('[STRATEGY] 手動リバランス: 両ボットの全資金を再配分します（統合フェーズA）');
-      const price2 = await this.bot2.priceMonitor.getCurrentPrice();
-      
-      // ポジションIDをクリアして強制再構築を促す
-      this.bot1.state.lpPositionId = null;
-      this.bot1.state.lpPositionIdBelow = null;
-      this.bot1.state.lpPositionIdAbove = null;
-      this.bot1.state.lpPositionIdBelow1 = null;
-      this.bot1.state.lpPositionIdBelow2 = null;
-      this.bot1.state.lpPositionIdAbove1 = null;
-      this.bot1.state.lpPositionIdAbove2 = null;
-      this.bot1.state.lastSlideDirection = null;
+      this.bot1.state.isRebuilding = true;
+      this.bot2.state.isRebuilding = true;
+      this.isRolling[this.bot1.name] = true;
+      this.isRolling[this.bot2.name] = true;
+      this.bot1.stateManager.saveState(this.bot1.state);
+      this.bot2.stateManager.saveState(this.bot2.state);
 
-      this.bot2.state.lpPositionId = null;
-      this.bot2.state.lpPositionIdBelow = null;
-      this.bot2.state.lpPositionIdAbove = null;
-      this.bot2.state.lpPositionIdBelow1 = null;
-      this.bot2.state.lpPositionIdBelow2 = null;
-      this.bot2.state.lpPositionIdAbove1 = null;
-      this.bot2.state.lpPositionIdAbove2 = null;
-      this.bot2.state.lastSlideDirection = null;
+      try {
+        // 強制リバランス: フェーズCではなく統合フェーズA（全資金再配分）を実行
+        Logger.info('[STRATEGY] 手動リバランス: 両ボットの全資金を再配分します（統合フェーズA）');
+        const price2 = await this.bot2.priceMonitor.getCurrentPrice();
 
-      this.bot1.state.phase = 'A';
-      this.bot2.state.phase = 'A';
-      this.bot1.currentPhase = CyclePhase.A;
-      this.bot2.currentPhase = CyclePhase.A;
-      await this.executeCombinedPhaseA(currentPrice, price2);
+        // ポジションIDをクリアして強制再構築を促す
+        this.resetRangeOrderState(this.bot1);
+        this.resetRangeOrderState(this.bot2);
+        this.bot1.stateManager.saveState(this.bot1.state);
+        this.bot2.stateManager.saveState(this.bot2.state);
+        await this.executeCombinedPhaseA(currentPrice, price2);
+        if (this.config.strategyMode === 'range_order') {
+          const bot1Valid = await this.validateRangeOrderStateOnChain(this.bot1);
+          const bot2Valid = await this.validateRangeOrderStateOnChain(this.bot2);
+          if (!bot1Valid || !bot2Valid) {
+            throw new Error('8ポジション再配置後のチェーン確認に失敗しました。ログで未作成ポジションを確認してください。');
+          }
+        }
+      } finally {
+        this.bot1.state.isRebuilding = false;
+        this.bot2.state.isRebuilding = false;
+        this.isRolling[this.bot1.name] = false;
+        this.isRolling[this.bot2.name] = false;
+        this.bot1.stateManager.saveState(this.bot1.state);
+        this.bot2.stateManager.saveState(this.bot2.state);
+      }
       return;
     }
     // 通常リバランス（レンジ外の場合のみ）

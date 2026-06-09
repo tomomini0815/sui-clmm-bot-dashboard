@@ -306,6 +306,7 @@ app.post('/api/config', async (req, res) => {
       lpAmountUsdc: parseFloat(lpAmountUsdc) || session.config.lpAmountUsdc,
       totalOperationalCapitalUsdc: parseFloat(totalOperationalCapitalUsdc) || session.config.totalOperationalCapitalUsdc,
       rangeWidth: (parseFloat(rangeWidth) / 100) || session.config.rangeWidth,
+      rangeOrderWidthPct: (parseFloat(rangeWidth) / 100) || session.config.rangeOrderWidthPct,
       hedgeRatio: (parseFloat(hedgeRatio) / 100) || session.config.hedgeRatio,
       telegramToken: telegramToken || session.config.telegramToken,
       telegramChatId: telegramChatId || session.config.telegramChatId,
@@ -442,24 +443,61 @@ app.post('/api/rebuild', async (req, res) => {
     // レンジ幅が指定されていれば設定を更新
     if (rangeWidth) {
       const newRangeWidth = parseFloat(rangeWidth) / 100;
-      const newConfig = { ...session.config, rangeWidth: newRangeWidth };
+      const newConfig = { ...session.config, strategyMode: 'range_order' as const, hedgeEnabled: false, rangeWidth: newRangeWidth, rangeOrderWidthPct: newRangeWidth };
       session.config = newConfig;
       session.strategy.refreshConfig(newConfig);
       Logger.info(`[REBUILD] レンジ幅を ${rangeWidth}% に更新しました。`);
     }
 
-    // 稼働中でなければ一旦起動状態にセット
-    if (!session.strategy.isRunning) {
-      session.strategy.isRunning = true;
-    }
-
-    // 非同期で両ボットを強制的にフェーズAから再配置
+    // 強制再配置中は通常サイクルを止め、完了後に稼働状態へ戻す
+    session.strategy.stop();
     const currentPrice = await session.priceMonitor.getCurrentPrice();
-    session.strategy.runRebalance(currentPrice, true).catch(err => {
-      Logger.error('[REBUILD] 再配置中にエラー:', err);
-    });
+    await session.strategy.runRebalance(currentPrice, true);
+    await session.strategy.start();
+    SessionManager.saveSessionState(sessionId);
 
-    res.json({ success: true, message: '両ボットの全資金再配置を開始しました。ログをご確認ください。' });
+    res.json({ success: true, status: 'running', message: '両ボットの全資金再配置が完了し、Botを起動しました。' });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ボットを再起動し、両ボット合計8ポジションを現在価格基準で再配置
+app.post('/api/restart-rebuild', async (req, res) => {
+  const { sessionId, rangeWidth } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json({ success: false, error: 'Session ID required' });
+  }
+
+  const session = SessionManager.getSession(sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+
+  try {
+    const newRangeWidth = rangeWidth ? parseFloat(rangeWidth) / 100 : session.config.rangeOrderWidthPct || session.config.rangeWidth;
+    const newConfig = {
+      ...session.config,
+      strategyMode: 'range_order' as const,
+      hedgeEnabled: false,
+      rangeWidth: newRangeWidth,
+      rangeOrderWidthPct: newRangeWidth,
+    };
+    session.config = newConfig;
+    session.strategy.refreshConfig(newConfig);
+    Logger.info(`[RESTART_REBUILD] 指値レンジ戦略でレンジ幅を ${(newRangeWidth * 100).toFixed(2)}% に更新しました。`);
+
+    Logger.info(`[RESTART_REBUILD] Bot再起動と8ポジション再配置を開始します。session=${sessionId}`);
+    session.strategy.stop();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const currentPrice = await session.priceMonitor.getCurrentPrice();
+    await session.strategy.runRebalance(currentPrice, true);
+    await session.strategy.start();
+
+    SessionManager.saveSessionState(sessionId);
+    res.json({ success: true, status: 'running', message: 'Botを再起動し、8ポジションの再配置が完了しました。' });
   } catch (e: any) {
     res.status(500).json({ success: false, error: e.message });
   }

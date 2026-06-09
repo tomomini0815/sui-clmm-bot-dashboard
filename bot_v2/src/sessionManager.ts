@@ -204,12 +204,18 @@ export class SessionManager {
     // 保存された状態があれば復元
     const savedState = this.loadSessionState({ sessionId: targetSessionId, pnlEngine, gasTracker, hedgeManager, tracker, strategy });
     
-    // 保存された設定がある場合、戦略的に重要な設定（運用額など）を .env から最新化する
+    // 保存された設定がある場合、UIで変更したレンジ幅などを復元する
     if (savedState && savedState.config) {
+      Object.assign(sessionConfig, savedState.config);
+
+      // 戦略的に重要な接続・鍵設定は .env から最新化する
+      sessionConfig.privateKey = globalConfig.privateKey;
       sessionConfig.lpAmountUsdc = globalConfig.lpAmountUsdc;
       sessionConfig.totalOperationalCapitalUsdc = globalConfig.totalOperationalCapitalUsdc;
       sessionConfig.hedgeMode = globalConfig.hedgeMode;
       sessionConfig.rpcUrl = globalConfig.rpcUrl;
+      sessionConfig.rangeOrderWidthPct = savedState.config.rangeOrderWidthPct ?? savedState.config.rangeWidth ?? sessionConfig.rangeOrderWidthPct;
+      sessionConfig.rangeWidth = savedState.config.rangeWidth ?? sessionConfig.rangeWidth;
       
       // コンポーネントに反映
       priceMonitor.refreshConfig(sessionConfig);

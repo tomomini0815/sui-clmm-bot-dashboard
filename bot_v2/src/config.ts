@@ -53,6 +53,11 @@ export interface BotConfig {
   hedgeEnabled: boolean;           // 全体的なヘッジの有効・無効
   poolObjectId: string;            // 運用対象のプールID
   rangeOrderBreachDurationMs?: number; // レンジはみ出し判定継続時間 (ms)
+
+  // === 急騰・急落対応 ===
+  surgeTriggerSteps: number;        // 何段階ずれたら急騰・急落と判定するか
+  surgeRebuildDelayMs: number;      // 再構築開始前の待機時間 (ms)
+  surgeMaxRetries: number;          // 再構築失敗時の最大リトライ回数
 }
 
 function loadConfig(): BotConfig {
@@ -86,6 +91,9 @@ function loadConfig(): BotConfig {
     RANGE_ORDER_WIDTH_PCT,
     RANGE_ORDER_HEDGE_ENABLED,
     HEDGE_ENABLED,
+    SURGE_TRIGGER_STEPS,
+    SURGE_REBUILD_DELAY_MS,
+    SURGE_MAX_RETRIES,
   } = process.env;
 
   if (!PRIVATE_KEY_HEX || PRIVATE_KEY_HEX === 'your_private_key_here') {
@@ -130,6 +138,9 @@ function loadConfig(): BotConfig {
     hedgeEnabled: HEDGE_ENABLED !== 'false',                         // デフォルトは true
     poolObjectId: process.env.POOL_OBJECT_ID || (SUI_RPC_URL?.includes('testnet') ? '0xf4f9663f288049ede73a9f19e3a655c74be8a9a84dd3e2c7f04c190c5c9f1fba' : '0xb8d7d9e66a60c239e7a60110efcf8de6c705580ed924d0dde141f4a0e2c90105'),
     rangeOrderBreachDurationMs: parseInt(process.env.RANGE_ORDER_BREACH_DURATION_MS || '60000', 10),
+    surgeTriggerSteps: parseInt(SURGE_TRIGGER_STEPS || '2', 10),
+    surgeRebuildDelayMs: parseInt(SURGE_REBUILD_DELAY_MS || '3000', 10),
+    surgeMaxRetries: parseInt(SURGE_MAX_RETRIES || '3', 10),
   };
 }
 

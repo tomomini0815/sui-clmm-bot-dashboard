@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet, CheckCircle, AlertCircle, Loader } from 'lucide-react';
+import { Activity, DollarSign, Repeat, PowerOff, TrendingUp, BarChart3, Wallet, CheckCircle, AlertCircle, Loader, RotateCw } from 'lucide-react';
 import { StatCard } from './components/StatCard';
 import { PriceChart } from './components/PriceChart';
 import { BalanceChart } from './components/BalanceChart';
@@ -128,6 +128,7 @@ function App() {
     config: { 
       lpAmountUsdc: 0.10, 
       rangeWidth: 0.05, 
+      rangeOrderWidthPct: 0.05,
       hedgeRatio: 0.5, 
       configMode: 'auto' as 'auto' | 'manual',
       strategyMode: 'balanced' as 'balanced' | 'range_order',
@@ -314,7 +315,7 @@ function App() {
       const response = await fetch(`${apiUrl}/api/rebuild`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, rangeWidth: (stats.config.rangeWidth * 100) })
+        body: JSON.stringify({ sessionId, rangeWidth: ((stats.config.rangeOrderWidthPct ?? stats.config.rangeWidth) * 100) })
       });
       const data = await response.json();
       dismissToast(loadingId);
@@ -326,6 +327,38 @@ function App() {
     } catch (e) {
       dismissToast(loadingId);
       showToast("通信エラーが発生しました", "error");
+    } finally {
+      setIsActionPending(false);
+    }
+  };
+
+  const handleRestartAndRebuild = async (overrideRangeWidth?: number) => {
+    if (!sessionId || isActionPending) return;
+
+    const effectiveWidth = overrideRangeWidth ?? ((stats.config.rangeOrderWidthPct ?? stats.config.rangeWidth) * 100);
+    const confirm = window.confirm(`Botを再起動し、Cetusレンジ幅 ${effectiveWidth.toFixed(1)}% で合計8ポジションを再配置します。よろしいですか？`);
+    if (!confirm) return;
+
+    setIsActionPending(true);
+    setIsBotActive(true);
+    setStats(prev => ({ ...prev, config: { ...prev.config, strategyMode: 'range_order', hedgeEnabled: false, rangeWidth: effectiveWidth / 100, rangeOrderWidthPct: effectiveWidth / 100 } }));
+    const loadingId = showToast("Botを再起動し、8ポジションを再配置中... 完了まで待機します", "loading");
+    try {
+      const response = await fetch(`${apiUrl}/api/restart-rebuild`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, rangeWidth: effectiveWidth.toString() })
+      });
+      const data = await response.json();
+      dismissToast(loadingId);
+      if (data.success) {
+        showToast("✅ 8ポジション再配置が完了し、Botを起動しました。", "success", 6000);
+      } else {
+        showToast(`Bot再起動に失敗しました: ${data.error}`, "error");
+      }
+    } catch (e) {
+      dismissToast(loadingId);
+      showToast("通信エラー: バックエンドが起動中か確認してください", "error", 5000);
     } finally {
       setIsActionPending(false);
     }
@@ -477,7 +510,7 @@ function App() {
   const handleUpdateRangeWidth = async (newWidth: number) => {
     if (!sessionId) return;
     // 楽観的UI更新
-    setStats(prev => ({ ...prev, config: { ...prev.config, rangeWidth: newWidth / 100 } }));
+    setStats(prev => ({ ...prev, config: { ...prev.config, rangeWidth: newWidth / 100, rangeOrderWidthPct: newWidth / 100 } }));
     const loadingId = showToast(`レンジ幅を ±${newWidth.toFixed(1)}% に更新中...`, 'loading');
     try {
       const response = await fetch(`${apiUrl}/api/config`, {
@@ -496,7 +529,7 @@ function App() {
       const data = await response.json();
       dismissToast(loadingId);
       if (data.success) {
-        showToast(`✅ レンジ幅を ±${newWidth.toFixed(1)}% に設定しました`);
+        showToast(`✅ レンジ幅を ±${newWidth.toFixed(1)}% に保存しました。既存ポジションへ反映するには8再配置を実行してください。`, 'success', 5000);
       } else {
         showToast('レンジ幅の更新に失敗しました', 'error');
       }
@@ -656,6 +689,34 @@ function App() {
                 boxShadow: stats.config?.hedgeEnabled ? '0 0 6px #ff9f43' : 'none'
               }}></span>
               ヘッジ: {stats.config?.hedgeEnabled ? 'ON' : 'OFF'}
+            </button>
+          )}
+
+          {sessionId && (
+            <button
+              onClick={() => handleRestartAndRebuild()}
+              disabled={isActionPending}
+              title="Botを再起動して、現在価格基準で合計8ポジションを再配置します"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                borderColor: 'rgba(88, 166, 255, 0.35)',
+                color: 'var(--accent)',
+                background: 'rgba(88, 166, 255, 0.10)',
+                padding: '8px 14px',
+                borderRadius: '12px',
+                fontSize: '0.85rem',
+                fontWeight: 700,
+                cursor: isActionPending ? 'not-allowed' : 'pointer',
+                opacity: isActionPending ? 0.7 : 1,
+                transition: 'all 0.15s',
+                border: '1px solid',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              <RotateCw size={14} style={{ animation: isActionPending ? 'spin 1s linear infinite' : 'none' }} />
+              8再配置
             </button>
           )}
           
@@ -848,6 +909,8 @@ function App() {
             hedge={stats.hedge}
             onUpdateStrategyMode={handleUpdateStrategyMode}
             onUpdateRangeWidth={handleUpdateRangeWidth}
+            onRestartRebuild={handleRestartAndRebuild}
+            isActionPending={isActionPending}
           />
 
           {/* PnLカード */}

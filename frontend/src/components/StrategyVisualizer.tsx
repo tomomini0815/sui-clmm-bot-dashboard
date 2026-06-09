@@ -1,16 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Layers, Info, ArrowUpDown } from 'lucide-react';
+import { Layers, Info, ArrowUpDown, Check, RotateCw } from 'lucide-react';
 
 interface StrategyVisualizerProps {
   totalCapital: number;
   config?: { 
     strategyMode?: 'balanced' | 'range_order';
     rangeWidth?: number;
+    rangeOrderWidthPct?: number;
     hedgeEnabled?: boolean;
   };
   hedge?: { active?: boolean; direction?: string; size?: number };
   onUpdateStrategyMode: (mode: 'balanced' | 'range_order', hedgeEnabled: boolean) => void;
   onUpdateRangeWidth?: (newWidth: number) => void;
+  onRestartRebuild?: (rangeWidth?: number) => void;
+  isActionPending?: boolean;
 }
 
 export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({ 
@@ -18,13 +21,16 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
   config, 
   hedge,
   onUpdateStrategyMode,
-  onUpdateRangeWidth
+  onUpdateRangeWidth,
+  onRestartRebuild,
+  isActionPending = false
 }) => {
-  const [localRangeWidth, setLocalRangeWidth] = useState(((config?.rangeWidth || 0.05) * 100));
+  const effectiveRangeWidth = ((config?.rangeOrderWidthPct ?? config?.rangeWidth ?? 0.05) * 100);
+  const [localRangeWidth, setLocalRangeWidth] = useState(effectiveRangeWidth);
 
   useEffect(() => {
-    setLocalRangeWidth(((config?.rangeWidth || 0.05) * 100));
-  }, [config?.rangeWidth]);
+    setLocalRangeWidth(effectiveRangeWidth);
+  }, [effectiveRangeWidth]);
   // Delta-Neutral Flip 戦略
   // LP: ~100% (USDC 50% + SUI 50%)
   // ヘッジ: LP内SUI価値の ~50% (レバレッジ活用)
@@ -34,6 +40,7 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
   const hedgeDirection = hedge?.direction || 'NONE';
   const isShort = hedgeDirection === 'SHORT';
   const isLong = hedgeDirection === 'LONG';
+  const isRangeDirty = Math.abs(localRangeWidth - effectiveRangeWidth) >= 0.01;
 
   return (
     <div className="glass-panel" style={{ }}>
@@ -174,7 +181,9 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
       }}>
         <Info size={14} style={{ marginTop: '2px', color: 'var(--text-muted)', flexShrink: 0 }} />
         <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.4 }}>
-          デルタニュートラル・フリップ: 資産の100%をLPに投入し、レンジ逸脱時にヘッジ方向を自動反転（ショート↔ロング）。トレンド追従とリスク回避を両立する戦略です。
+          {config?.strategyMode === 'range_order'
+            ? '指値レンジは保存後、次回の再配置から反映されます。すぐ反映したい場合は「この幅で8再配置」を実行します。'
+            : 'デルタニュートラル・フリップ: 資産の100%をLPに投入し、レンジ逸脱時にヘッジ方向を自動反転します。'}
         </p>
       </div>
 
@@ -187,11 +196,24 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
           borderRadius: '10px',
           border: '1px solid rgba(255, 255, 255, 0.04)',
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
             <span style={{ fontSize: '0.78rem', color: 'var(--text-main)', fontWeight: 600 }}>Cetus レンジ幅</span>
-            <span style={{ fontSize: '0.85rem', color: 'var(--accent)', fontWeight: 800 }}>
-              {localRangeWidth.toFixed(1)}%
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {isRangeDirty && (
+                <span style={{
+                  fontSize: '0.68rem',
+                  color: '#ff9f43',
+                  background: 'rgba(255, 159, 67, 0.12)',
+                  border: '1px solid rgba(255, 159, 67, 0.25)',
+                  borderRadius: '6px',
+                  padding: '2px 6px',
+                  whiteSpace: 'nowrap'
+                }}>未保存</span>
+              )}
+              <span style={{ fontSize: '0.85rem', color: 'var(--accent)', fontWeight: 800 }}>
+                {localRangeWidth.toFixed(1)}%
+              </span>
+            </div>
           </div>
           <input
             type="range"
@@ -202,16 +224,6 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
             onChange={(e) => {
               const val = parseFloat(e.target.value);
               setLocalRangeWidth(val);
-            }}
-            onMouseUp={() => {
-              if (onUpdateRangeWidth) {
-                onUpdateRangeWidth(localRangeWidth);
-              }
-            }}
-            onTouchEnd={() => {
-              if (onUpdateRangeWidth) {
-                onUpdateRangeWidth(localRangeWidth);
-              }
             }}
             style={{
               width: '100%',
@@ -226,6 +238,54 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '4px' }}>
             <span>狭い (高APR / 高リスク)</span>
             <span>広い (低APR / 安定)</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '12px' }}>
+            <button
+              onClick={() => onUpdateRangeWidth?.(localRangeWidth)}
+              disabled={isActionPending || !isRangeDirty}
+              title="レンジ幅だけ保存します。既存ポジションは作り直しません。"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                minHeight: '36px',
+                borderRadius: '8px',
+                border: '1px solid rgba(88, 166, 255, 0.28)',
+                background: isRangeDirty ? 'rgba(88, 166, 255, 0.14)' : 'rgba(255,255,255,0.04)',
+                color: isRangeDirty ? 'var(--accent)' : 'var(--text-muted)',
+                fontSize: '0.76rem',
+                fontWeight: 700,
+                cursor: isActionPending || !isRangeDirty ? 'not-allowed' : 'pointer',
+                opacity: isActionPending || !isRangeDirty ? 0.65 : 1
+              }}
+            >
+              <Check size={14} />
+              幅を保存
+            </button>
+            <button
+              onClick={() => onRestartRebuild?.(localRangeWidth)}
+              disabled={isActionPending}
+              title="このレンジ幅を保存して、Bot1/Bot2を各4ポジションに作り直します。"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                minHeight: '36px',
+                borderRadius: '8px',
+                border: '1px solid rgba(46, 213, 115, 0.30)',
+                background: 'rgba(46, 213, 115, 0.11)',
+                color: '#2ed573',
+                fontSize: '0.76rem',
+                fontWeight: 800,
+                cursor: isActionPending ? 'not-allowed' : 'pointer',
+                opacity: isActionPending ? 0.65 : 1
+              }}
+            >
+              <RotateCw size={14} style={{ animation: isActionPending ? 'spin 1s linear infinite' : 'none' }} />
+              この幅で8再配置
+            </button>
           </div>
         </div>
       )}
