@@ -263,13 +263,13 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
 
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         {showPlaceholder ? (
-          <div className="chart-placeholder" style={{ minHeight: '300px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+          <div key="placeholder" className="chart-placeholder" style={{ minHeight: '300px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
             <BarChart3 size={48} strokeWidth={1} />
             <p>Botが稼働を開始すると価格チャートが表示されます</p>
             <span className="chart-placeholder-sub">SUI / USDC & DEEP / SUI — リアルタイム更新</span>
           </div>
         ) : chartMode === 'recharts' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%', padding: '4px 0' }}>
+          <div key="recharts" style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%', padding: '4px 0' }}>
             
             {/* Bot1 (SUI / USDC) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -465,7 +465,7 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
 
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%', marginTop: '8px' }}>
+          <div key="tradingview" style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%', marginTop: '8px' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
                 <span>SUI / USDC</span>
@@ -493,4 +493,3 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
     </div>
   );
 };
-

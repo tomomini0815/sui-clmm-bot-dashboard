@@ -154,7 +154,10 @@ export class PriceMonitor {
 
   async getCurrentPrice(): Promise<number> {
     const lastEntry = this.priceHistory[this.priceHistory.length - 1];
-    if (lastEntry && Date.now() - this.lastPriceTimestamp < 5000) {
+    // Cetus pool reads are shared by strategy and dashboard calculations.
+    // Keep the latest value for one strategy cycle so an 8-position stats pass
+    // does not repeatedly reload the same pool.
+    if (lastEntry && Date.now() - this.lastPriceTimestamp < 5 * 60 * 1000) {
       return lastEntry.price;
     }
     if (this.priceInFlight) {

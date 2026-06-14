@@ -121,12 +121,12 @@ function startFrontend() {
   logSupervisor('Starting Sui Bot frontend');
   frontendChild = spawn(
     '/opt/homebrew/bin/node',
-    ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5174', '--strictPort'],
+    ['node_modules/vite/bin/vite.js', 'preview', '--host', '127.0.0.1', '--port', '5174', '--strictPort'],
     {
       cwd: frontendDir,
       env: {
         ...process.env,
-        NODE_ENV: 'development',
+        NODE_ENV: 'production',
         FORCE_COLOR: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],

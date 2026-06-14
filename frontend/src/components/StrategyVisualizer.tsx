@@ -6,6 +6,8 @@ const MAX_CETUS_RANGE_WIDTH_PERCENT = 15;
 
 interface StrategyVisualizerProps {
   totalCapital: number;
+  bot1LpValue?: number;
+  bot2LpValue?: number;
   config?: { 
     strategyMode?: 'balanced' | 'range_order';
     rangeWidth?: number;
@@ -21,6 +23,8 @@ interface StrategyVisualizerProps {
 
 export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({ 
   totalCapital, 
+  bot1LpValue = 0,
+  bot2LpValue = 0,
   config, 
   onUpdateRangeWidth,
   onRestartRebuild,
@@ -35,6 +39,11 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
   }, [effectiveRangeWidth]);
 
   const isRangeDirty = Math.abs(localRangeWidth - effectiveRangeWidth) >= 0.01;
+  const activeLpValue = bot1LpValue + bot2LpValue;
+  const bot1AllocationPct = activeLpValue > 0 ? (bot1LpValue / activeLpValue) * 100 : 0;
+  const bot2AllocationPct = activeLpValue > 0 ? (bot2LpValue / activeLpValue) * 100 : 0;
+  const deploymentPct = totalCapital > 0 ? Math.min(100, (activeLpValue / totalCapital) * 100) : 0;
+
   const updateLocalRangeWidth = (value: number) => {
     if (!Number.isFinite(value)) return;
     setLocalRangeWidth(Math.min(MAX_CETUS_RANGE_WIDTH_PERCENT, Math.max(MIN_CETUS_RANGE_WIDTH_PERCENT, value)));
@@ -55,18 +64,35 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
         <h3 style={{ fontSize: '1rem', fontWeight: 600, margin: 0 }}>運用戦略エンジン</h3>
       </div>
 
-      {/* LP配分バー (USDC 50% + SUI 50%) */}
-      <div style={{ 
-        display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px',
-        fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 600
+      {/* 現在のLP稼働配分 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: '8px', marginBottom: '12px'
       }}>
-        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, margin: 0, color: 'var(--text-muted)' }}>LP資金配分</h3>
+        <h3 style={{ fontSize: '0.85rem', fontWeight: 600, margin: 0, color: 'var(--text-muted)' }}>
+          現在のLP稼働配分
+        </h3>
+        <span style={{
+          fontSize: '0.68rem',
+          color: deploymentPct > 0 ? 'var(--success)' : 'var(--text-muted)',
+          background: deploymentPct > 0 ? 'rgba(63,185,80,0.10)' : 'rgba(255,255,255,0.04)',
+          border: `1px solid ${deploymentPct > 0 ? 'rgba(63,185,80,0.25)' : 'rgba(255,255,255,0.08)'}`,
+          borderRadius: '8px',
+          padding: '3px 7px',
+          fontWeight: 700,
+          whiteSpace: 'nowrap'
+        }}>
+          LP稼働率 {deploymentPct.toFixed(1)}%
+        </span>
       </div>
 
-      <div style={{ position: 'relative', height: '16px', display: 'flex', borderRadius: '20px', overflow: 'hidden', marginBottom: '16px' }}>
-        {/* LP USDC (50%) */}
+      <div style={{
+        position: 'relative', height: '16px', display: 'flex',
+        borderRadius: '20px', overflow: 'hidden', marginBottom: '16px',
+        background: 'rgba(255,255,255,0.08)'
+      }}>
         <div style={{ 
-          width: '50%', 
+          width: `${bot1AllocationPct}%`,
           background: 'var(--accent)', 
           display: 'flex', 
           alignItems: 'center', 
@@ -75,29 +101,42 @@ export const StrategyVisualizer: React.FC<StrategyVisualizerProps> = ({
           fontWeight: 800,
           color: 'white',
           borderRight: '1px solid rgba(0,0,0,0.1)'
-        }} title="LP (USDC)">50%</div>
+        }} title={`Bot1 SUI/USDC: ${bot1AllocationPct.toFixed(1)}%`}>
+          {bot1AllocationPct >= 14 ? `${bot1AllocationPct.toFixed(0)}%` : ''}
+        </div>
         
-        {/* LP SUI (50%) */}
         <div style={{ 
-          width: '50%', 
-          background: 'rgba(88, 166, 255, 0.6)', 
+          width: `${bot2AllocationPct}%`,
+          background: '#2ed573',
           display: 'flex', 
           alignItems: 'center', 
           justifyContent: 'center',
           fontSize: '0.6rem',
           fontWeight: 800,
           color: 'white',
-        }} title="LP (SUI)">50%</div>
+        }} title={`Bot2 DEEP/SUI: ${bot2AllocationPct.toFixed(1)}%`}>
+          {bot2AllocationPct >= 14 ? `${bot2AllocationPct.toFixed(0)}%` : ''}
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>LP (USDC)</div>
-          <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>${(totalCapital * 0.50).toFixed(1)}</div>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>Bot1 SUI/USDC</div>
+          <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+            ${bot1LpValue.toFixed(2)}
+            <span style={{ marginLeft: '4px', color: 'var(--accent)', fontSize: '0.68rem' }}>
+              {bot1AllocationPct.toFixed(1)}%
+            </span>
+          </div>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>LP (SUI)</div>
-          <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>${(totalCapital * 0.50).toFixed(1)}</div>
+          <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>Bot2 DEEP/SUI</div>
+          <div style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+            ${bot2LpValue.toFixed(2)}
+            <span style={{ marginLeft: '4px', color: '#2ed573', fontSize: '0.68rem' }}>
+              {bot2AllocationPct.toFixed(1)}%
+            </span>
+          </div>
         </div>
       </div>
 

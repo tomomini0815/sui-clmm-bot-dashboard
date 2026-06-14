@@ -231,7 +231,11 @@ export class Strategy {
     
     const rpcUrl = this.config.rpcUrl;
     const network = rpcUrl.includes('testnet') ? 'testnet' : 'mainnet';
-    await this.hedgeManager.setupBluefin(this.keypair, rpcUrl, network as any);
+    if (this.config.hedgeEnabled && this.config.hedgeMode === 'bluefin') {
+      await this.hedgeManager.setupBluefin(this.keypair, rpcUrl, network as any);
+    } else {
+      Logger.info('[HEDGE] ヘッジ無効のためBluefin接続をスキップします。');
+    }
   }
 
   public refreshConfig(newConfig: BotConfig) {
@@ -243,6 +247,10 @@ export class Strategy {
     this.bot2.priceMonitor.refreshConfig(bot2Config);
     this.bot2.lpManager.refreshConfig(bot2Config);
     this.bot2.swapManager.refreshConfig(bot2Config);
+
+    // 設定変更時はキャッシュを即座に無効化し、次のリクエストで再計算されるようにする
+    this.lastPnlData = null;
+    this.lastPnlDataTime = 0;
   }
 
   public async start() {
@@ -260,15 +268,17 @@ export class Strategy {
     this.isRunning = true;
     Logger.info("Sui Dual Delta-Neutral LP Bot (SUI/USDC & DEEP/SUI) を起動します...");
     
-    if (this.keypair) {
+    if (this.keypair && this.config.hedgeEnabled && this.config.hedgeMode === 'bluefin') {
       await this.hedgeManager.syncPositionWithBluefin().catch(() => {});
     }
 
     await this.cycle();
 
+    const monitorIntervalMs = Math.max(this.config.monitorIntervalMs || 0, 5 * 60 * 1000);
+    Logger.info(`[STRATEGY] Cetus監視間隔を${Math.round(monitorIntervalMs / 1000)}秒に設定しました。`);
     this.timer = setInterval(async () => {
       await this.cycle();
-    }, 30000);
+    }, monitorIntervalMs);
   }
 
   public stop() {
@@ -1413,19 +1423,12 @@ export class Strategy {
     const isBot1 = bot.name.includes('Bot1');
     const width = this.config.rangeOrderWidthPct || 0.01;
     const GAS_RESERVE = 0.5;
+    const ROLL_COOLDOWN_MS = Math.max(this.config.cooldownPeriodMs || 0, 5 * 60 * 1000);
 
     const surge = this.calculateSurgeStepDrift(bot, price);
-    const jumpedBelowOuterRange = bot.state.rangeLowerBelow2 > 0 && price < bot.state.rangeLowerBelow2;
-    const jumpedAboveOuterRange = bot.state.rangeUpperAbove2 > 0 && price > bot.state.rangeUpperAbove2;
     const surgeStepThreshold = Math.max(3, this.config.surgeTriggerSteps || 3);
-    if (
-      jumpedBelowOuterRange ||
-      jumpedAboveOuterRange ||
-      Math.abs(surge.steps) >= surgeStepThreshold
-    ) {
-      Logger.warn(`[${bot.name}] 🚨 急騰・急落を検出しました。価格=$${price.toFixed(6)}, 中央=$${surge.centerPrice.toFixed(6)}, ずれ段数=${surge.steps}`);
-      await this.rebuildAllRangeOrderPositionsForSurge(price, surge.steps);
-      return true;
+    if (Math.abs(surge.steps) >= surgeStepThreshold) {
+      Logger.warn(`[${bot.name}] 急な価格変動を検出しましたが、Cetusポジションの即時全再配置は行わず、レンジ外継続タイマーで確認します。価格=$${price.toFixed(6)}, ずれ段数=${surge.steps}`);
     }
 
     // ─── 0. スライド方向ロック解除（中央エリアへの復帰判定） ───
@@ -1466,7 +1469,15 @@ export class Strategy {
     }
 
     // ─── 1. Below2へ入った場合 → 下落方向の先回りローリング ───
+    const rollCooldownRemaining = bot.state.lastSlideAt
+      ? ROLL_COOLDOWN_MS - (Date.now() - bot.state.lastSlideAt)
+      : 0;
+
     if (bot.state.lpPositionIdBelow2 && price <= downRollTrigger) {
+      if (rollCooldownRemaining > 0) {
+        Logger.warn(`[${bot.name}] 下方向ローリング条件ですが、連続売買防止のためあと${Math.ceil(rollCooldownRemaining / 1000)}秒待機します。`);
+        return false;
+      }
       Logger.warn(`[${bot.name}] 🔻 価格が外側Below2へ入りました。レンジ下抜け前に先回りローリングを実行します。`);
       Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${downRollTrigger.toFixed(6)}, 外側下限: $${bot.state.rangeLowerBelow2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
@@ -1581,6 +1592,7 @@ export class Strategy {
             bot.state.rangeLowerBelow2     = newLower;
             bot.state.rangeUpperBelow2     = finalUpper;
             bot.state.lastSlideDirection   = 'down'; // 方向ロックを設定
+            bot.state.lastSlideAt          = Date.now();
             Logger.success(`[${bot.name}] ✅ 新 Below2 構築完了: ${newPosId} (${newLower.toFixed(6)}-${finalUpper.toFixed(6)})`);
             await this.tracker.recordEvent('指値ローリング（下落）',
               `Below2下限突破のためAbove2をクローズし、新Below2(${newLower.toFixed(6)}-${finalUpper.toFixed(6)})を構築。`,
@@ -1622,6 +1634,10 @@ export class Strategy {
 
     // ─── 2. Above2へ入った場合 → 上昇方向の先回りローリング ───
     if (bot.state.lpPositionIdAbove2 && price >= upRollTrigger) {
+      if (rollCooldownRemaining > 0) {
+        Logger.warn(`[${bot.name}] 上方向ローリング条件ですが、連続売買防止のためあと${Math.ceil(rollCooldownRemaining / 1000)}秒待機します。`);
+        return false;
+      }
       Logger.warn(`[${bot.name}] 🔺 価格が外側Above2へ入りました。レンジ上抜け前に先回りローリングを実行します。`);
       Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${upRollTrigger.toFixed(6)}, 外側上限: $${bot.state.rangeUpperAbove2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
@@ -1720,6 +1736,7 @@ export class Strategy {
             bot.state.rangeLowerAbove2     = finalLower;
             bot.state.rangeUpperAbove2     = newUpper;
             bot.state.lastSlideDirection   = 'up'; // 方向ロックを設定
+            bot.state.lastSlideAt          = Date.now();
             Logger.success(`[${bot.name}] ✅ 新 Above2 構築完了: ${newPosId} (${finalLower.toFixed(6)}-${newUpper.toFixed(6)})`);
             await this.tracker.recordEvent('指値ローリング（上昇）',
               `Above2上限突破のためBelow2をクローズし、新Above2(${finalLower.toFixed(6)}-${newUpper.toFixed(6)})を構築。`,
@@ -2120,8 +2137,8 @@ export class Strategy {
 
   private async calculatePnlData(currentPrice: number, userWalletAddress?: string) {
     const now = Date.now();
-    // 15秒間キャッシュを利用する（同一の連携アドレスに対してのみ）
-    if (this.lastPnlData && (now - this.lastPnlDataTime < 15000) && (this.lastPnlData.userWalletAddress === userWalletAddress)) {
+    // LP 8本の詳細取得はRPC負荷が高いため、Cetus監視間隔に合わせて再利用する。
+    if (this.lastPnlData && (now - this.lastPnlDataTime < 5 * 60 * 1000) && (this.lastPnlData.userWalletAddress === userWalletAddress)) {
       return this.lastPnlData.data;
     }
 
@@ -2205,7 +2222,6 @@ export class Strategy {
     const stats = this.tracker.getStats();
     const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
     
-    const totalPnlNum = parseFloat(stats.totalPnl) || 0;
     const totalFeesNum = parseFloat(stats.totalFees) || 0;
     const gasSpentNum = this.gasTracker.getStats().totalGasUsdc || 0;
     
@@ -2213,11 +2229,27 @@ export class Strategy {
     let lpValue2 = 0;
     let totalSuiInLp = 0;
 
+    // DEEP/SUIプールの資産価値を正しくドル換算するための価格定義
+    const priceSuiUsdc = currentPrice;
+    const priceDeepSui = await this.bot2.priceMonitor.getCurrentPrice().catch(() => 0);
+    const priceDeepUsdc = priceDeepSui * priceSuiUsdc;
+
     if (this.config.strategyMode === 'range_order') {
       const p1 = this.bot1.state;
       const p2 = this.bot2.state;
-      const posIds1 = [p1.lpPositionIdBelow1, p1.lpPositionIdBelow2, p1.lpPositionIdAbove1, p1.lpPositionIdAbove2].filter(Boolean) as string[];
-      const posIds2 = [p2.lpPositionIdBelow1, p2.lpPositionIdBelow2, p2.lpPositionIdAbove1, p2.lpPositionIdAbove2].filter(Boolean) as string[];
+      const posIds1 = [
+        p1.lpPositionIdBelow1,
+        p1.lpPositionIdBelow2,
+        p1.lpPositionIdAbove1,
+        p1.lpPositionIdAbove2
+      ].filter(Boolean) as string[];
+
+      const posIds2 = [
+        p2.lpPositionIdBelow1,
+        p2.lpPositionIdBelow2,
+        p2.lpPositionIdAbove1,
+        p2.lpPositionIdAbove2
+      ].filter(Boolean) as string[];
 
       for (const id of posIds1) {
         const details = await this.bot1.lpManager.getPositionDetails(id).catch(() => null);
@@ -2226,7 +2258,11 @@ export class Strategy {
       }
       for (const id of posIds2) {
         const details = await this.bot2.lpManager.getPositionDetails(id).catch(() => null);
-        lpValue2 += details?.usdValue || 0;
+        if (details) {
+          // details.usdValue (DEEPベースの生値) ではなく、ドルに正しく換算する
+          const val = (details.amountA * priceDeepUsdc) + (details.amountB * priceSuiUsdc);
+          lpValue2 += val;
+        }
         totalSuiInLp += await this.bot2.lpManager.getSuiAmountInLp(id).catch(() => 0);
       }
     } else {
@@ -2242,10 +2278,25 @@ export class Strategy {
         : null;
 
       lpValue1 = lpDetails1?.usdValue || 0;
-      lpValue2 = lpDetails2?.usdValue || 0;
+      if (lpDetails2) {
+        lpValue2 = (lpDetails2.amountA * priceDeepUsdc) + (lpDetails2.amountB * priceSuiUsdc);
+      } else {
+        lpValue2 = 0;
+      }
     }
 
     const balance = await this.bot1.lpManager.checkBalance();
+
+    // 動的な純利益 (Net P&L) の計算
+    const botSuiUsdValue = balance.suiBalance * priceSuiUsdc;
+    const currentTotalCapital = lpValue1 + lpValue2 + (hedgeStatus?.marginBalance || 0) + balance.usdcBalance + botSuiUsdValue;
+    const initialCapital = this.config.totalOperationalCapitalUsdc || 200;
+    const actualNetPnl = currentTotalCapital - initialCapital;
+
+    // トラッカーを最新の計算値で更新（非同期）
+    this.tracker.update(currentPrice, actualNetPnl).catch((e) => Logger.error('Failed to update tracker PnL', e));
+
+    const totalPnlNum = actualNetPnl;
 
     let userBalance = { suiBalance: 0, usdcBalance: 0, sufficient: false };
     if (userWalletAddress) {

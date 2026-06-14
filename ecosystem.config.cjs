@@ -19,12 +19,12 @@ module.exports = {
     {
       name: 'sui-bot-frontend',
       script: 'node_modules/vite/bin/vite.js',
-      args: '--port 5174',
+      args: 'preview --host 127.0.0.1 --port 5174 --strictPort',
       cwd: 'frontend',
       watch: false,
       autorestart: true,
       env: {
-        NODE_ENV: 'development'
+        NODE_ENV: 'production'
       },
       error_file: 'logs/frontend_error.log',
       out_file: 'logs/frontend_out.log',

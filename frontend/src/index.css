@@ -2757,35 +2757,40 @@ button.primary-btn:active {
   display: grid;
   grid-template-columns: 1fr 360px;
   gap: 20px;
-  align-items: stretch; /* 左右を同じ高さに */
+  align-items: stretch;
+}
+
+.dashboard-grid-v2:has(> .dashboard-grid-v2-side:empty) {
+  grid-template-columns: 1fr;
+}
+
+.dashboard-grid-v2:has(> .dashboard-grid-v2-side:empty) .dashboard-grid-v2-main-content {
+  position: static;
+}
+
+.dashboard-grid-v2-side:empty {
+  display: none;
 }
 
 .dashboard-grid-v2-main {
   position: relative;
   min-width: 0;
+  min-height: 0;
 }
 
 .dashboard-grid-v2-main-content {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   display: flex;
   flex-direction: column;
   gap: 20px;
+  width: 100%;
   min-height: 0;
 }
 
-.dashboard-grid-v2-main-content.tradingview-mode {
-  position: relative;
-  height: auto;
-  min-height: 100%;
-  bottom: auto;
-}
-
-/* 価格チャートパネルが縮まないようにする */
+/* チャートは内容高で止め、残りの高さを実行履歴へ割り当てる */
 .dashboard-grid-v2-main-content > .price-chart-panel {
+  flex: none;
   flex-shrink: 0;
 }
 
@@ -2795,11 +2800,7 @@ button.primary-btn:active {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-}
-
-.dashboard-grid-v2-main-content.tradingview-mode > .activity-log-stretch {
-  height: 280px;
-  flex: none;
+  overflow: hidden;
 }
 
 .activity-log-stretch > .glass-panel {
@@ -3058,5 +3059,3 @@ button.primary-btn:active {
 .tv-symbol-tabs button:active {
   transform: scale(0.95);
 }
-
-

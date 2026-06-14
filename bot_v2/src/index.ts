@@ -33,6 +33,35 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const rebuildLocks = new Set<string>();
+const lastRebuildCompletedAt = new Map<string, number>();
+const REBUILD_COOLDOWN_MS = 15 * 60 * 1000;
+
+function beginRebuild(sessionId: string, res: express.Response): boolean {
+  if (rebuildLocks.has(sessionId)) {
+    res.status(409).json({ success: false, error: '再配置はすでに実行中です。完了までお待ちください。' });
+    return false;
+  }
+
+  const lastCompletedAt = lastRebuildCompletedAt.get(sessionId) || 0;
+  const remainingMs = REBUILD_COOLDOWN_MS - (Date.now() - lastCompletedAt);
+  if (remainingMs > 0) {
+    res.status(429).json({
+      success: false,
+      error: `直前の再配置から間隔が短すぎます。あと${Math.ceil(remainingMs / 60000)}分お待ちください。`,
+    });
+    return false;
+  }
+
+  rebuildLocks.add(sessionId);
+  return true;
+}
+
+function finishRebuild(sessionId: string, succeeded: boolean) {
+  rebuildLocks.delete(sessionId);
+  if (succeeded) lastRebuildCompletedAt.set(sessionId, Date.now());
+}
+
 function parseCetusRangeWidth(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const percent = Number(value);
@@ -57,6 +86,16 @@ function refreshSessionComponents(sessionId: string, newConfig: BotConfig) {
   session.strategy.refreshConfig(newConfig);
   
   Logger.success(`Session [${sessionId}] components refreshed with new configuration.`);
+}
+
+function getPublicConfig(botConfig: BotConfig) {
+  const {
+    privateKey: _privateKey,
+    telegramToken: _telegramToken,
+    backupPassword: _backupPassword,
+    ...publicConfig
+  } = botConfig;
+  return publicConfig;
 }
 
 async function bootstrap() {
@@ -450,7 +489,9 @@ app.post('/api/rebuild', async (req, res) => {
   if (!session) {
     return res.status(404).json({ success: false, error: 'Session not found' });
   }
+  if (!beginRebuild(sessionId, res)) return;
 
+  let succeeded = false;
   try {
     // レンジ幅が指定されていれば設定を更新
     const parsedRangeWidth = parseCetusRangeWidth(rangeWidth);
@@ -469,10 +510,13 @@ app.post('/api/rebuild', async (req, res) => {
     await session.strategy.runRebalance(currentPrice, true);
     await session.strategy.start();
     SessionManager.saveSessionState(sessionId);
+    succeeded = true;
 
     res.json({ success: true, status: 'running', message: '両ボットの全資金再配置が完了し、Botを起動しました。' });
   } catch (e: any) {
     res.status(e instanceof RangeError ? 400 : 500).json({ success: false, error: e.message });
+  } finally {
+    finishRebuild(sessionId, succeeded);
   }
 });
 
@@ -488,7 +532,9 @@ app.post('/api/restart-rebuild', async (req, res) => {
   if (!session) {
     return res.status(404).json({ success: false, error: 'Session not found' });
   }
+  if (!beginRebuild(sessionId, res)) return;
 
+  let succeeded = false;
   try {
     const newRangeWidth = parseCetusRangeWidth(rangeWidth) ??
       session.config.rangeOrderWidthPct ??
@@ -513,9 +559,12 @@ app.post('/api/restart-rebuild', async (req, res) => {
     await session.strategy.start();
 
     SessionManager.saveSessionState(sessionId);
+    succeeded = true;
     res.json({ success: true, status: 'running', message: 'Botを再起動し、8ポジションの再配置が完了しました。' });
   } catch (e: any) {
     res.status(e instanceof RangeError ? 400 : 500).json({ success: false, error: e.message });
+  } finally {
+    finishRebuild(sessionId, succeeded);
   }
 });
 
@@ -581,8 +630,8 @@ app.get('/api/stats', async (req, res) => {
     const bot1OuterRange = getOuterBounds(session.strategy.bot1?.state);
     const bot2OuterRange = getOuterBounds(session.strategy.bot2?.state);
     const bot2Prices = session.strategy.bot2?.priceMonitor?.getPriceHistory() || [];
-    const bot2CurrentPrice = session.strategy.bot2
-      ? await session.strategy.bot2.priceMonitor.getCurrentPrice().catch(() => 0)
+    const bot2CurrentPrice = bot2Prices.length > 0
+      ? bot2Prices[bot2Prices.length - 1].price
       : 0;
 
     // 市場状況を判定
@@ -656,7 +705,7 @@ app.get('/api/stats', async (req, res) => {
         botWalletAddress: session.botWalletAddress,
         userWalletAddress: session.walletAddress,
         network: session.config.rpcUrl.includes('testnet') ? 'testnet' : 'mainnet',
-        config: session.config,
+        config: getPublicConfig(session.config),
         priceHistory: prices,
         bot2PriceHistory: bot2Prices,
         bot2CurrentPrice: bot2CurrentPrice > 0 ? Number(bot2CurrentPrice.toFixed(4)) : 0,
@@ -672,6 +721,27 @@ app.get('/api/stats', async (req, res) => {
         bot2OuterRange: {
           lower: Number(bot2OuterRange.lower.toFixed(6)),
           upper: Number(bot2OuterRange.upper.toFixed(6))
+        },
+        bot2Status: {
+          active: session.strategy.isRunning,
+          isUnbalanced: false,
+          pool: 'DEEP/SUI',
+          poolId: session.strategy.bot2.lpManager.config.poolObjectId,
+          maxCapitalUsdc: session.strategy.bot2.state.totalCapital || 0,
+          currentPrice: bot2CurrentPrice,
+          currentRange: bot2OuterRange,
+          tracker: {
+            rebalanceCount: session.strategy.bot2.state.rebalanceCount24h || 0,
+            totalFeesEarned: 0,
+            successfulRebalances: session.strategy.bot2.state.rebalanceCount24h || 0,
+            history: []
+          },
+          pnl: {
+            netPnl: 0,
+            bot2LpValue: pnlData?.pnl?.bot2LpValue || 0
+          },
+          phase: session.strategy.bot2.state.phase,
+          message: session.strategy.isRunning ? '稼働中 (監視)' : '停止中'
         },
         marketCondition,
         dailyPnl: pnlData?.pnl?.dailyPnl?.toFixed(4) || '0.00',
@@ -771,6 +841,9 @@ app.get('/api/bot2/status', async (req, res) => {
   try {
     const currentPrice = await bot2.priceMonitor.getCurrentPrice().catch(() => 0);
     
+    const priceSuiUsdc = await session.priceMonitor.getCurrentPrice().catch(() => 0);
+    const priceDeepUsdc = currentPrice * priceSuiUsdc;
+    
     // LP価値の取得
     let lpValue = 0;
     const p2 = bot2.state;
@@ -780,15 +853,19 @@ app.get('/api/bot2/status', async (req, res) => {
       const posIds = [p2.lpPositionIdBelow1, p2.lpPositionIdBelow2, p2.lpPositionIdAbove1, p2.lpPositionIdAbove2].filter(Boolean) as string[];
       for (const id of posIds) {
         const details = await bot2.lpManager.getPositionDetails(id).catch(() => null);
-        const val = details?.usdValue || 0;
-        lpValue += val;
-        posValues.push(val);
+        if (details) {
+          const val = (details.amountA * priceDeepUsdc) + (details.amountB * priceSuiUsdc);
+          lpValue += val;
+          posValues.push(val);
+        }
       }
     } else {
       const lpDetails = p2.lpPositionId 
         ? await bot2.lpManager.getPositionDetails(p2.lpPositionId).catch(() => null)
         : null;
-      lpValue = lpDetails?.usdValue || 0;
+      if (lpDetails) {
+        lpValue = (lpDetails.amountA * priceDeepUsdc) + (lpDetails.amountB * priceSuiUsdc);
+      }
     }
 
     const maxVal = posValues.length > 0 ? Math.max(...posValues) : 0;

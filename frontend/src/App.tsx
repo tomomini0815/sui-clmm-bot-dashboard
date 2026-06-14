@@ -171,6 +171,9 @@ function App() {
           }
           setStats(prev => ({ ...prev, ...result.data }));
           setIsBotActive(result.data.isRunning);
+          if (result.data.bot2Status) {
+            setBot2(result.data.bot2Status);
+          }
         } else if (result.error === 'Session not found') {
           console.warn('Session expired or not found. Resetting...');
           setSessionId('');
@@ -180,22 +183,10 @@ function App() {
         console.warn('Real-time stats sync failed');
       }
 
-      try {
-        const res2 = await fetch(`${apiUrl}/api/bot2/status`);
-        const data2 = await res2.json();
-        if (data2.success) {
-          setBot2(data2);
-        } else {
-          setBot2({ active: false, message: data2.message || 'Bot2 inactive' });
-        }
-      } catch (e) {
-        // silent
-      } finally {
-        statsRequestInFlightRef.current = false;
-      }
+      statsRequestInFlightRef.current = false;
     };
     fetchStats();
-    const interval = setInterval(fetchStats, 15000);
+    const interval = setInterval(fetchStats, 300000); // 5分間隔でポーリング（バックエンドのCetus価格キャッシュ時間5分と同期）
     return () => clearInterval(interval);
   }, [apiUrl, sessionId]);
 
@@ -576,6 +567,21 @@ function App() {
 
         {/* 右: コントロールパネル */}
         <aside className="dashboard-grid-v2-side">
+          {/* 運用戦略を右サイド最上部に集約 */}
+          <div className="glass-panel side-group-panel">
+            <StrategyVisualizer
+              totalCapital={stats.config?.totalOperationalCapitalUsdc || stats.positionSize || stats.config?.lpAmountUsdc || 0}
+              bot1LpValue={stats.pnl?.bot1LpValue || 0}
+              bot2LpValue={stats.pnl?.bot2LpValue || 0}
+              config={stats.config}
+              onUpdateStrategyMode={handleUpdateStrategyMode}
+              onUpdateRangeWidth={handleUpdateRangeWidth}
+              onRestartRebuild={handleRestartAndRebuild}
+              isActionPending={isActionPending}
+              noPanel={true}
+            />
+          </div>
+
           {/* グループ1: 資金と収益 (Wallet & PnL) */}
           <div className="glass-panel side-group-panel">
             <BotWalletCard
@@ -605,23 +611,13 @@ function App() {
             <PnLCard pnl={stats.pnl} gasStats={stats.gasStats} noPanel={true} />
           </div>
 
-          {/* グループ2: ボット運用と戦略 (Bot2 & Strategy) */}
+          {/* グループ2: Bot2 */}
           <div className="glass-panel side-group-panel">
             <MultiBotPanel
               title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`}
               bot={bot2}
               onStart={() => { alert('Bot2は自動で稼働中です。個別設定は不要です。'); }}
               onRebuild={handleRebuild}
-              noPanel={true}
-            />
-            <div className="side-group-divider" />
-            <StrategyVisualizer
-              totalCapital={stats.config?.totalOperationalCapitalUsdc || stats.positionSize || stats.config?.lpAmountUsdc || 0}
-              config={stats.config}
-              onUpdateStrategyMode={handleUpdateStrategyMode}
-              onUpdateRangeWidth={handleUpdateRangeWidth}
-              onRestartRebuild={handleRestartAndRebuild}
-              isActionPending={isActionPending}
               noPanel={true}
             />
           </div>

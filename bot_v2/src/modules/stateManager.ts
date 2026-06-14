@@ -42,6 +42,7 @@ export interface BotState {
   breachStartAt?: number;
   missingPositionsStartAt?: number;
   lastSlideDirection?: 'up' | 'down' | null;
+  lastSlideAt?: number;
   isRebuilding: boolean;
 }
 

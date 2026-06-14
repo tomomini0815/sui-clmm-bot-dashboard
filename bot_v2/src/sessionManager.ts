@@ -247,8 +247,12 @@ export class SessionManager {
 
       // 戦略的に重要な接続・鍵設定は .env から最新化する
       sessionConfig.privateKey = globalConfig.privateKey;
-      sessionConfig.lpAmountUsdc = globalConfig.lpAmountUsdc;
-      sessionConfig.totalOperationalCapitalUsdc = globalConfig.totalOperationalCapitalUsdc;
+      if (process.env.LP_AMOUNT_USDC !== undefined) {
+        sessionConfig.lpAmountUsdc = globalConfig.lpAmountUsdc;
+      }
+      if (process.env.TOTAL_OPERATIONAL_CAPITAL_USDC !== undefined) {
+        sessionConfig.totalOperationalCapitalUsdc = globalConfig.totalOperationalCapitalUsdc;
+      }
       sessionConfig.hedgeMode = globalConfig.hedgeMode;
       sessionConfig.rpcUrl = globalConfig.rpcUrl;
       sessionConfig.rangeOrderWidthPct = savedState.config.rangeOrderWidthPct ?? savedState.config.rangeWidth ?? sessionConfig.rangeOrderWidthPct;
