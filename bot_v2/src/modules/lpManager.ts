@@ -30,6 +30,7 @@ async function retryOnRpcError<T>(fn: () => Promise<T>, retries = 5, delay = 100
 }
 
 export class LpManager {
+  private static positionDetailsCache: Map<string, { fetchedAt: number; data: any }> = new Map();
   private keypair!: Ed25519Keypair;
   public suiClient!: SuiClient;
   private walletAddress: string = '';
@@ -42,6 +43,8 @@ export class LpManager {
   private coinTypeB: string = '';
   private usdcDecimals: number = 6;
   private usdcIsA: boolean = true;
+  private positionListCache: { fetchedAt: number; positions: any[] } | null = null;
+  private positionListInFlight: Promise<any[]> | null = null;
 
   private txQueue: WalletTxQueue = globalTxQueue;
 
@@ -136,6 +139,33 @@ export class LpManager {
     return sdk;
   }
 
+  private invalidatePositionListCache() {
+    this.positionListCache = null;
+  }
+
+  private async getPoolPositionList(maxAgeMs = 5000): Promise<any[]> {
+    const now = Date.now();
+    if (maxAgeMs > 0 && this.positionListCache && now - this.positionListCache.fetchedAt < maxAgeMs) {
+      return this.positionListCache.positions;
+    }
+    if (this.positionListInFlight) {
+      return this.positionListInFlight;
+    }
+
+    const sdk = this.getSdkWithSender();
+    const poolId = this.priceMonitor.getPoolId();
+    this.positionListInFlight = retryOnRpcError(
+      () => sdk.Position.getPositionList(this.walletAddress, [poolId])
+    );
+    try {
+      const positions = await this.positionListInFlight;
+      this.positionListCache = { fetchedAt: Date.now(), positions };
+      return positions;
+    } finally {
+      this.positionListInFlight = null;
+    }
+  }
+
   async getActivePositionId(): Promise<string | null> {
     if (this.currentPositionNft) return this.currentPositionNft;
     const poolId = this.priceMonitor.getPoolId();
@@ -187,38 +217,34 @@ export class LpManager {
     const poolId = this.priceMonitor.getPoolId();
     const activeIds: string[] = [];
 
-    try {
-      Logger.info(`LpManager: Scanning wallet for Cetus active positions on pool ${poolId}...`);
-      let hasNextPage = true;
-      let nextCursor: string | null | undefined = null;
-      const allObjects: any[] = [];
+    Logger.info(`LpManager: Scanning wallet for Cetus active positions on pool ${poolId}...`);
+    let hasNextPage = true;
+    let nextCursor: string | null | undefined = null;
+    const allObjects: any[] = [];
 
-      while (hasNextPage) {
-        const response: any = await retryOnRpcError(() => this.suiClient.getOwnedObjects({
-          owner: this.walletAddress,
-          cursor: nextCursor,
-          options: { showType: true, showContent: true }
-        }));
+    while (hasNextPage) {
+      const response: any = await retryOnRpcError(() => this.suiClient.getOwnedObjects({
+        owner: this.walletAddress,
+        cursor: nextCursor,
+        options: { showType: true, showContent: true }
+      }));
 
-        if (response?.data) {
-          allObjects.push(...response.data);
-        }
-        hasNextPage = response?.hasNextPage ?? false;
-        nextCursor = response?.nextCursor ?? null;
+      if (response?.data) {
+        allObjects.push(...response.data);
       }
+      hasNextPage = response?.hasNextPage ?? false;
+      nextCursor = response?.nextCursor ?? null;
+    }
 
-      const poolPositionNfts = allObjects.filter(o => {
-        const type = o.data?.type || '';
-        const fields = (o.data?.content as any)?.fields;
-        const liquidity = parseInt(fields?.liquidity || '0');
-        return type.endsWith('::position::Position') && fields?.pool === poolId && liquidity > 100;
-      });
+    const poolPositionNfts = allObjects.filter(o => {
+      const type = o.data?.type || '';
+      const fields = (o.data?.content as any)?.fields;
+      const liquidity = parseInt(fields?.liquidity || '0');
+      return type.endsWith('::position::Position') && fields?.pool === poolId && liquidity > 0;
+    });
 
-      for (const nft of poolPositionNfts) {
-        activeIds.push(nft.data!.objectId);
-      }
-    } catch (e) {
-      Logger.error('LpManager: Failed to scan wallet for multiple Cetus positions', e);
+    for (const nft of poolPositionNfts) {
+      activeIds.push(nft.data!.objectId);
     }
     return activeIds;
   }
@@ -235,25 +261,49 @@ export class LpManager {
     if (!targetPosId) return 0;
 
     try {
-      const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await this.getPoolPositionList();
       const position = positionList.find(p => p.pos_object_id === targetPosId);
       
       if (!position) return 0;
+
+      // 流動性からトークン実量を計算
+      const sdk = this.getSdkWithSender();
+      const pool = await retryOnRpcError(() => sdk.Pool.getPool(poolId));
+      if (!pool) return 0;
+
+      const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
+      const lowerSqrtPrice = TickMath.tickIndexToSqrtPriceX64(Number(position.tick_lower_index));
+      const upperSqrtPrice = TickMath.tickIndexToSqrtPriceX64(Number(position.tick_upper_index));
+      const liquidity = new BN(position.liquidity.toString());
+
+      if (liquidity.isZero()) return 0;
+
+      const amounts = ClmmPoolUtil.getCoinAmountFromLiquidity(
+        liquidity,
+        currentSqrtPrice,
+        lowerSqrtPrice,
+        upperSqrtPrice,
+        false
+      );
 
       const isCoinASui = this.coinTypeA.toLowerCase().includes('0x2::sui::sui');
       const isCoinBSui = this.coinTypeB.toLowerCase().includes('0x2::sui::sui');
 
       let suiAmountRaw = 0;
+      let decimals = 9;
       if (isCoinASui) {
-        suiAmountRaw = Number((position as any).coin_amount_a);
+        suiAmountRaw = Number(amounts.coinA.toString());
+        decimals = this.decimalsA;
       } else if (isCoinBSui) {
-        suiAmountRaw = Number((position as any).coin_amount_b);
+        suiAmountRaw = Number(amounts.coinB.toString());
+        decimals = this.decimalsB;
       } else {
-        suiAmountRaw = this.usdcIsA ? Number((position as any).coin_amount_b) : Number((position as any).coin_amount_a);
+        suiAmountRaw = this.usdcIsA ? Number(amounts.coinB.toString()) : Number(amounts.coinA.toString());
+        decimals = this.usdcIsA ? this.decimalsB : this.decimalsA;
       }
-      return suiAmountRaw;
+      
+      return suiAmountRaw / Math.pow(10, decimals);
     } catch (e) {
       Logger.error('Failed to get SUI amount in LP', e);
       return 0;
@@ -365,11 +415,107 @@ export class LpManager {
     }
   }
 
-  async addLiquidity(lowerPrice: number, upperPrice: number, amount: number, isUsdc: boolean = true): Promise<{ digest: string; gasCostUsdc: number; positionId?: string }> {
+  /**
+   * 現在のプール価格のtickから確実に離れた指値レンジのtickペアを計算します。
+   * これにより、現在価格と指値レンジが重なることによる不要な両側アセット要求と残高の枯渇を防ぎます。
+   */
+  async getRangeOrderTicks(
+    direction: 'below' | 'above',
+    index: number,
+    widthPct: number,
+    offsetPct: number = 0.0005
+  ): Promise<{ lowerTick: number; upperTick: number; lowerPrice: number; upperPrice: number }> {
+    if (!this.isInitialized) await this.initializePoolData();
+    const sdk = this.getSdkWithSender();
+    const poolId = this.priceMonitor.getPoolId();
+    const pool = await sdk.Pool.getPool(poolId);
+    if (!pool) throw new Error(`Pool ${poolId} not found`);
+
+    const tickSpacing = parseInt(pool.tickSpacing.toString());
+    const currentTick = parseInt(pool.current_tick_index.toString());
+    const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
+
+    const decimalsA = this.decimalsA;
+    const decimalsB = this.decimalsB;
+
+    const botPrice = await this.priceMonitor.getCurrentPrice();
+    const currentPoolPrice = TickMath.sqrtPriceX64ToPrice(currentSqrtPrice, decimalsA, decimalsB).toNumber();
+
+    // ボットの価格表示とプールの現在価格が逆数関係にあるか判定
+    const isInverse = Math.abs(currentPoolPrice - (1 / botPrice)) < Math.abs(currentPoolPrice - botPrice);
+
+    // widthPctに対応するtick数を計算
+    const approxTicks = Math.log(1 + widthPct) / Math.log(1.0001);
+    const widthTicks = Math.max(1, Math.round(approxTicks / tickSpacing)) * tickSpacing;
+
+    // 安全マージン（現在価格のtickから離すtick数）を計算
+    // offsetPctが0の場合は0ticks（極至近配置）。それ以外は四捨五入してtickSpacingの倍数にする。
+    let offsetTicks = 0;
+    if (offsetPct > 0) {
+      const approxOffsetTicks = Math.log(1 + offsetPct) / Math.log(1.0001);
+      offsetTicks = Math.round(approxOffsetTicks / tickSpacing) * tickSpacing;
+    }
+
+    // プール上での配置方向を決定（逆数プールの場合はボットの方向を反転）
+    let poolDirection: 'below' | 'above';
+    if (isInverse) {
+      poolDirection = direction === 'below' ? 'above' : 'below';
+    } else {
+      poolDirection = direction === 'below' ? 'below' : 'above';
+    }
+
+    let lowerTick: number;
+    let upperTick: number;
+
+    if (poolDirection === 'below') {
+      const baseTick = Math.floor(currentTick / tickSpacing) * tickSpacing;
+      if (index === 1) {
+        upperTick = baseTick - offsetTicks;
+        lowerTick = upperTick - widthTicks;
+      } else {
+        upperTick = baseTick - offsetTicks - widthTicks;
+        lowerTick = upperTick - widthTicks;
+      }
+    } else {
+      const baseTick = Math.ceil(currentTick / tickSpacing) * tickSpacing;
+      if (index === 1) {
+        lowerTick = baseTick + offsetTicks;
+        upperTick = lowerTick + widthTicks;
+      } else {
+        lowerTick = baseTick + offsetTicks + widthTicks;
+        upperTick = lowerTick + widthTicks;
+      }
+    }
+
+    // tickから逆算した境界価格
+    const lowerPrice = isInverse
+      ? 1 / TickMath.tickIndexToPrice(upperTick, decimalsA, decimalsB).toNumber()
+      : TickMath.tickIndexToPrice(lowerTick, decimalsA, decimalsB).toNumber();
+
+    const upperPrice = isInverse
+      ? 1 / TickMath.tickIndexToPrice(lowerTick, decimalsA, decimalsB).toNumber()
+      : TickMath.tickIndexToPrice(upperTick, decimalsA, decimalsB).toNumber();
+
+    return { lowerTick, upperTick, lowerPrice, upperPrice };
+  }
+
+  async addLiquidity(
+    lowerPrice: number,
+    upperPrice: number,
+    amount: number,
+    isUsdc: boolean = true,
+    customLowerTick?: number,
+    customUpperTick?: number
+  ): Promise<{ digest: string; gasCostUsdc: number; positionId?: string }> {
     if (!this.isInitialized) await this.initializePoolData();
     if (!this.isInitialized) throw new Error('LpManager is not initialized');
 
-    Logger.startSpin(`Adding Liquidity (${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)}, ${amount.toFixed(4)} ${isUsdc ? 'USDC' : 'SUI'})...`);
+    const hasCustomTicks = customLowerTick !== undefined && customUpperTick !== undefined;
+    const descStr = hasCustomTicks 
+      ? `Ticks: [${customLowerTick}, ${customUpperTick}]`
+      : `Prices: ${lowerPrice.toFixed(4)}-${upperPrice.toFixed(4)}`;
+
+    Logger.startSpin(`Adding Liquidity (${descStr}, ${amount.toFixed(4)} ${isUsdc ? 'USDC' : 'SUI'})...`);
 
     try {
       const sdk = this.getSdkWithSender();
@@ -383,18 +529,23 @@ export class LpManager {
       let lowerTick: number;
       let upperTick: number;
       
-      const currentPoolPrice = TickMath.sqrtPriceX64ToPrice(currentSqrtPrice, this.decimalsA, this.decimalsB).toNumber();
-      const centerPrice = (lowerPrice + upperPrice) / 2;
-      const isInverse = Math.abs(currentPoolPrice - (1 / centerPrice)) < Math.abs(currentPoolPrice - centerPrice);
-
-      if (isInverse) {
-        const invLower = 1 / upperPrice;
-        const invUpper = 1 / lowerPrice;
-        lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(invLower.toString()), this.decimalsA, this.decimalsB, tickSpacing);
-        upperTick = TickMath.priceToInitializableTickIndex(new Decimal(invUpper.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+      if (hasCustomTicks) {
+        lowerTick = customLowerTick!;
+        upperTick = customUpperTick!;
       } else {
-        lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(lowerPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
-        upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+        const currentPoolPrice = TickMath.sqrtPriceX64ToPrice(currentSqrtPrice, this.decimalsA, this.decimalsB).toNumber();
+        const centerPrice = (lowerPrice + upperPrice) / 2;
+        const isInverse = Math.abs(currentPoolPrice - (1 / centerPrice)) < Math.abs(currentPoolPrice - centerPrice);
+
+        if (isInverse) {
+          const invLower = 1 / upperPrice;
+          const invUpper = 1 / lowerPrice;
+          lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(invLower.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+          upperTick = TickMath.priceToInitializableTickIndex(new Decimal(invUpper.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+        } else {
+          lowerTick = TickMath.priceToInitializableTickIndex(new Decimal(lowerPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+          upperTick = TickMath.priceToInitializableTickIndex(new Decimal(upperPrice.toString()), this.decimalsA, this.decimalsB, tickSpacing);
+        }
       }
 
       if (lowerTick === upperTick) {
@@ -501,6 +652,7 @@ export class LpManager {
       if (response.effects?.status?.status !== 'success') {
         throw new Error(`TX failed: ${response.effects?.status?.error}`);
       }
+      this.invalidatePositionListCache();
 
       const currentPrice = await this.priceMonitor.getCurrentPrice();
       const gasCostUsdc = this.gasTracker.recordGas(response.effects, currentPrice, 'addLiquidity');
@@ -535,9 +687,8 @@ export class LpManager {
     if (!this.isInitialized) await this.initializePoolData();
     if (!this.isInitialized) return false;
     try {
-      const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await this.getPoolPositionList();
       return positionList.some(pos => pos.pool === poolId && Number(pos.liquidity) > 0);
     } catch (error) {
       Logger.error('Failed to check active positions', error);
@@ -553,7 +704,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await this.getPoolPositionList(0);
       
       if (positionList.length === 0) {
         Logger.info('No active position found.');
@@ -561,45 +712,84 @@ export class LpManager {
         return;
       }
 
+      const failedPositionIds: string[] = [];
       for (const pos of positionList) {
-        try {
-          if (Number(pos.liquidity) === 0) continue;
-          if (pos.pool !== poolId) {
-            Logger.info(`Skipping position ${pos.pos_object_id} because it belongs to a different pool (${pos.pool})`);
-            continue;
-          }
-          Logger.info(`Closing position: ${pos.pos_object_id} (Liquidity: ${pos.liquidity})`);
-          
-          const pool = await sdk.Pool.getPool(pos.pool);
-          const txPayload = await sdk.Position.removeLiquidityTransactionPayload({
-            pool_id:             pool.poolAddress,
-            pos_id:              pos.pos_object_id,
-            coinTypeA:           pool.coinTypeA,
-            coinTypeB:           pool.coinTypeB,
-            delta_liquidity:     pos.liquidity.toString(),
-            min_amount_a:        '0',
-            min_amount_b:        '0',
-            collect_fee:         true,
-            rewarder_coin_types: [],
-          });
+        if (Number(pos.liquidity) === 0) continue;
+        if (pos.pool !== poolId) {
+          Logger.info(`Skipping position ${pos.pos_object_id} because it belongs to a different pool (${pos.pool})`);
+          continue;
+        }
 
-          const response = await this.txQueue.execute(
-            () => this.suiClient.signAndExecuteTransaction({
-              transaction: txPayload as any,
-              signer: this.keypair,
-              options: { showEffects: true },
-            }),
-            'forceClose'
-          );
+        let closed = false;
+        let lastError: any;
+        for (let attempt = 1; attempt <= 5 && !closed; attempt++) {
+          try {
+            if (attempt > 1) {
+              const activeIds = await retryOnRpcError(() => this.getActivePositionIds(), 5, 2000);
+              if (!activeIds.includes(pos.pos_object_id)) {
+                Logger.success(`Position ${pos.pos_object_id} was already closed after the previous response error.`);
+                closed = true;
+                break;
+              }
+            }
 
-          if (response.effects?.status?.status === 'success') {
+            Logger.info(`Closing position: ${pos.pos_object_id} (attempt ${attempt}/5, Liquidity: ${pos.liquidity})`);
+            const pool = await retryOnRpcError(() => sdk.Pool.getPool(pos.pool), 5, 2000);
+            const txPayload = await retryOnRpcError(() => sdk.Position.removeLiquidityTransactionPayload({
+              pool_id:             pool.poolAddress,
+              pos_id:              pos.pos_object_id,
+              coinTypeA:           pool.coinTypeA,
+              coinTypeB:           pool.coinTypeB,
+              delta_liquidity:     pos.liquidity.toString(),
+              min_amount_a:        '0',
+              min_amount_b:        '0',
+              collect_fee:         true,
+              rewarder_coin_types: [],
+            }), 5, 2000);
+
+            const response = await this.txQueue.execute(
+              () => this.suiClient.signAndExecuteTransaction({
+                transaction: txPayload as any,
+                signer: this.keypair,
+                options: { showEffects: true },
+              }),
+              'forceClose'
+            );
+
+            if (response.effects?.status?.status !== 'success') {
+              throw new Error(`TX failed: ${response.effects?.status?.error || 'unknown error'}`);
+            }
+
+            this.invalidatePositionListCache();
             Logger.success(`Successfully closed position ${pos.pos_object_id}`);
+            closed = true;
+          } catch (innerError: any) {
+            lastError = innerError;
+            const retryable = String(innerError?.message || innerError).includes('429') ||
+              String(innerError?.message || innerError).includes('Too Many Requests') ||
+              String(innerError?.message || innerError).includes('ECONNRESET') ||
+              String(innerError?.message || innerError).includes('ETIMEDOUT') ||
+              String(innerError?.message || innerError).includes('fetch failed');
+            if (!retryable || attempt === 5) break;
+
+            const delayMs = Math.min(5000 * attempt, 20000);
+            Logger.warn(`Position ${pos.pos_object_id} close hit a temporary RPC error. Retrying in ${delayMs / 1000}s (${attempt}/5).`);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
           }
-        } catch (innerError) {
-          Logger.error(`Error processing position ${pos.pos_object_id}`, innerError);
+        }
+
+        if (!closed) {
+          Logger.error(`Error processing position ${pos.pos_object_id}`, lastError);
+          failedPositionIds.push(pos.pos_object_id);
         }
       }
       this.currentPositionNft = null;
+      if (failedPositionIds.length > 0) {
+        throw new Error(`Failed to close ${failedPositionIds.length} position(s): ${failedPositionIds.join(', ')}`);
+      }
+
+      // RPCノードのインデックス遅延により、クローズ直後も getActivePositionIds が古いリストを返すことがあるため、
+      // ここでの残存ポジション確認アサーションは削除し、トランザクションの成功をもって完了と見なします。
     } catch (error) {
       Logger.error('Failed in forceCloseAllPositions', error);
       throw error;
@@ -614,7 +804,7 @@ export class LpManager {
     try {
       const sdk = this.getSdkWithSender();
       const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await this.getPoolPositionList(0);
       const pos = positionList.find(p => p.pos_object_id === posId);
       
       if (!pos) {
@@ -654,8 +844,14 @@ export class LpManager {
       );
 
       if (response.effects?.status?.status === 'success') {
+        this.invalidatePositionListCache();
         Logger.success(`Successfully closed position ${pos.pos_object_id}`);
+      } else {
+        throw new Error(`TX failed: ${response.effects?.status?.error || 'unknown error'}`);
       }
+
+      // RPCノードのインデックス遅延により、クローズ直後も getActivePositionIds が古いリストを返すことがあるため、
+      // ここでの残存ポジション確認アサーションは削除し、トランザクションの成功をもって完了と見なします。
     } catch (error) {
       Logger.error(`Failed to close position ${posId}`, error);
       throw error;
@@ -722,34 +918,77 @@ export class LpManager {
   async getPositionDetails(posId: string) {
     if (!this.isInitialized) await this.initializePoolData();
     if (!this.isInitialized) return null;
+
+    // キャッシュ保護（5秒以内の重複リクエストはキャッシュを返す）
+    const now = Date.now();
+    const cached = LpManager.positionDetailsCache.get(posId);
+    if (cached && (now - cached.fetchedAt < 5000)) {
+      return cached.data;
+    }
+
     try {
-      const sdk = this.getSdkWithSender();
-      const poolId = this.priceMonitor.getPoolId();
-      const positionList = await retryOnRpcError(() => sdk.Position.getPositionList(this.walletAddress, [poolId]));
+      const positionList = await this.getPoolPositionList();
       const pos = positionList.find(p => p.pos_object_id === posId);
       
       if (!pos) return null;
-      
-      // LP価値の見積もり (簡易的にUSD価値を算出)
-      const currentPrice = await this.priceMonitor.getCurrentPrice();
-      const amountA = Number((pos as any).coin_amount_a);
-      const amountB = Number((pos as any).coin_amount_b);
-      
-      let usdValue = 0;
-      if (this.usdcIsA) {
-        usdValue = amountA + (amountB * currentPrice);
-      } else {
-        usdValue = (amountA * currentPrice) + amountB;
+
+      // 流動性からトークン数量を計算する
+      const sdk = this.getSdkWithSender();
+      const poolId = this.priceMonitor.getPoolId();
+      const pool = await retryOnRpcError(() => sdk.Pool.getPool(poolId));
+      if (!pool) return null;
+
+      const currentSqrtPrice = new BN(pool.current_sqrt_price.toString());
+      const lowerSqrtPrice = TickMath.tickIndexToSqrtPriceX64(Number(pos.tick_lower_index));
+      const upperSqrtPrice = TickMath.tickIndexToSqrtPriceX64(Number(pos.tick_upper_index));
+      const liquidity = new BN(pos.liquidity.toString());
+
+      let amountA = 0;
+      let amountB = 0;
+
+      if (!liquidity.isZero()) {
+        const amounts = ClmmPoolUtil.getCoinAmountFromLiquidity(
+          liquidity,
+          currentSqrtPrice,
+          lowerSqrtPrice,
+          upperSqrtPrice,
+          false
+        );
+        amountA = Number(amounts.coinA.toString());
+        amountB = Number(amounts.coinB.toString());
       }
 
-      return {
+      // decimals で除算した実トークン数
+      const realAmountA = amountA / Math.pow(10, this.decimalsA);
+      const realAmountB = amountB / Math.pow(10, this.decimalsB);
+      
+      // LP価値の見積もり (ドルベース)
+      const currentPrice = await this.priceMonitor.getCurrentPrice();
+      let usdValue = 0;
+      if (this.usdcIsA) {
+        usdValue = realAmountA + (realAmountB * currentPrice);
+      } else {
+        usdValue = (realAmountA * currentPrice) + realAmountB;
+      }
+
+      const result = {
         posId,
         liquidity: pos.liquidity.toString(),
-        amountA,
-        amountB,
+        amountA: realAmountA,
+        amountB: realAmountB,
         usdValue
       };
-    } catch {
+
+      // キャッシュに保存
+      LpManager.positionDetailsCache.set(posId, { fetchedAt: Date.now(), data: result });
+      return result;
+    } catch (error) {
+      Logger.error(`Failed to get position details for ${posId}:`, error);
+      // 一時的な RPC エラーの場合、古いキャッシュがあればそれを返して 0 へのリセットを防ぐ
+      if (cached) {
+        Logger.warn(`Returning cached position details for ${posId} due to RPC error`);
+        return cached.data;
+      }
       return null;
     }
   }

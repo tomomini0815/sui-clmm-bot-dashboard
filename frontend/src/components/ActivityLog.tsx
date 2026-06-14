@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { Activity, ArrowRightLeft, DollarSign, Clock, TrendingUp, BarChart3, Play, Square, AlertTriangle } from 'lucide-react';
 
 interface LogEntry {
+  date?: string;
   time: string;
   action: string;
   price: number;
@@ -32,13 +33,15 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
       return sum + (isNaN(fee) ? 0 : fee);
     }, 0);
 
-    const successful = logs.filter(log =>
+    const successfulRebalances = rebalances.filter(log =>
       log.status.includes('+') || (log.status === '完了' && !log.action.includes('失敗'))
     );
 
     const totalRebalances = rebalances.length;
     const totalFeesCollected = fees;
-    const successRate = totalRebalances > 0 ? (successful.length / totalRebalances * 100).toFixed(1) : '-';
+    const successRate = totalRebalances > 0
+      ? (successfulRebalances.length / totalRebalances * 100).toFixed(1)
+      : '-';
 
     return { totalRebalances, totalFeesCollected, successRate };
   }, [logs]);
@@ -49,7 +52,8 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
       flexDirection: 'column',
       gap: '18px',
       flex: 1,
-      minHeight: logs.length > 0 ? '0' : '404px'
+      minHeight: 0,
+      overflow: 'hidden'
     }}>
       <div style={{ 
         display: 'flex', 
@@ -139,7 +143,7 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
         position: 'relative', 
         flex: 1, 
         height: 0,
-        minHeight: logs.length > 0 ? '200px' : '150px'
+        minHeight: 0
       }}>
         {logs.length > 0 ? (
           <table className="log-table" style={{ minWidth: '850px' }}>
@@ -212,10 +216,10 @@ export const ActivityLog = React.memo<ActivityLogProps>(({ logs }) => {
                       borderRadius: '6px',
                       display: 'inline-block',
                     }}>
-                      {(log as any).date && (
-                        <span style={{ fontSize: '0.75rem', opacity: 0.7, marginRight: '4px' }}>{(log as any).date}</span>
+                      {log.date && (
+                        <span style={{ fontSize: '0.75rem', opacity: 0.7, marginRight: '4px' }}>{log.date}</span>
                       )}
-                      {log.time}
+                      {log.date ? ` ${log.time}` : log.time}
                     </div>
                   </td>
                   <td>

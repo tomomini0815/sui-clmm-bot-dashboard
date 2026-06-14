@@ -35,9 +35,12 @@ export class PriceMonitor {
   private decimalsB: number = 9;
   private coinTypeA: string = '';
   private coinTypeB: string = '';
+  private coinASymbol: string = 'A';
+  private coinBSymbol: string = 'B';
   private isInitialized: boolean = false;
 
   private lastPriceTimestamp: number = 0;
+  private priceInFlight: Promise<number> | null = null;
 
   constructor(private config: BotConfig = globalConfig) {
     this.refreshConfig();
@@ -78,6 +81,8 @@ export class PriceMonitor {
         
         if (coinAMeta) this.decimalsA = coinAMeta.decimals;
         if (coinBMeta) this.decimalsB = coinBMeta.decimals;
+        this.coinASymbol = coinAMeta?.symbol || 'A';
+        this.coinBSymbol = coinBMeta?.symbol || 'B';
         
         Logger.info(`Pool Initialized: ID=${this.poolObjectId}`);
         Logger.info(` - CoinA: ${this.coinTypeA} (${coinAMeta?.symbol}, decimals=${this.decimalsA})`);
@@ -148,6 +153,23 @@ export class PriceMonitor {
   }
 
   async getCurrentPrice(): Promise<number> {
+    const lastEntry = this.priceHistory[this.priceHistory.length - 1];
+    if (lastEntry && Date.now() - this.lastPriceTimestamp < 5000) {
+      return lastEntry.price;
+    }
+    if (this.priceInFlight) {
+      return this.priceInFlight;
+    }
+
+    this.priceInFlight = this.fetchCurrentPrice();
+    try {
+      return await this.priceInFlight;
+    } finally {
+      this.priceInFlight = null;
+    }
+  }
+
+  private async fetchCurrentPrice(): Promise<number> {
     try {
       if (!this.isInitialized) {
         await this.initializePoolData();
@@ -208,12 +230,7 @@ export class PriceMonitor {
         }
       }
 
-      const coinAMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeA }));
-      const coinBMeta = await retryOnRpcError(() => this.sdk.fullClient.getCoinMetadata({ coinType: this.coinTypeB }));
-      const coinASymbol = coinAMeta?.symbol || 'A';
-      const coinBSymbol = coinBMeta?.symbol || 'B';
-      
-      Logger.info(`📈 Market Price: ${price.toFixed(4)} ${coinASymbol}/${coinBSymbol} (Tick: ${pool.current_tick_index})`);
+      Logger.info(`📈 Market Price: ${price.toFixed(4)} ${this.coinASymbol}/${this.coinBSymbol} (Tick: ${pool.current_tick_index})`);
       
       const now = new Date();
       const timeStr = now.toLocaleTimeString('ja-JP', { hour12: false });

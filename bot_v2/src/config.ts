@@ -3,6 +3,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from './logger.js';
 
+// Both configured Cetus pools use tickSpacing=60.
+// 1.0001^60 - 1 = 0.601773...%, so 0.61% is the smallest safe UI width.
+export const MIN_CETUS_RANGE_WIDTH_PERCENT = 0.61;
+export const MAX_CETUS_RANGE_WIDTH_PERCENT = 15;
+
 // ES Module dir resolution
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

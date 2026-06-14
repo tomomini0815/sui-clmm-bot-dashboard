@@ -25,9 +25,10 @@ interface MultiBotPanelProps {
   bot: Bot2Status | null;
   onStart?: () => void;
   onRebuild?: () => void;
+  noPanel?: boolean;
 }
 
-export function MultiBotPanel({ title, bot: bot2, onStart, onRebuild }: MultiBotPanelProps) {
+export function MultiBotPanel({ title, bot: bot2, onStart, onRebuild, noPanel = false }: MultiBotPanelProps) {
   const isActive = bot2?.active === true;
 
   const rangeInPct = bot2?.currentRange && bot2.currentPrice
@@ -43,7 +44,7 @@ export function MultiBotPanel({ title, bot: bot2, onStart, onRebuild }: MultiBot
   const rebalances = bot2?.tracker?.rebalanceCount ?? 0;
 
   return (
-    <div className="glass-panel bot2-panel">
+    <div className={noPanel ? "bot2-panel" : "glass-panel bot2-panel"}>
       {/* ヘッダー */}
       <div className="bot2-header">
         <div className="bot2-title-row">

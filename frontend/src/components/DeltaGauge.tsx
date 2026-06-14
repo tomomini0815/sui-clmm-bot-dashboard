@@ -49,7 +49,10 @@ export const DeltaGauge = React.memo<DeltaGaugeProps>(({ delta, hedge, indicator
   }
 
   // デルタ値を-1.0〜+1.0の範囲でゲージ化
-  const deltaPercent = Math.max(-1, Math.min(1, delta.current));
+  const rawDelta = Number(delta.current);
+  const deltaPercent = Number.isFinite(rawDelta)
+    ? Math.max(-1, Math.min(1, rawDelta))
+    : 0;
   const gaugePosition = ((deltaPercent + 1) / 2) * 100; // 0-100%に変換
   const absDelta = Math.abs(deltaPercent);
 

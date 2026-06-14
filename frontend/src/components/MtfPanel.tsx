@@ -16,12 +16,13 @@ interface MtfState {
 
 interface MtfPanelProps {
   mtf: MtfState | null;
+  noPanel?: boolean;
 }
 
-export const MtfPanel: React.FC<MtfPanelProps> = ({ mtf }) => {
+export const MtfPanel: React.FC<MtfPanelProps> = ({ mtf, noPanel = false }) => {
   if (!mtf) {
     return (
-      <div className="glass-panel" style={{ padding: '20px', opacity: 0.7 }}>
+      <div className={noPanel ? "" : "glass-panel"} style={noPanel ? { opacity: 0.7 } : { padding: '20px', opacity: 0.7 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)' }}>
           <Brain size={18} />
           <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>MTF 分析エンジン 待機中</span>
@@ -37,7 +38,7 @@ export const MtfPanel: React.FC<MtfPanelProps> = ({ mtf }) => {
   const isLong = mtf.direction === 'LONG';
   
   return (
-    <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
+    <div className={noPanel ? "" : "glass-panel"} style={noPanel ? { display: 'flex', flexDirection: 'column', gap: '15px' } : { padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Brain size={20} color="var(--accent)" />

@@ -2,10 +2,8 @@ import { TrendingUp, TrendingDown, Fuel, DollarSign, Clock, Percent } from 'luci
 
 interface PnlData {
   lpPnl: number;
-  hedgePnl: number;
   fees: number;
   gasCost: number;
-  fundingCost: number;
   netPnl: number;
   apr: number;
   dailyPnl: number;
@@ -22,18 +20,17 @@ interface GasStats {
 interface PnLCardProps {
   pnl: PnlData | null;
   gasStats: GasStats | null;
+  noPanel?: boolean;
 }
 
 // NOTE: React.memo を外してある — pnl オブジェクトの参照が変わらなくても
 // 毎ポーリングで確実に再レンダリングするため
-export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
+export const PnLCard = ({ pnl, gasStats, noPanel = false }: PnLCardProps) => {
   // pnl が null の場合や、プロパティが欠落している（undefined）場合でも安全にフォールバックさせる
   const safePnl: PnlData = {
     lpPnl: pnl?.lpPnl ?? 0,
-    hedgePnl: pnl?.hedgePnl ?? 0,
     fees: pnl?.fees ?? (pnl as any)?.feesCollected ?? 0,
     gasCost: pnl?.gasCost ?? (pnl as any)?.gasSpent ?? 0,
-    fundingCost: pnl?.fundingCost ?? (pnl as any)?.fundingFee ?? 0,
     netPnl: pnl?.netPnl ?? 0,
     apr: pnl?.apr ?? 0,
     dailyPnl: pnl?.dailyPnl ?? 0,
@@ -42,7 +39,7 @@ export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
   const hasData = pnl !== null;
   if (!hasData) {
     return (
-      <div className="glass-panel pnl-card">
+      <div className={noPanel ? "pnl-card" : "glass-panel pnl-card"}>
         <h3 className="pnl-card-title">
           <DollarSign size={16} />
           損益状況
@@ -58,7 +55,7 @@ export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
   const isProfit = safePnl.netPnl >= 0;
 
   return (
-    <div className="glass-panel pnl-card">
+    <div className={noPanel ? "pnl-card" : "glass-panel pnl-card"}>
       <h3 className="pnl-card-title">
         <DollarSign size={16} />
         リアルタイム損益
@@ -107,29 +104,8 @@ export const PnLCard = ({ pnl, gasStats }: PnLCardProps) => {
         <div className="pnl-breakdown-title">損益の内訳</div>
 
         <div className="pnl-breakdown-row">
-          <span className="pnl-breakdown-label">LP損益</span>
-          <span className={safePnl.lpPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {safePnl.lpPnl >= 0 ? '+' : ''}${safePnl.lpPnl.toFixed(4)}
-          </span>
-        </div>
-
-        <div className="pnl-breakdown-row">
-          <span className="pnl-breakdown-label">ヘッジ損益</span>
-          <span className={safePnl.hedgePnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {safePnl.hedgePnl >= 0 ? '+' : ''}${safePnl.hedgePnl.toFixed(4)}
-          </span>
-        </div>
-
-        <div className="pnl-breakdown-row">
           <span className="pnl-breakdown-label">手数料累計</span>
           <span className="pnl-positive">+${safePnl.fees.toFixed(4)}</span>
-        </div>
-
-        <div className="pnl-breakdown-row">
-          <span className="pnl-breakdown-label">Funding コスト</span>
-          <span className={safePnl.fundingCost >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-            {safePnl.fundingCost >= 0 ? '+' : ''}${safePnl.fundingCost.toFixed(4)}
-          </span>
         </div>
 
         <div className="pnl-breakdown-row pnl-breakdown-gas">

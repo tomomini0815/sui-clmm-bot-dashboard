@@ -17,7 +17,6 @@ interface BotWalletCardProps {
   botWalletSufficient?: boolean;
   bot1LpValue?: number;
   bot2LpValue?: number;
-  marginBalance?: number;
   userWalletBalanceSui?: number;
   userWalletBalanceUsdc?: number;
   userWalletSufficient?: boolean;
@@ -25,6 +24,7 @@ interface BotWalletCardProps {
   currentPrice?: number;
   isUnbalanced?: boolean;
   onRebuild?: () => void;
+  noPanel?: boolean;
 }
 
 export const BotWalletCard: React.FC<BotWalletCardProps> = ({ 
@@ -38,13 +38,13 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
   onUpdateCapital,
   bot1LpValue = 0,
   bot2LpValue = 0,
-  marginBalance = 0,
   userWalletBalanceSui = 0,
   userWalletBalanceUsdc = 0,
   connectedAddress = '',
   currentPrice = 0,
   isUnbalanced = false,
-  onRebuild
+  onRebuild,
+  noPanel = false
 }) => {
   const [copied, setCopied] = useState(false);
   const [isEditingCapital, setIsEditingCapital] = useState(false);
@@ -93,7 +93,7 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
   };
 
   return (
-    <div className="glass-panel" style={{ display: 'flex', flexDirection: 'column' }}>
+    <div className={noPanel ? "" : "glass-panel"} style={{ display: 'flex', flexDirection: 'column' }}>
       {/* 1. Header: Bot Management + Settings Button */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -367,16 +367,16 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
         marginBottom: '20px'
       }}>
         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '12px' }}>
-          ボット別 資金配分 (LP・ヘッジ内訳)
+          ボット別 資金配分 (LP・ウォレット余剰内訳)
         </div>
         
         {(() => {
-          const totalAllocated = bot1LpValue + bot2LpValue + marginBalance + usdcBalance;
+          const walletUsdValue = (suiBalance * currentPrice) + usdcBalance;
+          const totalAllocated = bot1LpValue + bot2LpValue + walletUsdValue;
           
           const pctBot1 = totalAllocated > 0 ? (bot1LpValue / totalAllocated) * 100 : 0;
           const pctBot2 = totalAllocated > 0 ? (bot2LpValue / totalAllocated) * 100 : 0;
-          const pctHedge = totalAllocated > 0 ? (marginBalance / totalAllocated) * 100 : 0;
-          const pctUnused = totalAllocated > 0 ? (usdcBalance / totalAllocated) * 100 : 0;
+          const pctUnused = totalAllocated > 0 ? (walletUsdValue / totalAllocated) * 100 : 0;
           
           return (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
@@ -404,21 +404,13 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
                     transition: 'width 0.3s ease' 
                   }} title={`Bot2 DEEP/SUI: ${pctBot2.toFixed(1)}%`} />
                 )}
-                {marginBalance > 0 && (
-                  <div style={{ 
-                    height: '100%', 
-                    width: `${pctHedge}%`, 
-                    background: 'linear-gradient(90deg, #ff9f43, #ee5253)',
-                    transition: 'width 0.3s ease' 
-                  }} title={`Hedge Margin: ${pctHedge.toFixed(1)}%`} />
-                )}
-                {usdcBalance > 0 && (
+                {walletUsdValue > 0 && (
                   <div style={{ 
                     height: '100%', 
                     width: `${pctUnused}%`, 
                     background: 'rgba(255,255,255,0.2)',
                     transition: 'width 0.3s ease' 
-                  }} title={`Unused USDC: ${pctUnused.toFixed(1)}%`} />
+                  }} title={`Unused Wallet Value: ${pctUnused.toFixed(1)}%`} />
                 )}
               </div>
 
@@ -444,25 +436,13 @@ export const BotWalletCard: React.FC<BotWalletCardProps> = ({
                   </span>
                 </div>
 
-                {marginBalance > 0 && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ff9f43' }} />
-                      <span style={{ color: 'var(--text-main)' }}>Hedge (Bluefin 証拠金)</span>
-                    </div>
-                    <span style={{ fontWeight: 700, color: 'white' }}>
-                      ${marginBalance.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctHedge.toFixed(0)}%)</span>
-                    </span>
-                  </div>
-                )}
-
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'rgba(255,255,255,0.4)' }} />
-                    <span style={{ color: 'var(--text-muted)' }}>未使用 (ウォレットUSDC)</span>
+                    <span style={{ color: 'var(--text-muted)' }}>未使用 (ウォレット残高全体)</span>
                   </div>
                   <span style={{ fontWeight: 700, color: 'var(--text-muted)' }}>
-                    ${usdcBalance.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctUnused.toFixed(0)}%)</span>
+                    ${walletUsdValue.toFixed(2)} <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontWeight: 500 }}>({pctUnused.toFixed(0)}%)</span>
                   </span>
                 </div>
 

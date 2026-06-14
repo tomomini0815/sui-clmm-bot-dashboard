@@ -30,6 +30,16 @@ interface BotInstance {
   currentPhase: CyclePhase;
 }
 
+function isTemporaryRpcError(error: unknown): boolean {
+  const message = String((error as any)?.message || error);
+  return message.includes('429') ||
+    message.includes('Too Many Requests') ||
+    message.includes('ECONNRESET') ||
+    message.includes('ETIMEDOUT') ||
+    message.includes('fetch failed') ||
+    /\b50[234]\b/.test(message);
+}
+
 export class Strategy {
   public isRunning: boolean = false;
   public currentPhase: CyclePhase = CyclePhase.IDLE;
@@ -44,10 +54,14 @@ export class Strategy {
   private isPhaseARunning: boolean = false; // 統合フェーズAの二重起動防止フラグ
   private isRolling: { [key: string]: boolean } = {}; // 各ボットのスライドローリング重複起動防止フラグ
   private lastSurgeRebuildAt: number = 0;
+  private rpcBackoffUntil: number = 0;
+  private lastRpcErrorEventAt: number = 0;
 
   // PnL データのキャッシュ機構（429 Too Many Requestsの防止）
   private lastPnlData: any = null;
   private lastPnlDataTime: number = 0;
+  private pnlDataInFlight: Promise<any> | null = null;
+  private pnlDataInFlightWallet?: string;
   
   constructor(
     private priceMonitor: PriceMonitor, // Bot1 priceMonitor
@@ -267,11 +281,25 @@ export class Strategy {
     Logger.info("Sui Dual Delta-Neutral LP Bot を停止しました。");
   }
 
+  public async waitForIdle(timeoutMs = 120000): Promise<void> {
+    const startedAt = Date.now();
+    while (this.isCycleRunning || this.isPhaseARunning || this.isAnyBotRebuilding()) {
+      if (Date.now() - startedAt >= timeoutMs) {
+        throw new Error('通常監視サイクルの停止待ちがタイムアウトしました。少し待ってから再配置を再実行してください。');
+      }
+      await this.sleep(250);
+    }
+  }
+
   /**
    * メインサイクル
    */
   private async cycle() {
     if (!this.isRunning) return;
+    if (Date.now() < this.rpcBackoffUntil) {
+      Logger.warn(`[RPC_BACKOFF] RPC一時障害のため監視をあと${Math.ceil((this.rpcBackoffUntil - Date.now()) / 1000)}秒待機します。`);
+      return;
+    }
     if (this.isCycleRunning) {
       Logger.warn('[STRATEGY] 前回サイクルが実行中のため、この監視サイクルをスキップします。');
       return;
@@ -373,9 +401,18 @@ export class Strategy {
       }
 
     } catch (e: any) {
-      Logger.error(`[CYCLE_ERROR] ${e.message}`, e);
-      this.riskGuard.recordError();
-      this.tracker.recordEvent('システムエラー', `サイクル実行エラー: ${e.message}`, this.bot1.state.basePrice).catch(() => {});
+      if (isTemporaryRpcError(e)) {
+        this.rpcBackoffUntil = Date.now() + 60000;
+        Logger.warn(`[RPC_BACKOFF] RPC一時障害を検出しました。60秒間、新規監視・再構築を停止します: ${e.message}`);
+        if (Date.now() - this.lastRpcErrorEventAt >= 300000) {
+          this.lastRpcErrorEventAt = Date.now();
+          this.tracker.recordEvent('RPC一時障害', `60秒バックオフ: ${e.message}`, this.bot1.state.basePrice).catch(() => {});
+        }
+      } else {
+        Logger.error(`[CYCLE_ERROR] ${e.message}`, e);
+        this.riskGuard.recordError();
+        this.tracker.recordEvent('システムエラー', `サイクル実行エラー: ${e.message}`, this.bot1.state.basePrice).catch(() => {});
+      }
     } finally {
       this.isCycleRunning = false;
     }
@@ -433,17 +470,32 @@ export class Strategy {
     lower: number,
     upper: number,
     amount: number,
-    isCoinA: boolean
+    isCoinA: boolean,
+    customLowerTick?: number,
+    customUpperTick?: number
   ) {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const beforeIds = await bot.lpManager.getActivePositionIds();
+      if (beforeIds.length >= 4) {
+        throw new Error(`[POSITION_CAP] ${bot.name} already has ${beforeIds.length} active positions; refusing to create another.`);
+      }
+
       try {
-        return await bot.lpManager.addLiquidity(lower, upper, amount, isCoinA);
+        return await bot.lpManager.addLiquidity(lower, upper, amount, isCoinA, customLowerTick, customUpperTick);
       } catch (e: any) {
         const retryable = String(e?.message || e).includes('429');
         if (!retryable || attempt === maxAttempts) {
           throw e;
         }
+
+        const afterIds = await bot.lpManager.getActivePositionIds().catch(() => beforeIds);
+        const createdId = afterIds.find(id => !beforeIds.includes(id));
+        if (createdId) {
+          Logger.warn(`[${bot.name}] LP作成後の応答で429が発生しましたが、新規ポジション ${createdId} を確認したため再送しません。`);
+          return { digest: '', gasCostUsdc: 0, positionId: createdId };
+        }
+
         const delayMs = attempt * 15000;
         Logger.warn(`[${bot.name}] RPC 429のためLP作成を${delayMs / 1000}秒後に再試行します (${attempt}/${maxAttempts})。`);
         await this.sleep(delayMs);
@@ -516,12 +568,27 @@ export class Strategy {
     return allPresent && noOverlap;
   }
 
-  private async getLiveRangeOrderPositionCount(bot: BotInstance): Promise<number> {
+  private async getRangeOrderPositionStatus(bot: BotInstance) {
     const activeIds = await bot.lpManager.getActivePositionIds();
+    const trackedIds = this.getRangeOrderPositionSnapshot(bot)
+      .map(p => p.id)
+      .filter(Boolean) as string[];
     const activeIdSet = new Set(activeIds);
-    return this.getRangeOrderPositionSnapshot(bot)
-      .filter(p => !!p.id && activeIdSet.has(p.id as string))
-      .length;
+    const uniqueTrackedIds = new Set(trackedIds);
+    const trackedLiveCount = trackedIds.filter(id => activeIdSet.has(id)).length;
+    const extraIds = activeIds.filter(id => !uniqueTrackedIds.has(id));
+
+    return {
+      activeIds,
+      trackedIds,
+      trackedLiveCount,
+      extraIds,
+      isExact: trackedIds.length === 4 &&
+        uniqueTrackedIds.size === 4 &&
+        trackedLiveCount === 4 &&
+        activeIds.length === 4 &&
+        extraIds.length === 0,
+    };
   }
 
   private async validateRangeOrderStateOnChain(bot: BotInstance): Promise<boolean> {
@@ -530,13 +597,11 @@ export class Strategy {
     }
 
     try {
-      const liveCount = await this.getLiveRangeOrderPositionCount(bot);
-      if (liveCount !== 4) {
-        const trackedIds = this.getRangeOrderPositionSnapshot(bot).map(p => p.id as string);
-        const activeIds = await bot.lpManager.getActivePositionIds();
-        Logger.warn(`[PHASE_A][${bot.name}] state上の指値ポジションIDがチェーン上の有効ポジションに揃っていません。live=${liveCount}/4 state=${trackedIds.join(', ')} active=${activeIds.join(', ')}`);
+      const status = await this.getRangeOrderPositionStatus(bot);
+      if (!status.isExact) {
+        Logger.warn(`[PHASE_A][${bot.name}] 指値ポジションが4件ちょうどではありません。trackedLive=${status.trackedLiveCount}/4 totalActive=${status.activeIds.length}/4 state=${status.trackedIds.join(', ')} extra=${status.extraIds.join(', ') || 'none'} active=${status.activeIds.join(', ')}`);
       }
-      return liveCount === 4;
+      return status.isExact;
     } catch (e: any) {
       Logger.warn(`[PHASE_A][${bot.name}] チェーン上ポジション確認に失敗したため再構築します: ${e.message}`);
       return false;
@@ -556,18 +621,6 @@ export class Strategy {
     this.bot2.state.lastSlideDirection = null;
     this.bot1.stateManager.saveState(this.bot1.state);
     this.bot2.stateManager.saveState(this.bot2.state);
-  }
-
-  private async closeTrackedRangeOrderPositions(bot: BotInstance) {
-    const positions = this.getRangeOrderPositionSnapshot(bot).filter(p => p.id);
-    for (const pos of positions) {
-      try {
-        Logger.info(`[SURGE_REBUILD][${bot.name}] ${pos.slot} (${pos.id}) をクローズします...`);
-        await bot.lpManager.closePosition(pos.id as string);
-      } catch (e: any) {
-        Logger.error(`[SURGE_REBUILD][${bot.name}] ${pos.slot} (${pos.id}) のクローズに失敗しました。処理は継続します: ${e.message}`, e);
-      }
-    }
   }
 
   private async rebuildAllRangeOrderPositionsForSurge(detectedPrice: number, driftSteps: number): Promise<void> {
@@ -606,8 +659,8 @@ export class Strategy {
         try {
           Logger.info(`[SURGE_REBUILD] 再構築試行 ${attempt}/${maxRetries} を開始します。`);
 
-          await this.closeTrackedRangeOrderPositions(this.bot1);
-          await this.closeTrackedRangeOrderPositions(this.bot2);
+          await this.bot1.lpManager.forceCloseAllPositions();
+          await this.bot2.lpManager.forceCloseAllPositions();
 
           this.resetRangeOrderState(this.bot1);
           this.resetRangeOrderState(this.bot2);
@@ -643,7 +696,12 @@ export class Strategy {
           Logger.error(`[SURGE_REBUILD] 再構築試行 ${attempt}/${maxRetries} に失敗しました: ${e.message}`, e);
           await this.tracker.recordEvent('急騰・急落再構築失敗', `試行 ${attempt}/${maxRetries}: ${e.message}`, detectedPrice).catch(() => {});
           if (attempt < maxRetries) {
-            await this.sleep(this.config.surgeRebuildDelayMs || 3000);
+            const errorText = String(e?.message || e);
+            const isRpcThrottle = errorText.includes('429') || errorText.includes('Too Many Requests');
+            const baseDelay = isRpcThrottle ? 15000 : (this.config.surgeRebuildDelayMs || 3000);
+            const retryDelay = Math.min(baseDelay * Math.pow(2, attempt - 1), 60000);
+            Logger.warn(`[SURGE_REBUILD] ${retryDelay / 1000}秒待機して再試行します。`);
+            await this.sleep(retryDelay);
           }
         }
       }
@@ -700,11 +758,11 @@ export class Strategy {
         Logger.info('[PHASE_A] ⚠️ ポジションが未構築または一部欠落しているため、既存ポジションを全てクローズして初期化します。');
         
         this.bot1.currentPhase = CyclePhase.A;
-        await this.bot1.lpManager.forceCloseAllPositions().catch(e => Logger.warn(`[PHASE_A] Bot1 forceCloseエラー: ${e.message}`));
+        await this.bot1.lpManager.forceCloseAllPositions();
         this.resetRangeOrderState(this.bot1);
 
         this.bot2.currentPhase = CyclePhase.A;
-        await this.bot2.lpManager.forceCloseAllPositions().catch(e => Logger.warn(`[PHASE_A] Bot2 forceCloseエラー: ${e.message}`));
+        await this.bot2.lpManager.forceCloseAllPositions();
         this.resetRangeOrderState(this.bot2);
 
         this.bot1.stateManager.saveState(this.bot1.state);
@@ -793,19 +851,18 @@ export class Strategy {
 
         // 目標残高の算出（全体の資金を8等分 = 各ボットの 25% ずつ 4ポジション）
         const bot1UsdcNeeded = bot1AllocUsdc * 0.25;
-        const bot1SuiNeeded  = (bot1AllocUsdc * 0.25) / price1;
-
-        const bot2SuiNeeded  = (bot2AllocUsdc * 0.25) / price1;
         const bot2DeepNeeded = (bot2AllocUsdc * 0.25) / (price2 * price1);
 
-        Logger.info(`[PHASE_A] 目標(各25% x4): Bot1 USDC=$${(bot1UsdcNeeded*4).toFixed(2)} | Bot2 DEEP=${(bot2DeepNeeded*4).toFixed(2)}`);
+        Logger.info(`[PHASE_A] 資産別目標: Bot1 USDC=$${(bot1UsdcNeeded * 2).toFixed(2)} | Bot2 DEEP=${(bot2DeepNeeded * 2).toFixed(2)} | 残りをSUIへ配分`);
 
         // 1. DEEP残高の調整 (目標の 50% = 2倍が必要)
         const totalDeepNeeded = bot2DeepNeeded * 2.0;
+        let didSwap = false;
         if (deepBalance > totalDeepNeeded + 1.0) {
           const deepToSell = deepBalance - totalDeepNeeded;
           Logger.info(`[PHASE_A] 余剰DEEPを売却します: ${deepToSell.toFixed(2)} DEEP -> SUI`);
           await this.bot2.swapManager.swapDeepToSui(deepToSell);
+          didSwap = true;
         } else if (deepBalance < totalDeepNeeded - 1.0) {
           const deepToBuy = totalDeepNeeded - deepBalance;
           const preBal = await this.bot1.lpManager.checkBalance();
@@ -813,6 +870,7 @@ export class Strategy {
           if (suiToSwap > 0.05) {
             Logger.info(`[PHASE_A] 不足DEEPを補うため SUIをスワップします: ${suiToSwap.toFixed(4)} SUI -> DEEP`);
             await this.bot2.swapManager.swapSuiToDeep(suiToSwap);
+            didSwap = true;
           }
         }
 
@@ -826,6 +884,7 @@ export class Strategy {
           if (usdcToSell > 0.1) {
             Logger.info(`[PHASE_A] 余剰USDCを売却します: ${usdcToSell.toFixed(2)} USDC -> SUI`);
             await this.bot1.swapManager.swapUsdcToSui(usdcToSell);
+            didSwap = true;
           }
         } else if (currentBal.usdcBalance < totalUsdcNeeded - 0.1) {
           const usdcToBuy = totalUsdcNeeded - currentBal.usdcBalance;
@@ -833,7 +892,13 @@ export class Strategy {
           if (suiToSell > 0.05) {
             Logger.info(`[PHASE_A] 不足USDCを補うため SUIを売却します: ${suiToSell.toFixed(4)} SUI -> USDC`);
             await this.bot1.swapManager.swapSuiToUsdc(suiToSell);
+            didSwap = true;
           }
+        }
+
+        if (didSwap) {
+          Logger.info(`[PHASE_A] ⏳ スワップ後の残高反映を待機します (3秒)...`);
+          await this.sleep(3000);
         }
 
         // 最新の残高でLPを構築
@@ -846,34 +911,69 @@ export class Strategy {
 
         const allocatedIds1: string[] = [];
 
-        // 構築直前に最新価格を再取得して、価格変動によるインレンジ構築バグを防ぐ
+        // 構築直前の価格と残高から、8ポジション共通のUSD予算を一度だけ確定する。
+        // LpManagerは最大投入額に3%の余裕を持たせるため、4%の残高バッファを先に確保する。
         price1 = await this.bot1.priceMonitor.getCurrentPrice();
-        Logger.info(`[PHASE_A] Bot1の構築を開始します。最新価格 price1: $${price1.toFixed(4)}`);
+        price2 = await this.bot2.priceMonitor.getCurrentPrice();
+        const LP_BALANCE_BUFFER = 1.04;
+        const safeSuiForLp = Math.max(0, finalBal.suiBalance - GAS_RESERVE);
+        const deepPriceUsdc = price2 * price1;
+        const poolUsdcBalance = this.bot1.lpManager.coinTypeA.toLowerCase().includes('usdc')
+          ? finalBal.coinABalance
+          : finalBal.coinBBalance;
+        const finalAssetsUsdc =
+          poolUsdcBalance +
+          safeSuiForLp * price1 +
+          finalDeep * deepPriceUsdc;
+
+        const equalPositionUsd = Math.min(
+          finalAssetsUsdc / 8,
+          poolUsdcBalance / (2 * LP_BALANCE_BUFFER),
+          safeSuiForLp * price1 / (4 * LP_BALANCE_BUFFER),
+          finalDeep * deepPriceUsdc / (2 * LP_BALANCE_BUFFER)
+        );
+
+        if (!Number.isFinite(equalPositionUsd) || equalPositionUsd <= 0.05) {
+          throw new Error(`[PHASE_A] 8ポジションを均等構築できる残高がありません (1ポジション予算: $${equalPositionUsd.toFixed(4)})`);
+        }
+
+        const equalUsdcAmount = equalPositionUsd;
+        const equalSuiAmount = equalPositionUsd / price1;
+        const equalDeepAmount = equalPositionUsd / deepPriceUsdc;
+
+        Logger.info(`[PHASE_A] 8ポジション均等配分: 1ポジション=$${equalPositionUsd.toFixed(4)}`);
+        Logger.info(`[PHASE_A] 固定投入量: USDC=${equalUsdcAmount.toFixed(4)} x2, SUI=${equalSuiAmount.toFixed(6)} x4, DEEP=${equalDeepAmount.toFixed(4)} x2`);
+        Logger.info(`[PHASE_A] 最新価格: SUI/USDC=$${price1.toFixed(4)}, DEEP/SUI=${price2.toFixed(6)}`);
 
         // ══ Bot1: 現在価格中心に1%幅4ポジション隣接配置 ══
-        // ティック丸めで現在価格をまたがない最小限の空白だけを確保する。
-        // 指値が長時間 Inactive になりにくいよう、最寄りレンジを現在価格の 0.05% 外側に置く。
-        const offset = 0.0005;
-        const bot1LowerBelow1 = price1 * (1 - width - offset);
-        const bot1UpperBelow1 = price1 * (1 - offset);
-        const bot1LowerBelow2 = price1 * (1 - 2 * width - offset);
-        const bot1UpperBelow2 = price1 * (1 - width - offset);
-        const bot1LowerAbove1 = price1 * (1 + offset);
-        const bot1UpperAbove1 = price1 * (1 + width + offset);
-        const bot1LowerAbove2 = price1 * (1 + width + offset);
-        const bot1UpperAbove2 = price1 * (1 + 2 * width + offset);
+        const offset = 0.0005; // 0.05% 安全マージン
+        
+        // lpManagerから被らない安全なtickとそれに対応する価格を取得
+        const tickRes1Below1 = await this.bot1.lpManager.getRangeOrderTicks('below', 1, width, offset);
+        const tickRes1Below2 = await this.bot1.lpManager.getRangeOrderTicks('below', 2, width, offset);
+        const tickRes1Above1 = await this.bot1.lpManager.getRangeOrderTicks('above', 1, width, offset);
+        const tickRes1Above2 = await this.bot1.lpManager.getRangeOrderTicks('above', 2, width, offset);
 
-        Logger.info(`[Bot1] レンジ構成:`);
-        Logger.info(`  Below2: $${bot1LowerBelow2.toFixed(4)} - $${bot1UpperBelow2.toFixed(4)}`);
-        Logger.info(`  Below1: $${bot1LowerBelow1.toFixed(4)} - $${bot1UpperBelow1.toFixed(4)}`);
+        const bot1LowerBelow1 = tickRes1Below1.lowerPrice;
+        const bot1UpperBelow1 = tickRes1Below1.upperPrice;
+        const bot1LowerBelow2 = tickRes1Below2.lowerPrice;
+        const bot1UpperBelow2 = tickRes1Below2.upperPrice;
+        const bot1LowerAbove1 = tickRes1Above1.lowerPrice;
+        const bot1UpperAbove1 = tickRes1Above1.upperPrice;
+        const bot1LowerAbove2 = tickRes1Above2.lowerPrice;
+        const bot1UpperAbove2 = tickRes1Above2.upperPrice;
+
+        Logger.info(`[Bot1] レンジ構成 (Tick指定配置):`);
+        Logger.info(`  Below2: $${bot1LowerBelow2.toFixed(4)} - $${bot1UpperBelow2.toFixed(4)} (Ticks: [${tickRes1Below2.lowerTick}, ${tickRes1Below2.upperTick}])`);
+        Logger.info(`  Below1: $${bot1LowerBelow1.toFixed(4)} - $${bot1UpperBelow1.toFixed(4)} (Ticks: [${tickRes1Below1.lowerTick}, ${tickRes1Below1.upperTick}])`);
         Logger.info(`  現在価格: $${price1.toFixed(4)}`);
-        Logger.info(`  Above1: $${bot1LowerAbove1.toFixed(4)} - $${bot1UpperAbove1.toFixed(4)}`);
-        Logger.info(`  Above2: $${bot1LowerAbove2.toFixed(4)} - $${bot1UpperAbove2.toFixed(4)}`);
+        Logger.info(`  Above1: $${bot1LowerAbove1.toFixed(4)} - $${bot1UpperAbove1.toFixed(4)} (Ticks: [${tickRes1Above1.lowerTick}, ${tickRes1Above1.upperTick}])`);
+        Logger.info(`  Above2: $${bot1LowerAbove2.toFixed(4)} - $${bot1UpperAbove2.toFixed(4)} (Ticks: [${tickRes1Above2.lowerTick}, ${tickRes1Above2.upperTick}])`);
 
-        // ── Bot1 Below1: USDC 50%を投入（買い指値）──
-        const bot1LpUsdc1 = Math.min(finalBal.usdcBalance * 0.50, bot1UsdcNeeded * 1.02);
+        // ── Bot1 Below1: 均等額のUSDCを投入（買い指値）──
+        const bot1LpUsdc1 = equalUsdcAmount;
         Logger.info(`[Bot1] Below1 LP構築 (レンジ: $${bot1LowerBelow1.toFixed(4)}-$${bot1UpperBelow1.toFixed(4)}, USDC: $${bot1LpUsdc1.toFixed(2)})...`);
-        const lpRes1Below1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow1, bot1UpperBelow1, bot1LpUsdc1, true);
+        const lpRes1Below1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow1, bot1UpperBelow1, bot1LpUsdc1, true, tickRes1Below1.lowerTick, tickRes1Below1.upperTick);
         const pos1Below1 = lpRes1Below1.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
         if (pos1Below1) {
           allocatedIds1.push(pos1Below1);
@@ -883,11 +983,10 @@ export class Strategy {
           Logger.success(`[Bot1] ✅ Below1指値LP構築完了: ${pos1Below1}`);
         }
 
-        // ── Bot1 Below2: 残りUSDCを投入（さらに下の買い指値）──
-        const finalBal_b2 = await this.bot1.lpManager.checkBalance();
-        const bot1LpUsdc2 = Math.min(finalBal_b2.usdcBalance * 0.98, bot1UsdcNeeded * 1.02);
+        // ── Bot1 Below2: Below1と同額のUSDCを投入 ──
+        const bot1LpUsdc2 = equalUsdcAmount;
         Logger.info(`[Bot1] Below2 LP構築 (レンジ: $${bot1LowerBelow2.toFixed(4)}-$${bot1UpperBelow2.toFixed(4)}, USDC: $${bot1LpUsdc2.toFixed(2)})...`);
-        const lpRes1Below2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow2, bot1UpperBelow2, bot1LpUsdc2, true);
+        const lpRes1Below2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerBelow2, bot1UpperBelow2, bot1LpUsdc2, true, tickRes1Below2.lowerTick, tickRes1Below2.upperTick);
         const pos1Below2 = lpRes1Below2.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
         if (pos1Below2) {
           allocatedIds1.push(pos1Below2);
@@ -897,108 +996,87 @@ export class Strategy {
           Logger.success(`[Bot1] ✅ Below2指値LP構築完了: ${pos1Below2}`);
         }
 
-        // ── Bot1 Above1: SUI 50%を投入（売り指値）──
-        const finalBalSui = await this.bot1.lpManager.checkBalance();
-        const bot1LpSui1 = Math.min((finalBalSui.suiBalance - 0.5) * 0.50, bot1SuiNeeded * 1.02);
-
-        if (bot1LpSui1 > 0.05) {
-          Logger.info(`[Bot1] Above1 LP構築 (レンジ: $${bot1LowerAbove1.toFixed(4)}-$${bot1UpperAbove1.toFixed(4)}, SUI: ${bot1LpSui1.toFixed(4)})...`);
-          const lpRes1Above1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove1, bot1UpperAbove1, bot1LpSui1, false);
-          const pos1Above1 = lpRes1Above1.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
-          if (pos1Above1) {
-            allocatedIds1.push(pos1Above1);
-            this.bot1.state.lpPositionIdAbove1 = pos1Above1;
-            this.bot1.state.rangeLowerAbove1 = bot1LowerAbove1;
-            this.bot1.state.rangeUpperAbove1 = bot1UpperAbove1;
-            Logger.success(`[Bot1] ✅ Above1指値LP構築完了: ${pos1Above1}`);
-          }
+        // ── Bot1 Above1: 均等額のSUIを投入（売り指値）──
+        const bot1LpSui1 = equalSuiAmount;
+        Logger.info(`[Bot1] Above1 LP構築 (レンジ: $${bot1LowerAbove1.toFixed(4)}-$${bot1UpperAbove1.toFixed(4)}, SUI: ${bot1LpSui1.toFixed(4)})...`);
+        const lpRes1Above1 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove1, bot1UpperAbove1, bot1LpSui1, false, tickRes1Above1.lowerTick, tickRes1Above1.upperTick);
+        const pos1Above1 = lpRes1Above1.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
+        if (pos1Above1) {
+          allocatedIds1.push(pos1Above1);
+          this.bot1.state.lpPositionIdAbove1 = pos1Above1;
+          this.bot1.state.rangeLowerAbove1 = bot1LowerAbove1;
+          this.bot1.state.rangeUpperAbove1 = bot1UpperAbove1;
+          Logger.success(`[Bot1] ✅ Above1指値LP構築完了: ${pos1Above1}`);
         }
 
-        // ── Bot1 Above2: 残りSUIを投入（さらに上の売り指値）──
-        const finalBalSui_a2 = await this.bot1.lpManager.checkBalance();
-        const bot1LpSui2 = Math.min(finalBalSui_a2.suiBalance - 0.5, bot1SuiNeeded * 1.02);
-
-        if (bot1LpSui2 > 0.05) {
-          Logger.info(`[Bot1] Above2 LP構築 (レンジ: $${bot1LowerAbove2.toFixed(4)}-$${bot1UpperAbove2.toFixed(4)}, SUI: ${bot1LpSui2.toFixed(4)})...`);
-          const lpRes1Above2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove2, bot1UpperAbove2, bot1LpSui2, false);
-          const pos1Above2 = lpRes1Above2.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
-          if (pos1Above2) {
-            allocatedIds1.push(pos1Above2);
-            this.bot1.state.lpPositionIdAbove2 = pos1Above2;
-            this.bot1.state.rangeLowerAbove2 = bot1LowerAbove2;
-            this.bot1.state.rangeUpperAbove2 = bot1UpperAbove2;
-            Logger.success(`[Bot1] ✅ Above2指値LP構築完了: ${pos1Above2}`);
-          }
+        // ── Bot1 Above2: Above1と同額のSUIを投入 ──
+        const bot1LpSui2 = equalSuiAmount;
+        Logger.info(`[Bot1] Above2 LP構築 (レンジ: $${bot1LowerAbove2.toFixed(4)}-$${bot1UpperAbove2.toFixed(4)}, SUI: ${bot1LpSui2.toFixed(4)})...`);
+        const lpRes1Above2 = await this.addLiquidityWithRpcRetry(this.bot1, bot1LowerAbove2, bot1UpperAbove2, bot1LpSui2, false, tickRes1Above2.lowerTick, tickRes1Above2.upperTick);
+        const pos1Above2 = lpRes1Above2.positionId || (await this.bot1.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id));
+        if (pos1Above2) {
+          allocatedIds1.push(pos1Above2);
+          this.bot1.state.lpPositionIdAbove2 = pos1Above2;
+          this.bot1.state.rangeLowerAbove2 = bot1LowerAbove2;
+          this.bot1.state.rangeUpperAbove2 = bot1UpperAbove2;
+          Logger.success(`[Bot1] ✅ Above2指値LP構築完了: ${pos1Above2}`);
         }
 
         // ── Bot2 (SUI / DEEP) LP構築 ──
-        const finalBal3 = await this.bot1.lpManager.checkBalance();
         const allocatedIds2: string[] = [];
 
-        // 構築直前に最新価格を再取得して、価格変動によるインレンジ構築バグを防ぐ
-        price2 = await this.bot2.priceMonitor.getCurrentPrice();
-        Logger.info(`[PHASE_A] Bot2の構築を開始します。最新価格 price2: ${price2.toFixed(6)}`);
-
         // ══ Bot2: 現在価格中心に1%幅4ポジション隣接配置 ══
-        // Below1: [price2*(1-w), price2]          ← SUI買い指値（SUIを投入）
-        // Below2: [price2*(1-2w), price2*(1-w)]   ← さらに下の買い指値
-        // Above1: [price2, price2*(1+w)]           ← DEEP売り指値（DEEPを投入）
-        // Above2: [price2*(1+w), price2*(1+2w)]   ← さらに上の売り指値
-        // Bot1 と同じく、現在価格から 0.05% 外側に最寄りレンジを配置する。
-        const bot2LowerBelow1 = price2 * (1 - width - offset);
-        const bot2UpperBelow1 = price2 * (1 - offset);
-        const bot2LowerBelow2 = price2 * (1 - 2 * width - offset);
-        const bot2UpperBelow2 = price2 * (1 - width - offset);
-        const bot2LowerAbove1 = price2 * (1 + offset);
-        const bot2UpperAbove1 = price2 * (1 + width + offset);
-        const bot2LowerAbove2 = price2 * (1 + width + offset);
-        const bot2UpperAbove2 = price2 * (1 + 2 * width + offset);
+        const tickRes2Below1 = await this.bot2.lpManager.getRangeOrderTicks('below', 1, width, offset);
+        const tickRes2Below2 = await this.bot2.lpManager.getRangeOrderTicks('below', 2, width, offset);
+        const tickRes2Above1 = await this.bot2.lpManager.getRangeOrderTicks('above', 1, width, offset);
+        const tickRes2Above2 = await this.bot2.lpManager.getRangeOrderTicks('above', 2, width, offset);
 
-        Logger.info(`[Bot2] レンジ構成:`);
-        Logger.info(`  Below2: ${bot2LowerBelow2.toFixed(6)} - ${bot2UpperBelow2.toFixed(6)}`);
-        Logger.info(`  Below1: ${bot2LowerBelow1.toFixed(6)} - ${bot2UpperBelow1.toFixed(6)}`);
+        const bot2LowerBelow1 = tickRes2Below1.lowerPrice;
+        const bot2UpperBelow1 = tickRes2Below1.upperPrice;
+        const bot2LowerBelow2 = tickRes2Below2.lowerPrice;
+        const bot2UpperBelow2 = tickRes2Below2.upperPrice;
+        const bot2LowerAbove1 = tickRes2Above1.lowerPrice;
+        const bot2UpperAbove1 = tickRes2Above1.upperPrice;
+        const bot2LowerAbove2 = tickRes2Above2.lowerPrice;
+        const bot2UpperAbove2 = tickRes2Above2.upperPrice;
+
+        Logger.info(`[Bot2] レンジ構成 (Tick指定配置):`);
+        Logger.info(`  Below2: ${bot2LowerBelow2.toFixed(6)} - ${bot2UpperBelow2.toFixed(6)} (Ticks: [${tickRes2Below2.lowerTick}, ${tickRes2Below2.upperTick}])`);
+        Logger.info(`  Below1: ${bot2LowerBelow1.toFixed(6)} - ${bot2UpperBelow1.toFixed(6)} (Ticks: [${tickRes2Below1.lowerTick}, ${tickRes2Below1.upperTick}])`);
         Logger.info(`  現在価格: ${price2.toFixed(6)}`);
-        Logger.info(`  Above1: ${bot2LowerAbove1.toFixed(6)} - ${bot2UpperAbove1.toFixed(6)}`);
-        Logger.info(`  Above2: ${bot2LowerAbove2.toFixed(6)} - ${bot2UpperAbove2.toFixed(6)}`);
+        Logger.info(`  Above1: ${bot2LowerAbove1.toFixed(6)} - ${bot2UpperAbove1.toFixed(6)} (Ticks: [${tickRes2Above1.lowerTick}, ${tickRes2Above1.upperTick}])`);
+        Logger.info(`  Above2: ${bot2LowerAbove2.toFixed(6)} - ${bot2UpperAbove2.toFixed(6)} (Ticks: [${tickRes2Above2.lowerTick}, ${tickRes2Above2.upperTick}])`);
 
-        // ── Bot2 Below1: SUI 50%を投入（買い指値）──
-        const bot2LpSui1 = Math.min((finalBal3.suiBalance - 0.3) * 0.50, bot2SuiNeeded * 1.02);
-
-        if (bot2LpSui1 > 0.05) {
-          Logger.info(`[Bot2] Below1 LP構築 (レンジ: ${bot2LowerBelow1.toFixed(6)}-${bot2UpperBelow1.toFixed(6)}, SUI: ${bot2LpSui1.toFixed(4)})...`);
-          const lpRes2Below1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow1, bot2UpperBelow1, bot2LpSui1, false);
-          const pos2Below1 = lpRes2Below1.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
-          if (pos2Below1) {
-            allocatedIds2.push(pos2Below1);
-            this.bot2.state.lpPositionIdBelow1 = pos2Below1;
-            this.bot2.state.rangeLowerBelow1 = bot2LowerBelow1;
-            this.bot2.state.rangeUpperBelow1 = bot2UpperBelow1;
-            Logger.success(`[Bot2] ✅ Below1指値LP構築完了: ${pos2Below1}`);
-          }
+        // ── Bot2 Below1: Bot1のSUIポジションと同額を投入 ──
+        const bot2LpSui1 = equalSuiAmount;
+        Logger.info(`[Bot2] Below1 LP構築 (レンジ: ${bot2LowerBelow1.toFixed(6)}-${bot2UpperBelow1.toFixed(6)}, SUI: ${bot2LpSui1.toFixed(4)})...`);
+        const lpRes2Below1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow1, bot2UpperBelow1, bot2LpSui1, false, tickRes2Below1.lowerTick, tickRes2Below1.upperTick);
+        const pos2Below1 = lpRes2Below1.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+        if (pos2Below1) {
+          allocatedIds2.push(pos2Below1);
+          this.bot2.state.lpPositionIdBelow1 = pos2Below1;
+          this.bot2.state.rangeLowerBelow1 = bot2LowerBelow1;
+          this.bot2.state.rangeUpperBelow1 = bot2UpperBelow1;
+          Logger.success(`[Bot2] ✅ Below1指値LP構築完了: ${pos2Below1}`);
         }
 
-        // ── Bot2 Below2: 残りSUIを投入（さらに下の買い指値）──
-        const finalBal3_b2 = await this.bot2.lpManager.checkBalance();
-        const bot2LpSui2 = Math.min((finalBal3_b2.suiBalance - 0.3) * 0.98, bot2SuiNeeded * 1.02);
-
-        if (bot2LpSui2 > 0.05) {
-          Logger.info(`[Bot2] Below2 LP構築 (レンジ: ${bot2LowerBelow2.toFixed(6)}-${bot2UpperBelow2.toFixed(6)}, SUI: ${bot2LpSui2.toFixed(4)})...`);
-          const lpRes2Below2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow2, bot2UpperBelow2, bot2LpSui2, false);
-          const pos2Below2 = lpRes2Below2.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
-          if (pos2Below2) {
-            allocatedIds2.push(pos2Below2);
-            this.bot2.state.lpPositionIdBelow2 = pos2Below2;
-            this.bot2.state.rangeLowerBelow2 = bot2LowerBelow2;
-            this.bot2.state.rangeUpperBelow2 = bot2UpperBelow2;
-            Logger.success(`[Bot2] ✅ Below2指値LP構築完了: ${pos2Below2}`);
-          }
+        // ── Bot2 Below2: 他のSUIポジションと同額を投入 ──
+        const bot2LpSui2 = equalSuiAmount;
+        Logger.info(`[Bot2] Below2 LP構築 (レンジ: ${bot2LowerBelow2.toFixed(6)}-${bot2UpperBelow2.toFixed(6)}, SUI: ${bot2LpSui2.toFixed(4)})...`);
+        const lpRes2Below2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerBelow2, bot2UpperBelow2, bot2LpSui2, false, tickRes2Below2.lowerTick, tickRes2Below2.upperTick);
+        const pos2Below2 = lpRes2Below2.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
+        if (pos2Below2) {
+          allocatedIds2.push(pos2Below2);
+          this.bot2.state.lpPositionIdBelow2 = pos2Below2;
+          this.bot2.state.rangeLowerBelow2 = bot2LowerBelow2;
+          this.bot2.state.rangeUpperBelow2 = bot2UpperBelow2;
+          Logger.success(`[Bot2] ✅ Below2指値LP構築完了: ${pos2Below2}`);
         }
 
-        // ── Bot2 Above1: DEEP 50%を投入（売り指値）──
-        const bot2LpDeep1 = Math.min(finalDeep * 0.50, bot2DeepNeeded * 1.02);
-
+        // ── Bot2 Above1: 均等額のDEEPを投入（売り指値）──
+        const bot2LpDeep1 = equalDeepAmount;
         Logger.info(`[Bot2] Above1 LP構築 (レンジ: ${bot2LowerAbove1.toFixed(6)}-${bot2UpperAbove1.toFixed(6)}, DEEP: ${bot2LpDeep1.toFixed(2)})...`);
-        const lpRes2Above1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove1, bot2UpperAbove1, bot2LpDeep1, true);
+        const lpRes2Above1 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove1, bot2UpperAbove1, bot2LpDeep1, true, tickRes2Above1.lowerTick, tickRes2Above1.upperTick);
         const pos2Above1 = lpRes2Above1.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
         if (pos2Above1) {
           allocatedIds2.push(pos2Above1);
@@ -1008,16 +1086,10 @@ export class Strategy {
           Logger.success(`[Bot2] ✅ Above1指値LP構築完了: ${pos2Above1}`);
         }
 
-        // ── Bot2 Above2: 残りDEEPを投入（さらに上の売り指値）──
-        const finalDeepObj_a2 = await this.bot2.lpManager.suiClient.getBalance({
-          owner: this.bot2.lpManager.getWalletAddress(),
-          coinType: deepCoinType || ''
-        });
-        const finalDeep_a2 = Number(finalDeepObj_a2.totalBalance) / 1e6;
-        const bot2LpDeep2 = Math.min(finalDeep_a2 * 0.98, bot2DeepNeeded * 1.02);
-
+        // ── Bot2 Above2: Above1と同額のDEEPを投入 ──
+        const bot2LpDeep2 = equalDeepAmount;
         Logger.info(`[Bot2] Above2 LP構築 (レンジ: ${bot2LowerAbove2.toFixed(6)}-${bot2UpperAbove2.toFixed(6)}, DEEP: ${bot2LpDeep2.toFixed(2)})...`);
-        const lpRes2Above2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove2, bot2UpperAbove2, bot2LpDeep2, true);
+        const lpRes2Above2 = await this.addLiquidityWithRpcRetry(this.bot2, bot2LowerAbove2, bot2UpperAbove2, bot2LpDeep2, true, tickRes2Above2.lowerTick, tickRes2Above2.upperTick);
         const pos2Above2 = lpRes2Above2.positionId || (await this.bot2.lpManager.getActivePositionIds()).find(id => !allocatedIds1.includes(id) && !allocatedIds2.includes(id));
         if (pos2Above2) {
           allocatedIds2.push(pos2Above2);
@@ -1025,6 +1097,10 @@ export class Strategy {
           this.bot2.state.rangeLowerAbove2 = bot2LowerAbove2;
           this.bot2.state.rangeUpperAbove2 = bot2UpperAbove2;
           Logger.success(`[Bot2] ✅ Above2指値LP構築完了: ${pos2Above2}`);
+        }
+
+        if (allocatedIds1.length !== 4 || allocatedIds2.length !== 4) {
+          throw new Error(`[PHASE_A] 8ポジションの構築を確認できませんでした (Bot1=${allocatedIds1.length}/4, Bot2=${allocatedIds2.length}/4)`);
         }
 
         this.bot1.state.basePrice   = price1;
@@ -1207,8 +1283,16 @@ export class Strategy {
         bot.state.lpPositionIdAbove2
       ].filter(Boolean).length;
       let livePositionsCount = 0;
+      let totalActivePositionsCount = 0;
       try {
-        livePositionsCount = await this.getLiveRangeOrderPositionCount(bot);
+        const status = await this.getRangeOrderPositionStatus(bot);
+        livePositionsCount = status.trackedLiveCount;
+        totalActivePositionsCount = status.activeIds.length;
+        if (status.extraIds.length > 0 || totalActivePositionsCount > 4) {
+          Logger.error(`[${bot.name}] 余剰指値ポジションを検知しました (trackedLive=${livePositionsCount}/4, totalActive=${totalActivePositionsCount}/4, extra=${status.extraIds.join(', ') || 'unknown'})。新規作成を停止して両Botを再構築します。`);
+          await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
+          return;
+        }
       } catch (e: any) {
         Logger.warn(`[${bot.name}] チェーン上の指値ポジション確認に失敗しました。安全側として統合フェーズAで再確認します: ${e.message}`);
         this.markBothBotsForRangeOrderRebuild();
@@ -1221,8 +1305,8 @@ export class Strategy {
         return;
       }
 
-      if (trackedPositionsCount < 4 || livePositionsCount < 4) {
-        Logger.error(`[${bot.name}] 指値ポジションの欠落を検知しました (state=${trackedPositionsCount}/4, live=${livePositionsCount}/4)。常時アクティブ維持のため即座に両Botを再構築します。`);
+      if (trackedPositionsCount < 4 || livePositionsCount < 4 || totalActivePositionsCount !== 4) {
+        Logger.error(`[${bot.name}] 指値ポジション数の不一致を検知しました (state=${trackedPositionsCount}/4, trackedLive=${livePositionsCount}/4, totalActive=${totalActivePositionsCount}/4)。即座に両Botを再構築します。`);
         await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
         return;
       }
@@ -1263,7 +1347,7 @@ export class Strategy {
         rangeUpper = bot.state.basePrice * 1.03;
       }
 
-      Logger.info(`[${bot.name}] 監視中(指値)... 価格=$${price.toFixed(4)}, はみ出し監視レンジ=[$${rangeLower.toFixed(4)} - $${rangeUpper.toFixed(4)}], state=${trackedPositionsCount}/4, live=${livePositionsCount}/4`);
+      Logger.info(`[${bot.name}] 監視中(指値)... 価格=$${price.toFixed(4)}, はみ出し監視レンジ=[$${rangeLower.toFixed(4)} - $${rangeUpper.toFixed(4)}], state=${trackedPositionsCount}/4, trackedLive=${livePositionsCount}/4, totalActive=${totalActivePositionsCount}/4`);
 
       // 3. レンジはみ出し監視 (はみ出したまま一定時間経過したら緊急リバランス)
       if (price < rangeLower || price > rangeUpper) {
@@ -1357,12 +1441,12 @@ export class Strategy {
       }
     }
 
-    // 外側レンジを抜ける前に、その中央で次の外側ポジションを先回りして配置する。
+    // 外側レンジへ入った時点で、次の外側ポジションを先回りして配置する。
     let downRollTrigger = bot.state.rangeLowerBelow2 > 0 && bot.state.rangeUpperBelow2 > 0
-      ? (bot.state.rangeLowerBelow2 + bot.state.rangeUpperBelow2) / 2
+      ? bot.state.rangeUpperBelow2
       : bot.state.rangeUpperBelow1 || 0;
     let upRollTrigger = bot.state.rangeLowerAbove2 > 0 && bot.state.rangeUpperAbove2 > 0
-      ? (bot.state.rangeLowerAbove2 + bot.state.rangeUpperAbove2) / 2
+      ? bot.state.rangeLowerAbove2
       : bot.state.rangeLowerAbove1 || Infinity;
 
     // もし直前のスライドが「下落方向（down）」だった場合：
@@ -1381,9 +1465,9 @@ export class Strategy {
       downRollTrigger = bot.state.rangeLowerBelow1 || 0;
     }
 
-    // ─── 1. Below2中央へ到達した場合 → 下落方向の先回りローリング ───
+    // ─── 1. Below2へ入った場合 → 下落方向の先回りローリング ───
     if (bot.state.lpPositionIdBelow2 && price <= downRollTrigger) {
-      Logger.warn(`[${bot.name}] 🔻 価格が外側Below2の中央へ到達しました。レンジ下抜け前に先回りローリングを実行します。`);
+      Logger.warn(`[${bot.name}] 🔻 価格が外側Below2へ入りました。レンジ下抜け前に先回りローリングを実行します。`);
       Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${downRollTrigger.toFixed(6)}, 外側下限: $${bot.state.rangeLowerBelow2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
 
@@ -1468,7 +1552,9 @@ export class Strategy {
         }
 
         // Step 4: 新しい Below2 を構築（旧 Below2 のさらに 1% 下）
-        const finalUpper = rangeLowerBelow2_prev > 0 ? rangeLowerBelow2_prev : price * (1 - width);
+        // 隣接する Below1 の端点価格と重複しないよう、0.05%（0.0005）のバッファ（隙間）を空けます
+        const baseUpper = rangeLowerBelow2_prev > 0 ? rangeLowerBelow2_prev : price * (1 - width);
+        const finalUpper = baseUpper * 0.9995;
         const newLower   = finalUpper * (1 - width);
 
         let amountToInvest = 0;
@@ -1484,7 +1570,7 @@ export class Strategy {
 
         if (amountToInvest > 0.05) {
           Logger.info(`[${bot.name}] 新 Below2 構築: ${newLower.toFixed(6)} - ${finalUpper.toFixed(6)}, 投資量: ${amountToInvest.toFixed(4)}`);
-          const lpRes = await bot.lpManager.addLiquidity(newLower, finalUpper, amountToInvest, isCoinA);
+          const lpRes = await this.addLiquidityWithRpcRetry(bot, newLower, finalUpper, amountToInvest, isCoinA);
           const activeIds   = await bot.lpManager.getActivePositionIds();
           const allocatedIds = [bot.state.lpPositionIdBelow1, bot.state.lpPositionIdBelow2,
                                 bot.state.lpPositionIdAbove1, bot.state.lpPositionIdAbove2].filter(Boolean) as string[];
@@ -1527,14 +1613,16 @@ export class Strategy {
         return true;
       } catch (e: any) {
         Logger.error(`[${bot.name}] 下落スライドローリング中にエラー: ${e.message}`, e);
+        this.markBothBotsForRangeOrderRebuild();
+        return true;
       } finally {
         this.isRolling[bot.name] = false;
       }
     }
 
-    // ─── 2. Above2中央へ到達した場合 → 上昇方向の先回りローリング ───
+    // ─── 2. Above2へ入った場合 → 上昇方向の先回りローリング ───
     if (bot.state.lpPositionIdAbove2 && price >= upRollTrigger) {
-      Logger.warn(`[${bot.name}] 🔺 価格が外側Above2の中央へ到達しました。レンジ上抜け前に先回りローリングを実行します。`);
+      Logger.warn(`[${bot.name}] 🔺 価格が外側Above2へ入りました。レンジ上抜け前に先回りローリングを実行します。`);
       Logger.warn(`[${bot.name}]    価格: $${price.toFixed(6)}, 発動価格: $${upRollTrigger.toFixed(6)}, 外側上限: $${bot.state.rangeUpperAbove2.toFixed(6)}`);
       this.isRolling[bot.name] = true;
 
@@ -1603,7 +1691,9 @@ export class Strategy {
         }
 
         // Step 4: 新しい Above2 を構築（旧 Above2 のさらに 1% 上）
-        const finalLower = rangeUpperAbove2_prev > 0 ? rangeUpperAbove2_prev : price * (1 + width);
+        // 隣接する Above1 の端点価格と重複しないよう、0.05%（0.0005）のバッファ（隙間）を空けます
+        const baseLower = rangeUpperAbove2_prev > 0 ? rangeUpperAbove2_prev : price * (1 + width);
+        const finalLower = baseLower * 1.0005;
         const newUpper   = finalLower * (1 + width);
 
         let amountToInvest = 0;
@@ -1619,7 +1709,7 @@ export class Strategy {
 
         if (amountToInvest > 0.05) {
           Logger.info(`[${bot.name}] 新 Above2 構築: ${finalLower.toFixed(6)} - ${newUpper.toFixed(6)}, 投資量: ${amountToInvest.toFixed(4)}`);
-          const lpRes = await bot.lpManager.addLiquidity(finalLower, newUpper, amountToInvest, isCoinA);
+          const lpRes = await this.addLiquidityWithRpcRetry(bot, finalLower, newUpper, amountToInvest, isCoinA);
           const activeIds   = await bot.lpManager.getActivePositionIds();
           const allocatedIds = [bot.state.lpPositionIdBelow1, bot.state.lpPositionIdBelow2,
                                 bot.state.lpPositionIdAbove1, bot.state.lpPositionIdAbove2].filter(Boolean) as string[];
@@ -1662,6 +1752,8 @@ export class Strategy {
         return true;
       } catch (e: any) {
         Logger.error(`[${bot.name}] 上昇スライドローリング中にエラー: ${e.message}`, e);
+        this.markBothBotsForRangeOrderRebuild();
+        return true;
       } finally {
         this.isRolling[bot.name] = false;
       }
@@ -2012,6 +2104,21 @@ export class Strategy {
   }
 
   public async getPnlData(currentPrice: number, userWalletAddress?: string) {
+    if (this.pnlDataInFlight && this.pnlDataInFlightWallet === userWalletAddress) {
+      return this.pnlDataInFlight;
+    }
+
+    this.pnlDataInFlightWallet = userWalletAddress;
+    this.pnlDataInFlight = this.calculatePnlData(currentPrice, userWalletAddress);
+    try {
+      return await this.pnlDataInFlight;
+    } finally {
+      this.pnlDataInFlight = null;
+      this.pnlDataInFlightWallet = undefined;
+    }
+  }
+
+  private async calculatePnlData(currentPrice: number, userWalletAddress?: string) {
     const now = Date.now();
     // 15秒間キャッシュを利用する（同一の連携アドレスに対してのみ）
     if (this.lastPnlData && (now - this.lastPnlDataTime < 15000) && (this.lastPnlData.userWalletAddress === userWalletAddress)) {

@@ -9,7 +9,11 @@ import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
 import { Tracker } from './tracker.js';
 import { Logger } from './logger.js';
-import { config as globalConfig, BotConfig } from './config.js';
+import {
+  config as globalConfig,
+  BotConfig,
+  MIN_CETUS_RANGE_WIDTH_PERCENT,
+} from './config.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import * as bip39 from '@scure/bip39';
@@ -42,6 +46,7 @@ export interface UserSession {
 export class SessionManager {
   private static sessions: Map<string, UserSession> = new Map();
   private static hedgeManagers: Map<string, HedgeManager> = new Map();
+  private static sessionCreations: Map<string, Promise<UserSession>> = new Map();
   private static readonly SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24時間
 
   /**
@@ -52,6 +57,38 @@ export class SessionManager {
    * @param poolObjectId 運用対象のプールID（オプション）
    */
   static async createSession(sessionId: string, mnemonic: string | null = null, privateKey: string | null = null, walletAddress: string | null = null, poolObjectId: string | null = null): Promise<UserSession> {
+    let creationKey = sessionId;
+    if (globalConfig.privateKey && globalConfig.privateKey !== 'your_private_key_here') {
+      try {
+        const { secretKey } = globalConfig.privateKey.startsWith('suiprivkey')
+          ? decodeSuiPrivateKey(globalConfig.privateKey)
+          : { secretKey: Buffer.from(globalConfig.privateKey.replace('0x', ''), 'hex') };
+        const masterAddress = Ed25519Keypair.fromSecretKey(secretKey).getPublicKey().toSuiAddress();
+        creationKey = `master-${masterAddress.slice(0, 8)}`;
+      } catch {
+        // The internal creation path will report the key error with full context.
+      }
+    }
+
+    const existing = this.sessions.get(creationKey);
+    if (existing) return existing;
+
+    const inFlight = this.sessionCreations.get(creationKey);
+    if (inFlight) {
+      Logger.info(`[SESSION_SINGLEFLIGHT] Waiting for existing session creation: ${creationKey}`);
+      return inFlight;
+    }
+
+    const creation = this.createSessionInternal(sessionId, mnemonic, privateKey, walletAddress, poolObjectId);
+    this.sessionCreations.set(creationKey, creation);
+    try {
+      return await creation;
+    } finally {
+      this.sessionCreations.delete(creationKey);
+    }
+  }
+
+  private static async createSessionInternal(sessionId: string, mnemonic: string | null = null, privateKey: string | null = null, walletAddress: string | null = null, poolObjectId: string | null = null): Promise<UserSession> {
     Logger.success(`Creating/Restoring session: ${sessionId} (Pool: ${poolObjectId || 'default'})`);
 
     // セッション専用のキーペアを準備
@@ -216,6 +253,12 @@ export class SessionManager {
       sessionConfig.rpcUrl = globalConfig.rpcUrl;
       sessionConfig.rangeOrderWidthPct = savedState.config.rangeOrderWidthPct ?? savedState.config.rangeWidth ?? sessionConfig.rangeOrderWidthPct;
       sessionConfig.rangeWidth = savedState.config.rangeWidth ?? sessionConfig.rangeWidth;
+      const minRangeWidth = MIN_CETUS_RANGE_WIDTH_PERCENT / 100;
+      if (sessionConfig.rangeOrderWidthPct < minRangeWidth || sessionConfig.rangeWidth < minRangeWidth) {
+        Logger.warn(`Session [${targetSessionId}] の保存済みレンジ幅がCetusのtick spacing未満のため、${MIN_CETUS_RANGE_WIDTH_PERCENT}%へ補正します。`);
+        sessionConfig.rangeOrderWidthPct = minRangeWidth;
+        sessionConfig.rangeWidth = minRangeWidth;
+      }
       
       // コンポーネントに反映
       priceMonitor.refreshConfig(sessionConfig);

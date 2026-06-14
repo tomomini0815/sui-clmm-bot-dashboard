@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Eye, EyeOff, Save, X, Zap, Settings as SettingsIcon, Info, Copy, Check, TrendingUp, Wallet } from 'lucide-react';
+import { Eye, EyeOff, Save, X, Zap, Settings as SettingsIcon, Info, Copy, Check, Wallet } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -35,18 +35,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
   const [authError, setAuthError] = useState<string | null>(null);
   const [totalCapital, setTotalCapital] = useState('200');
   const [lpAmount, setLpAmount] = useState('1.0');
-  const [hedgeEnabled, setHedgeEnabled] = useState(true);
 
   // モーダルを開いた時だけ初期値をセットするように変更
   useEffect(() => {
     if (isOpen && currentConfig) {
       setConfigMode(currentConfig.configMode || 'auto');
-      setRangeWidth((currentConfig.rangeWidth * 100).toFixed(1));
+      setRangeWidth((currentConfig.rangeWidth * 100).toFixed(2));
       setHedgeRatio((currentConfig.hedgeRatio * 100).toFixed(0));
       setTotalCapital((currentConfig.totalOperationalCapitalUsdc ?? 200).toString());
       setLpAmount((currentConfig.lpAmountUsdc ?? 1.0).toString());
       setBackupPassword(currentConfig.backupPassword || '');
-      setHedgeEnabled(currentConfig.hedgeEnabled !== false);
     }
   }, [isOpen]); // currentConfig を依存関係から外す
 
@@ -76,7 +74,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
           telegramChatId,
           configMode,
           backupPassword: backupPassword,
-          hedgeEnabled: hedgeEnabled
+          hedgeEnabled: false,
         })
       });
       const data = await response.json();
@@ -341,7 +339,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
               className="input-glass" 
               value={rangeWidth} 
               onChange={(e) => setRangeWidth(e.target.value)} 
-              step="0.1" 
+              min="0.61"
+              max="15"
+              step="0.01"
               disabled={configMode === 'auto'}
               style={{ 
                 opacity: configMode === 'auto' ? 0.4 : 1,
@@ -367,44 +367,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, a
                 fontWeight: 700
               }}
             />
-          </div>
-        </div>
-
-        {/* ヘッジ有効・無効切り替え */}
-        <div className="form-group" style={{ marginBottom: '28px' }}>
-          <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.9rem' }}>
-              <TrendingUp size={16} color="var(--accent)" /> デルタヘッジ (Bluefin) を有効にする
-            </span>
-            <div 
-              onClick={() => setHedgeEnabled(!hedgeEnabled)}
-              style={{
-                width: '50px',
-                height: '26px',
-                background: hedgeEnabled ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
-                borderRadius: '13px',
-                position: 'relative',
-                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                border: '1px solid rgba(255,255,255,0.1)'
-              }}
-            >
-              <div style={{
-                width: '20px',
-                height: '20px',
-                background: 'white',
-                borderRadius: '50%',
-                position: 'absolute',
-                top: '2px',
-                left: hedgeEnabled ? '26px' : '2px',
-                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-                boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
-              }} />
-            </div>
-          </label>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px', paddingLeft: '24px' }}>
-            {hedgeEnabled 
-              ? 'Bluefinでショートポジションを持ち、現物価格の変動リスクを相殺します。' 
-              : 'ヘッジを行わず、LPのみで運用します。価格上昇時には利益が増えますが、下落時のリスクが大きくなります。'}
           </div>
         </div>
 

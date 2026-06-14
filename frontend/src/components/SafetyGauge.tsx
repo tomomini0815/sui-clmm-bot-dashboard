@@ -6,6 +6,7 @@ interface SafetyGaugeProps {
   priceDataAge: number;      // 秒 (60が上限)
   consecutiveErrors: number; // 連続エラー数 (3で停止)
   isEmergency: boolean;
+  noPanel?: boolean;
 }
 
 export function SafetyGauge({
@@ -14,6 +15,7 @@ export function SafetyGauge({
   priceDataAge = 0,
   consecutiveErrors = 0,
   isEmergency = false,
+  noPanel = false,
 }: SafetyGaugeProps) {
   const drawdownWarn = drawdownPct >= 10 && drawdownPct < 15;
   const drawdownDanger = drawdownPct >= 15;
@@ -38,10 +40,10 @@ export function SafetyGauge({
 
   if (isEmergency) {
     return (
-      <div className="glass-panel" style={{
-        border: '1px solid rgba(255, 59, 48, 0.6)',
-        background: 'rgba(255, 59, 48, 0.1)',
-        padding: '16px',
+      <div className={noPanel ? "" : "glass-panel"} style={{
+        border: noPanel ? 'none' : '1px solid rgba(255, 59, 48, 0.6)',
+        background: noPanel ? 'none' : 'rgba(255, 59, 48, 0.1)',
+        padding: noPanel ? '0' : '16px',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--danger)' }}>
           <ShieldAlert size={20} />
@@ -96,7 +98,7 @@ export function SafetyGauge({
   const allSafe = !drawdownDanger && !marginDanger && !ageDanger && !errorDanger;
 
   return (
-    <div className="glass-panel" style={{ padding: '16px' }}>
+    <div className={noPanel ? "" : "glass-panel"} style={noPanel ? {} : { padding: '16px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
         <h3 style={{ fontSize: '0.9rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
           <ShieldAlert size={15} color="var(--accent)" />

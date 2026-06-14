@@ -17,7 +17,12 @@ import { GasTracker } from './gasTracker.js';
 import { PnlEngine } from './pnlEngine.js';
 import { Strategy, CyclePhase } from './strategy.js';
 import { Tracker } from './tracker.js';
-import { config, BotConfig } from './config.js';
+import {
+  config,
+  BotConfig,
+  MIN_CETUS_RANGE_WIDTH_PERCENT,
+  MAX_CETUS_RANGE_WIDTH_PERCENT,
+} from './config.js';
 import { SessionManager } from './sessionManager.js';
 import { globalTxQueue } from './walletTxQueue.js';
 
@@ -27,6 +32,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+function parseCetusRangeWidth(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const percent = Number(value);
+  if (!Number.isFinite(percent) ||
+      percent < MIN_CETUS_RANGE_WIDTH_PERCENT ||
+      percent > MAX_CETUS_RANGE_WIDTH_PERCENT) {
+    throw new RangeError(`Cetusレンジ幅は${MIN_CETUS_RANGE_WIDTH_PERCENT}%〜${MAX_CETUS_RANGE_WIDTH_PERCENT}%で指定してください。`);
+  }
+  return percent / 100;
+}
 
 /**
  * セッション固有の設定を更新し、コンポーネントに反映
@@ -95,13 +111,7 @@ async function bootstrap() {
       Logger.info(`ℹ Auto-resuming most relevant session: ${sessionId} (Running: ${latest.isRunning}, Tracker: ${latest.trackerSize} bytes)`);
       
       const session = await SessionManager.createSession(sessionId);
-      const actualSessionId = session.sessionId; // 確定後のIDを取得
-
-      if (session.strategy.isRunning) {
-        Logger.info(`🚀 [AUTO-RESUME] Starting strategy for session ${actualSessionId}`);
-        session.strategy.isRunning = false;
-        await session.strategy.start();
-      }
+      Logger.info(`[AUTO-RESUME] Session ${session.sessionId} restored; createSession handled strategy startup.`);
 
       // 他の古いセッションはスキップ
       if (sessionFiles.length > 1) {
@@ -298,6 +308,8 @@ app.post('/api/config', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Session not found' });
     }
 
+    const parsedRangeWidth = parseCetusRangeWidth(rangeWidth);
+
     // セッション固有の設定を構築
     const newConfig: BotConfig = {
       ...session.config,
@@ -305,8 +317,8 @@ app.post('/api/config', async (req, res) => {
       hedgeEnabled: (hedgeEnabled !== undefined) ? hedgeEnabled : session.config.hedgeEnabled,
       lpAmountUsdc: parseFloat(lpAmountUsdc) || session.config.lpAmountUsdc,
       totalOperationalCapitalUsdc: parseFloat(totalOperationalCapitalUsdc) || session.config.totalOperationalCapitalUsdc,
-      rangeWidth: (parseFloat(rangeWidth) / 100) || session.config.rangeWidth,
-      rangeOrderWidthPct: (parseFloat(rangeWidth) / 100) || session.config.rangeOrderWidthPct,
+      rangeWidth: parsedRangeWidth ?? session.config.rangeWidth,
+      rangeOrderWidthPct: parsedRangeWidth ?? session.config.rangeOrderWidthPct,
       hedgeRatio: (parseFloat(hedgeRatio) / 100) || session.config.hedgeRatio,
       telegramToken: telegramToken || session.config.telegramToken,
       telegramChatId: telegramChatId || session.config.telegramChatId,
@@ -354,7 +366,7 @@ app.post('/api/config', async (req, res) => {
     res.json({ success: true, message: 'Settings saved and applied to your session.' });
   } catch (e: any) {
     Logger.error('Failed to save config', e);
-    res.status(500).json({ success: false, error: e.message });
+    res.status(e instanceof RangeError ? 400 : 500).json({ success: false, error: e.message });
   }
 });
 
@@ -441,8 +453,9 @@ app.post('/api/rebuild', async (req, res) => {
 
   try {
     // レンジ幅が指定されていれば設定を更新
-    if (rangeWidth) {
-      const newRangeWidth = parseFloat(rangeWidth) / 100;
+    const parsedRangeWidth = parseCetusRangeWidth(rangeWidth);
+    if (parsedRangeWidth !== undefined) {
+      const newRangeWidth = parsedRangeWidth;
       const newConfig = { ...session.config, strategyMode: 'range_order' as const, hedgeEnabled: false, rangeWidth: newRangeWidth, rangeOrderWidthPct: newRangeWidth };
       session.config = newConfig;
       session.strategy.refreshConfig(newConfig);
@@ -451,6 +464,7 @@ app.post('/api/rebuild', async (req, res) => {
 
     // 強制再配置中は通常サイクルを止め、完了後に稼働状態へ戻す
     session.strategy.stop();
+    await session.strategy.waitForIdle();
     const currentPrice = await session.priceMonitor.getCurrentPrice();
     await session.strategy.runRebalance(currentPrice, true);
     await session.strategy.start();
@@ -458,7 +472,7 @@ app.post('/api/rebuild', async (req, res) => {
 
     res.json({ success: true, status: 'running', message: '両ボットの全資金再配置が完了し、Botを起動しました。' });
   } catch (e: any) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(e instanceof RangeError ? 400 : 500).json({ success: false, error: e.message });
   }
 });
 
@@ -476,7 +490,9 @@ app.post('/api/restart-rebuild', async (req, res) => {
   }
 
   try {
-    const newRangeWidth = rangeWidth ? parseFloat(rangeWidth) / 100 : session.config.rangeOrderWidthPct || session.config.rangeWidth;
+    const newRangeWidth = parseCetusRangeWidth(rangeWidth) ??
+      session.config.rangeOrderWidthPct ??
+      session.config.rangeWidth;
     const newConfig = {
       ...session.config,
       strategyMode: 'range_order' as const,
@@ -490,7 +506,7 @@ app.post('/api/restart-rebuild', async (req, res) => {
 
     Logger.info(`[RESTART_REBUILD] Bot再起動と8ポジション再配置を開始します。session=${sessionId}`);
     session.strategy.stop();
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await session.strategy.waitForIdle();
 
     const currentPrice = await session.priceMonitor.getCurrentPrice();
     await session.strategy.runRebalance(currentPrice, true);
@@ -499,7 +515,7 @@ app.post('/api/restart-rebuild', async (req, res) => {
     SessionManager.saveSessionState(sessionId);
     res.json({ success: true, status: 'running', message: 'Botを再起動し、8ポジションの再配置が完了しました。' });
   } catch (e: any) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(e instanceof RangeError ? 400 : 500).json({ success: false, error: e.message });
   }
 });
 
@@ -523,6 +539,51 @@ app.get('/api/stats', async (req, res) => {
     // セッションに紐づくインスタンスから現在のレンジを取得
     const lowerBound = session.strategy.currentLowerBound || 0;
     const upperBound = session.strategy.currentUpperBound || 0;
+
+    // 各Botのポジション範囲（端から端まで）を正しく計算
+    const getOuterBounds = (botState: any) => {
+      if (!botState) return { lower: 0, upper: 0 };
+      
+      // 指値ポジション用のレンジ値だけを抽出
+      const orderLowers = [
+        botState.rangeLowerBelow,
+        botState.rangeLowerAbove,
+        botState.rangeLowerBelow1,
+        botState.rangeLowerBelow2,
+        botState.rangeLowerAbove1,
+        botState.rangeLowerAbove2
+      ].filter((val: any) => typeof val === 'number' && val > 0);
+
+      const orderUppers = [
+        botState.rangeUpperBelow,
+        botState.rangeUpperAbove,
+        botState.rangeUpperBelow1,
+        botState.rangeUpperBelow2,
+        botState.rangeUpperAbove1,
+        botState.rangeUpperAbove2
+      ].filter((val: any) => typeof val === 'number' && val > 0);
+
+      // 指値レンジが存在する場合は、その端から端まで
+      if (orderLowers.length > 0 && orderUppers.length > 0) {
+        return {
+          lower: Math.min(...orderLowers),
+          upper: Math.max(...orderUppers)
+        };
+      }
+
+      // 指値レンジが存在しない場合は、単一の基準レンジ（rangeLower/rangeUpper）を使用
+      return {
+        lower: typeof botState.rangeLower === 'number' && botState.rangeLower > 0 ? botState.rangeLower : 0,
+        upper: typeof botState.rangeUpper === 'number' && botState.rangeUpper > 0 ? botState.rangeUpper : 0
+      };
+    };
+
+    const bot1OuterRange = getOuterBounds(session.strategy.bot1?.state);
+    const bot2OuterRange = getOuterBounds(session.strategy.bot2?.state);
+    const bot2Prices = session.strategy.bot2?.priceMonitor?.getPriceHistory() || [];
+    const bot2CurrentPrice = session.strategy.bot2
+      ? await session.strategy.bot2.priceMonitor.getCurrentPrice().catch(() => 0)
+      : 0;
 
     // 市場状況を判定
     let marketCondition = 'sideways';
@@ -597,10 +658,20 @@ app.get('/api/stats', async (req, res) => {
         network: session.config.rpcUrl.includes('testnet') ? 'testnet' : 'mainnet',
         config: session.config,
         priceHistory: prices,
+        bot2PriceHistory: bot2Prices,
+        bot2CurrentPrice: bot2CurrentPrice > 0 ? Number(bot2CurrentPrice.toFixed(4)) : 0,
         activityLogs: stats.history,
         currentRange: {
           lower: Number(lowerBound.toFixed(4)),
           upper: Number(upperBound.toFixed(4))
+        },
+        bot1OuterRange: {
+          lower: Number(bot1OuterRange.lower.toFixed(6)),
+          upper: Number(bot1OuterRange.upper.toFixed(6))
+        },
+        bot2OuterRange: {
+          lower: Number(bot2OuterRange.lower.toFixed(6)),
+          upper: Number(bot2OuterRange.upper.toFixed(6))
         },
         marketCondition,
         dailyPnl: pnlData?.pnl?.dailyPnl?.toFixed(4) || '0.00',
