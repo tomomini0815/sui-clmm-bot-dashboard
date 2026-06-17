@@ -55,4 +55,5 @@ logs/
 bot_v2/backend.log
 bot_v2/backup_sessions/
 bot_v2/state/
-
+bot_v2/test_response*.json
+get_positions_cetus.ts
