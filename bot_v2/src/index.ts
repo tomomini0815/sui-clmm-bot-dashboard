@@ -36,6 +36,42 @@ app.use(express.json());
 const rebuildLocks = new Set<string>();
 const lastRebuildCompletedAt = new Map<string, number>();
 const REBUILD_COOLDOWN_MS = 15 * 60 * 1000;
+const USD_JPY_CACHE_MS = 6 * 60 * 60 * 1000;
+let cachedUsdJpyRate = 0;
+let usdJpyFetchedAt = 0;
+let usdJpyInFlight: Promise<number> | null = null;
+
+async function getUsdJpyRate(): Promise<number> {
+  if (cachedUsdJpyRate > 0 && Date.now() - usdJpyFetchedAt < USD_JPY_CACHE_MS) {
+    return cachedUsdJpyRate;
+  }
+  if (usdJpyInFlight) return usdJpyInFlight;
+
+  usdJpyInFlight = (async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch('https://api.frankfurter.dev/v1/latest?base=USD&symbols=JPY', {
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json() as { rates?: { JPY?: number } };
+      const rate = Number(data.rates?.JPY);
+      if (!Number.isFinite(rate) || rate <= 0) throw new Error('Invalid USD/JPY rate');
+      cachedUsdJpyRate = rate;
+      usdJpyFetchedAt = Date.now();
+      return rate;
+    } catch (error: any) {
+      Logger.warn(`USD/JPY rate fetch failed: ${error.message}`);
+      return cachedUsdJpyRate;
+    } finally {
+      clearTimeout(timeoutId);
+      usdJpyInFlight = null;
+    }
+  })();
+
+  return usdJpyInFlight;
+}
 
 function beginRebuild(sessionId: string, res: express.Response): boolean {
   if (rebuildLocks.has(sessionId)) {
@@ -661,6 +697,7 @@ app.get('/api/stats', async (req, res) => {
     } catch (e: any) {
       // silent
     }
+    const usdJpyRate = await getUsdJpyRate();
 
     // === PnL/Delta/Gas データ ===
     let currentPrice = prices.length > 0 ? prices[prices.length - 1].price : 0;
@@ -700,6 +737,8 @@ app.get('/api/stats', async (req, res) => {
         isRunning: session.strategy.isRunning,
         isUnbalanced,
         currentPrice: currentPrice,
+        usdJpyRate,
+        suiJpyPrice: currentPrice > 0 && usdJpyRate > 0 ? currentPrice * usdJpyRate : 0,
         ...pnlData,
         currentPhase: session.strategy.currentPhase,
         botWalletAddress: session.botWalletAddress,

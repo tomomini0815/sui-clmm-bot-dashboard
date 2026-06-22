@@ -12,6 +12,9 @@ export interface TrackerData {
   currentPrice: number;
   positionSize: number;
   successfulRebalances: number;
+  coinInitialAssetsSui?: number;
+  latestCoinStats?: CoinStats;
+  coinStatsHistory?: CoinStats[];
   balanceHistory: Array<{
     timestamp: string;
     suiBalance: number;
@@ -32,6 +35,21 @@ export interface TrackerData {
   }>;
 }
 
+export interface CoinStats {
+  timestamp: string;
+  totalAssetsSui: number;
+  netPnlSui: number;
+  pnl24hSui: number;
+  pnl24hPct: number;
+  netYieldSui: number;
+  bot1LpValue: number;
+  bot2LpValue: number;
+  botWalletBalanceSui: number;
+  botWalletBalanceUsdc: number;
+  feesCollected: number;
+  gasSpent: number;
+}
+
 export class Tracker {
   private data: TrackerData = {
     rebalanceCount: 0,
@@ -41,6 +59,7 @@ export class Tracker {
     currentPrice: 0,
     positionSize: 0,
     successfulRebalances: 0,
+    coinStatsHistory: [],
     balanceHistory: [],
     history: [],
   };
@@ -63,6 +82,9 @@ export class Tracker {
       // バランス履歴のマイグレーション
       if (!this.data.balanceHistory) {
         this.data.balanceHistory = [];
+      }
+      if (!this.data.coinStatsHistory) {
+        this.data.coinStatsHistory = [];
       }
       
       Logger.info(`Tracker initialized for session ${this.sessionId}`);
@@ -210,15 +232,51 @@ export class Tracker {
   /**
    * 価格とPnLの定期的更新（1分以上の間隔で自動保存）
    */
-  async update(price: number, pnl: number) {
+  async update(price: number, pnl: number, coinValues?: Omit<CoinStats, 'timestamp' | 'netPnlSui' | 'pnl24hSui' | 'pnl24hPct'>) {
     this.data.currentPrice = price;
     this.data.pnlTotal = pnl; // ストラテジーから渡された最新の純利益（LP + ヘッジ + 手数料）を反映
-    
+
     const now = Date.now();
+    if (coinValues) {
+      if (!this.data.coinInitialAssetsSui || this.data.coinInitialAssetsSui <= 0) {
+        const legacyPnlSui = price > 0 ? this.data.pnlTotal / price : 0;
+        this.data.coinInitialAssetsSui = coinValues.totalAssetsSui - legacyPnlSui;
+      }
+
+      const history = this.data.coinStatsHistory || [];
+      const cutoff = now - 24 * 60 * 60 * 1000;
+      const baseline = history.find(item => new Date(item.timestamp).getTime() >= cutoff) || history[0];
+      const pnl24hSui = baseline ? coinValues.totalAssetsSui - baseline.totalAssetsSui : 0;
+      const pnl24hPct = baseline?.totalAssetsSui
+        ? (pnl24hSui / baseline.totalAssetsSui) * 100
+        : 0;
+
+      const latest: CoinStats = {
+        ...coinValues,
+        timestamp: new Date(now).toISOString(),
+        netPnlSui: coinValues.totalAssetsSui - this.data.coinInitialAssetsSui,
+        pnl24hSui,
+        pnl24hPct,
+      };
+      this.data.latestCoinStats = latest;
+
+      const lastTimestamp = history.length > 0
+        ? new Date(history[history.length - 1].timestamp).getTime()
+        : 0;
+      if (now - lastTimestamp >= this.BALANCE_SNAPSHOT_INTERVAL_MS) {
+        history.push(latest);
+      }
+      this.data.coinStatsHistory = history.filter(item => new Date(item.timestamp).getTime() >= now - 8 * 24 * 60 * 60 * 1000);
+    }
+
     if (now - this.lastSaveTime > this.SAVE_INTERVAL_MS) {
       await this.save();
       this.lastSaveTime = now;
     }
+  }
+
+  getLatestCoinStats(): CoinStats | null {
+    return this.data.latestCoinStats ? { ...this.data.latestCoinStats } : null;
   }
 
   /**
@@ -332,7 +390,8 @@ export class Tracker {
     this.data = {
       ...this.data,
       ...data,
-      history: data.history || this.data.history
+      history: data.history || this.data.history,
+      coinStatsHistory: data.coinStatsHistory || this.data.coinStatsHistory || []
     };
     Logger.info(`Tracker data restored (Rebalances: ${this.data.rebalanceCount})`);
   }

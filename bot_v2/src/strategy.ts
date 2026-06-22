@@ -2143,17 +2143,25 @@ export class Strategy {
     }
 
     if (!this.isRunning) {
-      if (this.lastPnlData && this.lastPnlData.userWalletAddress === userWalletAddress) {
-        return { ...this.lastPnlData.data, isStopped: true };
+      const saved = this.tracker.getLatestCoinStats();
+      if (saved) {
+        return {
+          isStopped: true,
+          pnl: {
+            ...saved,
+            netPnl: this.tracker.getStats().totalPnl,
+            dailyPnl: saved.pnl24hSui,
+          },
+          dailySnapshots: []
+        };
       }
-      const hedgeStatus = this.hedgeManager.getStatus(currentPrice);
       return {
         isStopped: true,
         pnl: {
           netPnl: 0,
           dailyPnl: 0,
           lpPnl: 0,
-          hedgePnl: hedgeStatus.cumulativePnl + hedgeStatus.currentPnl,
+          hedgePnl: 0,
           feesCollected: 0,
           gasSpent: this.gasTracker.getStats().totalGasUsdc || 0,
           botWalletBalanceSui: 0,
@@ -2165,13 +2173,6 @@ export class Strategy {
           userWalletBalanceUsdc: 0,
           userWalletSufficient: false,
         },
-        delta: {
-          hedgeActive: hedgeStatus.active,
-          hedgeSize: hedgeStatus.size,
-          direction: hedgeStatus.direction,
-          lpSuiAmount: 0,
-        },
-        hedge: hedgeStatus,
         dailySnapshots: []
       };
     }
@@ -2287,14 +2288,28 @@ export class Strategy {
 
     const balance = await this.bot1.lpManager.checkBalance();
 
-    // 動的な純利益 (Net P&L) の計算
+    // 動的な純利益 (Net P&L) の計算。ヘッジ口座は集計対象外。
     const botSuiUsdValue = balance.suiBalance * priceSuiUsdc;
-    const currentTotalCapital = lpValue1 + lpValue2 + (hedgeStatus?.marginBalance || 0) + balance.usdcBalance + botSuiUsdValue;
+    // KPIはヘッジ口座を含めず、すべてSUI建てで集計する。
+    const currentTotalCapital = lpValue1 + lpValue2 + balance.usdcBalance + botSuiUsdValue;
     const initialCapital = this.config.totalOperationalCapitalUsdc || 200;
     const actualNetPnl = currentTotalCapital - initialCapital;
 
+    const totalAssetsSui = priceSuiUsdc > 0 ? currentTotalCapital / priceSuiUsdc : 0;
+    const netYieldSui = priceSuiUsdc > 0 ? (totalFeesNum - gasSpentNum) / priceSuiUsdc : 0;
+
     // トラッカーを最新の計算値で更新（非同期）
-    this.tracker.update(currentPrice, actualNetPnl).catch((e) => Logger.error('Failed to update tracker PnL', e));
+    await this.tracker.update(currentPrice, actualNetPnl, {
+      totalAssetsSui,
+      netYieldSui,
+      bot1LpValue: lpValue1,
+      bot2LpValue: lpValue2,
+      botWalletBalanceSui: balance.suiBalance,
+      botWalletBalanceUsdc: balance.usdcBalance,
+      feesCollected: totalFeesNum,
+      gasSpent: gasSpentNum,
+    });
+    const coinStats = this.tracker.getLatestCoinStats();
 
     const totalPnlNum = actualNetPnl;
 
@@ -2327,6 +2342,7 @@ export class Strategy {
         userWalletBalanceSui: userBalance.suiBalance,
         userWalletBalanceUsdc: userBalance.usdcBalance,
         userWalletSufficient: userBalance.sufficient,
+        ...(coinStats || {}),
       },
       delta: {
         hedgeActive: hedgeStatus.active,

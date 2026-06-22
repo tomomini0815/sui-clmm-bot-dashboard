@@ -133,6 +133,8 @@ function App() {
     entryPrice: 0,
     positionSize: 0,
     dailyPnl: '0.00',
+    usdJpyRate: 0 as number,
+    suiJpyPrice: 0 as number,
     winRate: '0',
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
@@ -378,11 +380,23 @@ function App() {
   };
 
   // 計算済み値
-  const netPnl = stats.pnl?.netPnl ?? 0;
-  const totalLpValue = (stats.pnl?.bot1LpValue || 0) + (stats.pnl?.bot2LpValue || 0);
   const safetyHealthy = !stats.safetyGates?.isEmergency && (stats.safetyGates?.consecutiveErrors ?? 0) < 3;
   const phaseLabel = stats.currentPhase || (isBotActive ? '運用監視中' : '待機中');
-  const fees = stats.pnl?.fees ?? (stats.pnl as any)?.feesCollected ?? 0;
+  const rangeCandidates = [
+    stats.bot1OuterRange?.lower > 0 && stats.currentPrice > 0
+      ? { distance: Math.abs(stats.currentPrice - stats.bot1OuterRange.lower) / stats.currentPrice * 100, direction: 'Bot1下限' }
+      : null,
+    stats.bot1OuterRange?.upper > 0 && stats.currentPrice > 0
+      ? { distance: Math.abs(stats.bot1OuterRange.upper - stats.currentPrice) / stats.currentPrice * 100, direction: 'Bot1上限' }
+      : null,
+    stats.bot2OuterRange?.lower > 0 && stats.bot2CurrentPrice > 0
+      ? { distance: Math.abs(stats.bot2CurrentPrice - stats.bot2OuterRange.lower) / stats.bot2CurrentPrice * 100, direction: 'Bot2下限' }
+      : null,
+    stats.bot2OuterRange?.upper > 0 && stats.bot2CurrentPrice > 0
+      ? { distance: Math.abs(stats.bot2OuterRange.upper - stats.bot2CurrentPrice) / stats.bot2CurrentPrice * 100, direction: 'Bot2上限' }
+      : null,
+  ].filter((item): item is { distance: number; direction: string } => item !== null);
+  const nearestRange = rangeCandidates.sort((a, b) => a.distance - b.distance)[0] || null;
 
   // トレンドバッジ
   const trendClass = stats.marketCondition === 'uptrend' ? 'up' : stats.marketCondition === 'downtrend' ? 'down' : 'neutral';
@@ -529,15 +543,13 @@ function App() {
 
       {/* ======= KPI バー ======= */}
       <KpiBar
-        totalLpValue={totalLpValue}
-        netPnl={netPnl}
-        totalRebalances={stats.totalRebalances}
-        marketCondition={stats.marketCondition}
-        estimatedApr={stats.estimatedApr}
-        fees={fees}
+        totalAssetsSui={stats.pnl?.totalAssetsSui ?? 0}
+        netPnlSui={stats.pnl?.netPnlSui ?? 0}
+        rangeDistancePct={nearestRange?.distance ?? null}
+        rangeDirection={nearestRange?.direction ?? ''}
+        netYieldSui={stats.pnl?.netYieldSui ?? 0}
+        suiJpyPrice={stats.suiJpyPrice}
         isBotActive={isBotActive}
-        currentPrice={stats.currentPrice}
-        pythPrice={stats.pythPrice}
       />
 
       {/* ======= メインコンテンツ ======= */}

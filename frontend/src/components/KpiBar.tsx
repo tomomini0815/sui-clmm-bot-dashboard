@@ -1,50 +1,44 @@
-import { TrendingUp, TrendingDown, Minus, RotateCw, Layers, Sparkles } from 'lucide-react';
+import { TrendingUp, TrendingDown, Gauge, Layers, Sparkles, Coins } from 'lucide-react';
 
 interface KpiBarProps {
-  totalLpValue: number;
-  netPnl: number;
-  totalRebalances: number;
-  marketCondition: string;
-  estimatedApr: number;
-  fees: number;
+  totalAssetsSui: number;
+  netPnlSui: number;
+  rangeDistancePct: number | null;
+  rangeDirection: string;
+  netYieldSui: number;
+  suiJpyPrice: number;
   isBotActive: boolean;
-  currentPrice: number;
-  pythPrice: number | null;
 }
 
-const MarketIcon = ({ condition }: { condition: string }) => {
-  if (condition === 'uptrend') return <TrendingUp size={18} />;
-  if (condition === 'downtrend') return <TrendingDown size={18} />;
-  return <Minus size={18} />;
-};
-
-const marketLabel: Record<string, { label: string; color: string; bg: string }> = {
-  uptrend:   { label: '上昇トレンド', color: '#3fb950', bg: 'rgba(63,185,80,0.12)' },
-  downtrend: { label: '下降トレンド', color: '#f85149', bg: 'rgba(248,81,73,0.12)' },
-  sideways:  { label: 'レンジ相場',   color: '#58a6ff', bg: 'rgba(88,166,255,0.12)' },
-};
-
 export const KpiBar = ({
-  totalLpValue,
-  netPnl,
-  totalRebalances,
-  marketCondition,
-  estimatedApr,
-  fees,
+  totalAssetsSui,
+  netPnlSui,
+  rangeDistancePct,
+  rangeDirection,
+  netYieldSui,
+  suiJpyPrice,
   isBotActive,
-  currentPrice,
-  pythPrice,
 }: KpiBarProps) => {
-  const market = marketLabel[marketCondition] ?? marketLabel.sideways;
-  const isProfit = netPnl >= 0;
+  const isProfit = netPnlSui >= 0;
+  const isYieldPositive = netYieldSui >= 0;
+  const formatJpy = (suiAmount: number, showSign = false) => {
+    if (suiJpyPrice <= 0) return '円換算取得中...';
+    const value = Math.round(suiAmount * suiJpyPrice);
+    const formatted = new Intl.NumberFormat('ja-JP', {
+      style: 'currency',
+      currency: 'JPY',
+      maximumFractionDigits: 0,
+    }).format(Math.abs(value));
+    return `${showSign ? (value >= 0 ? '+' : '-') : ''}${formatted}`;
+  };
 
   const kpis = [
     {
-      id: 'lp-value',
+      id: 'total-assets',
       icon: <Layers size={20} />,
-      label: 'LP 評価額',
-      value: `$${totalLpValue.toFixed(2)}`,
-      sub: currentPrice > 0 ? `現在価格 ${currentPrice.toFixed(4)} USDC` : '価格取得中...',
+      label: '総運用資産',
+      value: `${totalAssetsSui.toFixed(4)} SUI`,
+      sub: `${formatJpy(totalAssetsSui)} / LP・待機資金`,
       accent: '#58a6ff',
       bg: 'rgba(88,166,255,0.07)',
       border: 'rgba(88,166,255,0.18)',
@@ -53,35 +47,35 @@ export const KpiBar = ({
     {
       id: 'net-pnl',
       icon: isProfit ? <TrendingUp size={20} /> : <TrendingDown size={20} />,
-      label: '純利益 (Net P&L)',
-      value: `${isProfit ? '+' : ''}$${netPnl.toFixed(4)}`,
-      sub: `手数料累計 +$${fees.toFixed(4)}`,
+      label: '資産増減（運用開始比）',
+      value: `${isProfit ? '+' : ''}${netPnlSui.toFixed(4)} SUI`,
+      sub: `${formatJpy(netPnlSui, true)} / LP評価変動などを含む`,
       accent: isProfit ? '#3fb950' : '#f85149',
       bg: isProfit ? 'rgba(63,185,80,0.07)' : 'rgba(248,81,73,0.07)',
       border: isProfit ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)',
       glow: isProfit ? 'rgba(63,185,80,0.15)' : 'rgba(248,81,73,0.15)',
     },
     {
-      id: 'rebalances',
-      icon: <RotateCw size={20} />,
-      label: 'リバランス回数',
-      value: `${totalRebalances}回`,
-      sub: estimatedApr > 0 ? `推定 APR ${estimatedApr.toFixed(1)}%` : 'APR 計算中...',
+      id: 'range-distance',
+      icon: <Gauge size={20} />,
+      label: 'レンジ余裕度',
+      value: rangeDistancePct === null ? '計算中...' : `${rangeDistancePct.toFixed(2)}%`,
+      sub: rangeDistancePct === null ? '有効レンジ待機中' : `${rangeDirection}までの距離`,
       accent: '#d29922',
       bg: 'rgba(210,153,34,0.07)',
       border: 'rgba(210,153,34,0.18)',
       glow: 'rgba(210,153,34,0.15)',
     },
     {
-      id: 'market',
-      icon: <MarketIcon condition={marketCondition} />,
-      label: '市場状況',
-      value: market.label,
-      sub: pythPrice ? `Pyth Oracle ${pythPrice.toFixed(4)}` : (isBotActive ? 'Bot稼働中' : 'Bot停止中'),
-      accent: market.color,
-      bg: market.bg,
-      border: market.color.replace('rgb', 'rgba').replace(')', ',0.22)').replace('#3fb950', 'rgba(63,185,80,0.18)').replace('#f85149', 'rgba(248,81,73,0.18)').replace('#58a6ff', 'rgba(88,166,255,0.18)'),
-      glow: market.bg,
+      id: 'net-yield',
+      icon: <Coins size={20} />,
+      label: '手数料収支',
+      value: `${isYieldPositive ? '+' : ''}${netYieldSui.toFixed(4)} SUI`,
+      sub: `${formatJpy(netYieldSui, true)} / 回収手数料 - ガス代`,
+      accent: isYieldPositive ? '#3fb950' : '#f85149',
+      bg: isYieldPositive ? 'rgba(63,185,80,0.07)' : 'rgba(248,81,73,0.07)',
+      border: isYieldPositive ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)',
+      glow: isYieldPositive ? 'rgba(63,185,80,0.15)' : 'rgba(248,81,73,0.15)',
     },
   ];
 
@@ -115,7 +109,7 @@ export const KpiBar = ({
           </div>
           <div className="kpi-sub">{kpi.sub}</div>
           {/* Sparkle accent for active bot */}
-          {isBotActive && kpi.id === 'lp-value' && (
+          {isBotActive && kpi.id === 'total-assets' && (
             <div className="kpi-active-badge">
               <Sparkles size={10} />
               稼働中
