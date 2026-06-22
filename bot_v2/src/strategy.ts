@@ -865,43 +865,57 @@ export class Strategy {
 
         Logger.info(`[PHASE_A] 資産別目標: Bot1 USDC=$${(bot1UsdcNeeded * 2).toFixed(2)} | Bot2 DEEP=${(bot2DeepNeeded * 2).toFixed(2)} | 残りをSUIへ配分`);
 
-        // 1. DEEP残高の調整 (目標の 50% = 2倍が必要)
-        const totalDeepNeeded = bot2DeepNeeded * 2.0;
+        // ── 最低限のスワップ補充判定 ──
         let didSwap = false;
-        if (deepBalance > totalDeepNeeded + 1.0) {
-          const deepToSell = deepBalance - totalDeepNeeded;
-          Logger.info(`[PHASE_A] 余剰DEEPを売却します: ${deepToSell.toFixed(2)} DEEP -> SUI`);
-          await this.bot2.swapManager.swapDeepToSui(deepToSell);
-          didSwap = true;
-        } else if (deepBalance < totalDeepNeeded - 1.0) {
-          const deepToBuy = totalDeepNeeded - deepBalance;
-          const preBal = await this.bot1.lpManager.checkBalance();
-          const suiToSwap = Math.min(deepToBuy * price2, Math.max(0, preBal.suiBalance - 1.0));
-          if (suiToSwap > 0.05) {
-            Logger.info(`[PHASE_A] 不足DEEPを補うため SUIをスワップします: ${suiToSwap.toFixed(4)} SUI -> DEEP`);
-            await this.bot2.swapManager.swapSuiToDeep(suiToSwap);
+        
+        // 1. SUI の不足補充 (ガス代 0.3 SUI + 最小必要 2.0 SUI = 計 2.3 SUI)
+        const MIN_SUI_REQUIRED = 2.0;
+        const SUI_RESERVING = GAS_RESERVE + MIN_SUI_REQUIRED;
+        if (suiBalance < SUI_RESERVING) {
+          const suiShortfall = SUI_RESERVING - suiBalance;
+          if (usdcBalance > suiShortfall * price1 + 1.0) {
+            const usdcToSwap = suiShortfall * price1 * 1.05;
+            Logger.info(`[PHASE_A] SUI残高極小のため USDC $${usdcToSwap.toFixed(2)} -> SUI スワップ補充します...`);
+            await this.bot1.swapManager.swapUsdcToSui(usdcToSwap);
+            didSwap = true;
+          } else if (deepBalance > (suiShortfall * price1) / (price2 * price1) + 10.0) {
+            const deepToSwap = (suiShortfall * price1 * 1.05) / (price2 * price1);
+            Logger.info(`[PHASE_A] SUI残高極小のため ${deepToSwap.toFixed(2)} DEEP -> SUI スワップ補充します...`);
+            await this.bot2.swapManager.swapDeepToSui(deepToSwap);
             didSwap = true;
           }
         }
 
         // 最新残高を更新
         let currentBal = await this.bot1.lpManager.checkBalance();
+        let currentDeepObj = await this.bot1.lpManager.suiClient.getBalance({
+          owner: this.bot1.lpManager.getWalletAddress(),
+          coinType: deepCoinType || ''
+        });
+        let currentDeep = Number(currentDeepObj.totalBalance) / 1e6;
 
-        // 2. USDC残高の調整 (目標の 50% = 2倍が必要)
-        const totalUsdcNeeded = bot1UsdcNeeded * 2.0;
-        if (currentBal.usdcBalance > totalUsdcNeeded + 0.1) {
-          const usdcToSell = currentBal.usdcBalance - totalUsdcNeeded;
-          if (usdcToSell > 0.1) {
-            Logger.info(`[PHASE_A] 余剰USDCを売却します: ${usdcToSell.toFixed(2)} USDC -> SUI`);
-            await this.bot1.swapManager.swapUsdcToSui(usdcToSell);
+        // 2. USDC の不足補充 (最小必要 1.0 USDC)
+        const MIN_USDC_REQUIRED = 1.0;
+        if (currentBal.usdcBalance < MIN_USDC_REQUIRED) {
+          const usdcShortfall = MIN_USDC_REQUIRED - currentBal.usdcBalance;
+          const usableSui = currentBal.suiBalance - GAS_RESERVE;
+          const suiToSwap = Math.min((usdcShortfall / price1) * 1.05, Math.max(0, usableSui - 1.0));
+          if (suiToSwap > 0.05) {
+            Logger.info(`[PHASE_A] USDC不足のため SUI ${suiToSwap.toFixed(4)} -> USDC スワップ補充します...`);
+            await this.bot1.swapManager.swapSuiToUsdc(suiToSwap);
             didSwap = true;
           }
-        } else if (currentBal.usdcBalance < totalUsdcNeeded - 0.1) {
-          const usdcToBuy = totalUsdcNeeded - currentBal.usdcBalance;
-          const suiToSell = Math.min(usdcToBuy / price1, Math.max(0, currentBal.suiBalance - 1.0));
-          if (suiToSell > 0.05) {
-            Logger.info(`[PHASE_A] 不足USDCを補うため SUIを売却します: ${suiToSell.toFixed(4)} SUI -> USDC`);
-            await this.bot1.swapManager.swapSuiToUsdc(suiToSell);
+        }
+
+        // 3. DEEP の不足補充 (最小必要 5.0 DEEP)
+        const MIN_DEEP_REQUIRED = 5.0;
+        if (currentDeep < MIN_DEEP_REQUIRED) {
+          const deepShortfall = MIN_DEEP_REQUIRED - currentDeep;
+          const usableSui = (await this.bot1.lpManager.checkBalance()).suiBalance - GAS_RESERVE;
+          const suiToSwap = Math.min((deepShortfall * price2) * 1.05, Math.max(0, usableSui - 1.0));
+          if (suiToSwap > 0.05) {
+            Logger.info(`[PHASE_A] DEEP不足のため SUI ${suiToSwap.toFixed(4)} -> DEEP スワップ補充します...`);
+            await this.bot2.swapManager.swapSuiToDeep(suiToSwap);
             didSwap = true;
           }
         }
@@ -910,6 +924,7 @@ export class Strategy {
           Logger.info(`[PHASE_A] ⏳ スワップ後の残高反映を待機します (3秒)...`);
           await this.sleep(3000);
         }
+
 
         // 最新の残高でLPを構築
         const finalBal = await this.bot1.lpManager.checkBalance();
@@ -1316,12 +1331,25 @@ export class Strategy {
       }
 
       if (trackedPositionsCount < 4 || livePositionsCount < 4 || totalActivePositionsCount !== 4) {
-        Logger.error(`[${bot.name}] 指値ポジション数の不一致を検知しました (state=${trackedPositionsCount}/4, trackedLive=${livePositionsCount}/4, totalActive=${totalActivePositionsCount}/4)。即座に両Botを再構築します。`);
-        await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
-        return;
+        if (!bot.state.missingPositionsStartAt) {
+          bot.state.missingPositionsStartAt = Date.now();
+          Logger.warn(`[${bot.name}] 指値ポジション数の不一致を検知しました (state=${trackedPositionsCount}/4, trackedLive=${livePositionsCount}/4, totalActive=${totalActivePositionsCount}/4)。再配置の猶予タイマーを開始します。`);
+          return;
+        } else {
+          const elapsedMs = Date.now() - bot.state.missingPositionsStartAt;
+          const graceLimitMs = 60000;
+          const elapsedSec = (elapsedMs / 1000).toFixed(1);
+          Logger.warn(`[${bot.name}] 指値ポジションの不一致が継続中: ${elapsedSec}秒 / ${graceLimitMs / 1000}秒`);
+          if (elapsedMs >= graceLimitMs) {
+            Logger.error(`[${bot.name}] 指値ポジション数の不一致が設定時間（${graceLimitMs / 1000}秒）以上継続したため、両Botを再構築します。`);
+            await this.rebuildAllRangeOrderPositionsForSurge(price, 0);
+            return;
+          }
+          return;
+        }
       }
 
-      if (trackedPositionsCount === 4 && livePositionsCount === 4) {
+      if (trackedPositionsCount === 4 && livePositionsCount === 4 && totalActivePositionsCount === 4) {
         if (bot.state.missingPositionsStartAt) {
           Logger.info(`[${bot.name}] ポジション数が正常(4/4)に戻りました。欠落タイマーをリセットします。`);
           bot.state.missingPositionsStartAt = undefined;
@@ -1453,19 +1481,17 @@ export class Strategy {
       : bot.state.rangeLowerAbove1 || Infinity;
 
     // もし直前のスライドが「下落方向（down）」だった場合：
-    // 現在価格は新 Above1 (旧 Below1) の中にいるはず。
-    // 上昇スライド（逆方向）のトリガーをしきい値の上限（rangeUpperAbove1）に引き上げる。
-    // これにより、完全に中央に戻る（または上抜ける）まで上昇スライドを抑制する。
+    // 価格が中央安全エリアに戻ってロックが解除（lastSlideDirection === null）されるまで、
+    // 上昇スライド（逆方向）を完全に無効化（Trigger = Infinity）してチャタリングを防ぎます。
     if (bot.state.lastSlideDirection === 'down') {
-      upRollTrigger = bot.state.rangeUpperAbove1 || Infinity;
+      upRollTrigger = Infinity;
     }
 
     // もし直前のスライドが「上昇方向（up）」だった場合：
-    // 現在価格は新 Below1 (旧 Above1) の中にいるはず。
-    // 下落スライド（逆方向）のトリガーをしきい値の下限（rangeLowerBelow1）に引き下げる。
-    // これにより、完全に中央に戻る（または下抜ける）まで下落スライドを抑制する。
+    // 価格が中央安全エリアに戻ってロックが解除されるまで、
+    // 下落スライド（逆方向）を完全に無効化（Trigger = 0）してチャタリングを防ぎます。
     if (bot.state.lastSlideDirection === 'up') {
-      downRollTrigger = bot.state.rangeLowerBelow1 || 0;
+      downRollTrigger = 0;
     }
 
     // ─── 1. Below2へ入った場合 → 下落方向の先回りローリング ───
