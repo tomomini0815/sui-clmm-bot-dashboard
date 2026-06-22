@@ -96,7 +96,7 @@ body {
   border-radius: 16px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
   transition: all 0.25s ease;
-  padding: 24px;
+  padding: 18px;
   position: relative;
 }
 
@@ -182,12 +182,12 @@ button.primary-btn:active {
 .dashboard-container {
   max-width: 1600px;
   margin: 0 auto;
-  padding: 48px 32px;
+  padding: 24px 20px;
 }
 
 @media (max-width: 768px) {
   .dashboard-container {
-    padding: 24px 16px;
+    padding: 16px 12px;
   }
 }
 
@@ -306,7 +306,7 @@ button.primary-btn:active {
 .sidebar-aside {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 
 .main-content {
@@ -314,7 +314,7 @@ button.primary-btn:active {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 
 /* Stats Grid */
@@ -332,7 +332,7 @@ button.primary-btn:active {
   grid-template-areas: 
     "main"
     "sidebar";
-  gap: 24px;
+  gap: 16px;
 }
 
 @media (min-width: 1024px) {
@@ -358,7 +358,7 @@ button.primary-btn:active {
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 24px;
+  gap: 16px;
   margin-bottom: 0;
 }
 
@@ -773,19 +773,19 @@ button.primary-btn:active {
 .pnl-negative { color: var(--danger); font-weight: 600; }
 
 .dashboard-container {
-  padding: 24px;
+  padding: 20px;
   max-width: 1400px;
   margin: 0 auto;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 16px;
 }
 
 .dashboard-main-content {
   display: grid;
   grid-template-columns: 1fr 340px;
-  gap: 24px;
+  gap: 16px;
 }
 
 @media (max-width: 1100px) {
@@ -1468,7 +1468,7 @@ button.primary-btn:active {
 
 @media (max-width: 768px) {
   .dashboard-container {
-    padding: 24px 16px;
+    padding: 16px 12px;
   }
 
   .header {
@@ -1560,7 +1560,7 @@ button.primary-btn:active {
 @media (min-width: 1400px) {
   .dashboard-container {
     max-width: 1800px;
-    padding: 48px 48px;
+    padding: 24px 28px;
   }
 
   .stats-grid {
@@ -2526,8 +2526,8 @@ button.primary-btn:active {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 16px;
-  padding: 20px 0 20px;
+  gap: 12px;
+  padding: 12px 0;
   border-bottom: 1px solid var(--border-panel);
   position: relative;
 }
@@ -2541,7 +2541,7 @@ button.primary-btn:active {
 .header-v2-title {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
@@ -2573,7 +2573,7 @@ button.primary-btn:active {
 .header-v2-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -2646,7 +2646,7 @@ button.primary-btn:active {
 .header-v2-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
@@ -2654,7 +2654,7 @@ button.primary-btn:active {
 .kpi-bar {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
+  gap: 12px;
 }
 
 @media (max-width: 1024px) {
@@ -2672,7 +2672,7 @@ button.primary-btn:active {
 
 .kpi-card {
   border-radius: 16px;
-  padding: 18px 20px;
+  padding: 14px 16px;
   position: relative;
   overflow: hidden;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -2696,7 +2696,7 @@ button.primary-btn:active {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .kpi-icon {
@@ -2756,7 +2756,7 @@ button.primary-btn:active {
 .dashboard-grid-v2 {
   display: grid;
   grid-template-columns: 1fr 360px;
-  gap: 20px;
+  gap: 14px;
   align-items: stretch;
 }
 
@@ -2773,19 +2773,15 @@ button.primary-btn:active {
 }
 
 .dashboard-grid-v2-main {
-  position: relative;
   min-width: 0;
   min-height: 0;
 }
 
 .dashboard-grid-v2-main-content {
-  position: absolute;
-  inset: 0;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 14px;
   width: 100%;
-  min-height: 0;
 }
 
 /* チャートは内容高で止め、残りの高さを実行履歴へ割り当てる */
@@ -2794,23 +2790,27 @@ button.primary-btn:active {
   flex-shrink: 0;
 }
 
-/* 実行履歴ラッパー: 右サイドの下端まで伸びる */
-.activity-log-stretch {
+.dashboard-bottom-log {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  min-height: 360px;
+  max-height: 520px;
   overflow: hidden;
 }
 
-.activity-log-stretch > .glass-panel {
+.dashboard-main-log {
+  width: 100%;
+  min-width: 0;
+}
+
+.dashboard-bottom-log > .glass-panel {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
 
-.activity-log-stretch > .glass-panel .activity-log-table-wrapper {
+.dashboard-bottom-log > .glass-panel .activity-log-table-wrapper {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
@@ -2820,15 +2820,15 @@ button.primary-btn:active {
 .dashboard-grid-v2-side {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
 
 .side-group-panel {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 24px;
+  gap: 14px;
+  padding: 18px;
 }
 
 .side-group-divider {
@@ -2848,13 +2848,13 @@ button.primary-btn:active {
   .dashboard-grid-v2-side {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 14px;
   }
 }
 
 /* --- 価格チャートパネル --- */
 .price-chart-panel {
-  padding: 20px 20px 16px !important;
+  padding: 16px 16px 12px !important;
 }
 
 .price-chart-header {

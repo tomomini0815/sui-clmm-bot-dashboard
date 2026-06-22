@@ -6,12 +6,10 @@ import {
 import { SettingsModal } from './components/SettingsModal';
 import { ActivityLog } from './components/ActivityLog';
 import { HelpModal } from './components/HelpModal';
-import { PnLCard } from './components/PnLCard';
-import { BotWalletCard } from './components/BotWalletCard';
+import { BotRuntimeStatus } from './components/BotRuntimeStatus';
 import { StrategyVisualizer } from './components/StrategyVisualizer';
 import { SafetyGauge } from './components/SafetyGauge';
 import { MtfPanel } from './components/MtfPanel';
-import { MultiBotPanel } from './components/MultiBotPanel';
 import { KpiBar } from './components/KpiBar';
 import { PriceChartPanel } from './components/PriceChartPanel';
 import { ConnectButton, useCurrentAccount } from '@mysten/dapp-kit';
@@ -29,7 +27,6 @@ function App() {
   const [isBotActive, setIsBotActive] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
-  const [allSessions, setAllSessions] = useState<any[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [isActionPending, setIsActionPending] = useState(false);
   const [chartMode, setChartMode] = useState<'recharts' | 'tradingview'>('tradingview');
@@ -84,7 +81,6 @@ function App() {
       const res = await fetch(url);
       const data = await res.json();
       if (data.success) {
-        setAllSessions(data.sessions);
         if (data.sessions.length > 0 && !data.sessions.find((s: any) => s.sessionId === sessionId)) {
           const savedId = localStorage.getItem('session_id');
           if (savedId && data.sessions.find((s: any) => s.sessionId === savedId)) {
@@ -133,12 +129,12 @@ function App() {
     entryPrice: 0,
     positionSize: 0,
     dailyPnl: '0.00',
-    usdJpyRate: 0 as number,
-    suiJpyPrice: 0 as number,
     winRate: '0',
     avgHoldingTime: '0分',
     marketCondition: 'sideways',
     pythPrice: null as number | null,
+    usdJpyRate: 0 as number,
+    suiJpyPrice: 0 as number,
     estimatedApr: 0 as number,
     pnl: null as any,
     delta: null as any,
@@ -278,35 +274,6 @@ function App() {
       showToast('通信エラー: バックエンドが起動中か確認してください', 'error', 5000);
     } finally {
       setIsActionPending(false);
-    }
-  };
-
-  const handleUpdateCapital = async (newAmount: number) => {
-    setStats(prev => ({ ...prev, config: { ...prev.config, lpAmountUsdc: newAmount } }));
-    const loadingId = showToast('運用資金を更新中...', 'loading');
-    try {
-      const response = await fetch(`${apiUrl}/api/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          lpAmountUsdc: newAmount,
-          strategyMode: stats.config.strategyMode,
-          rangeWidth: (stats.config.rangeWidth * 100).toString(),
-          hedgeRatio: (stats.config.hedgeRatio * 100).toString(),
-          configMode: stats.config.configMode || 'auto'
-        }),
-      });
-      const data = await response.json();
-      dismissToast(loadingId);
-      if (data.success) {
-        showToast(`✅ 運用資金を ${newAmount} USDC に更新しました`);
-      } else {
-        showToast('更新に失敗しました', 'error');
-      }
-    } catch (e) {
-      dismissToast(loadingId);
-      showToast('更新に失敗しました。バックエンドが起動中か確認してください。', 'error', 5000);
     }
   };
 
@@ -482,27 +449,6 @@ function App() {
         </div>
 
         <div className="header-v2-actions">
-          {allSessions.length > 0 && (
-            <div className="session-picker">
-              <span>ボット</span>
-              <select
-                value={sessionId || ''}
-                aria-label="運用ボットを選択"
-                onChange={(e) => {
-                  const sid = e.target.value;
-                  setSessionId(sid);
-                  localStorage.setItem('session_id', sid);
-                }}
-              >
-                {allSessions.map((s, idx) => (
-                  <option key={s.sessionId || `session-${idx}`} value={s.sessionId || ''}>
-                    {s.poolObjectId?.includes('b8d7d9') ? 'SUI/USDC' : s.poolObjectId?.includes('e01243') ? 'DEEP/SUI' : 'Pool'} ({s.sessionId?.slice(0, 6) || '---'})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
           {/* コントロールボタン */}
           <button
             id="btn-toggle-bot"
@@ -569,11 +515,11 @@ function App() {
               chartMode={chartMode}
               setChartMode={setChartMode}
             />
-
-            {/* 実行履歴 — flex: 1 で右サイドの下端に揃える */}
-            <div className="activity-log-stretch">
-              <ActivityLog logs={stats.activityLogs} />
-            </div>
+            {chartMode === 'recharts' && (
+              <div className="dashboard-bottom-log dashboard-main-log">
+                <ActivityLog logs={stats.activityLogs} />
+              </div>
+            )}
           </div>
         </div>
 
@@ -594,43 +540,34 @@ function App() {
             />
           </div>
 
-          {/* グループ1: 資金と収益 (Wallet & PnL) */}
+          {/* グループ1: Bot稼働状況と収益 */}
           <div className="glass-panel side-group-panel">
-            <BotWalletCard
-              botAddress={botWalletAddress}
-              suiBalance={stats.pnl?.botWalletBalanceSui || 0}
-              usdcBalance={stats.pnl?.botWalletBalanceUsdc || 0}
-              onRefresh={() => {}}
-              isBotActive={isBotActive}
-              onToggleBot={toggleBotState}
-              onOpenSettings={() => setIsSettingsOpen(true)}
-              onOpenHelp={() => setIsHelpOpen(true)}
-              config={stats.config}
-              onUpdateCapital={handleUpdateCapital}
-              botWalletSufficient={stats.pnl?.botWalletSufficient ?? false}
-              bot1LpValue={stats.pnl?.bot1LpValue || 0}
-              bot2LpValue={stats.pnl?.bot2LpValue || 0}
-              userWalletBalanceSui={stats.pnl?.userWalletBalanceSui || 0}
-              userWalletBalanceUsdc={stats.pnl?.userWalletBalanceUsdc || 0}
-              userWalletSufficient={stats.pnl?.userWalletSufficient ?? false}
-              connectedAddress={currentAccount?.address || ''}
-              currentPrice={stats.currentPrice}
-              isUnbalanced={stats.isUnbalanced}
-              onRebuild={handleRebuild}
-              noPanel={true}
-            />
-            <div className="side-group-divider" />
-            <PnLCard pnl={stats.pnl} gasStats={stats.gasStats} noPanel={true} />
-          </div>
-
-          {/* グループ2: Bot2 */}
-          <div className="glass-panel side-group-panel">
-            <MultiBotPanel
-              title={`Bot2 — ${bot2?.pool || 'DEEP/SUI'}`}
-              bot={bot2}
-              onStart={() => { alert('Bot2は自動で稼働中です。個別設定は不要です。'); }}
-              onRebuild={handleRebuild}
-              noPanel={true}
+            <BotRuntimeStatus
+              bots={[
+                {
+                  name: 'Bot1',
+                  pair: 'SUI/USDC',
+                  active: isBotActive,
+                  phase: stats.currentPhase || undefined,
+                  currentPrice: stats.currentPrice,
+                  priceSuffix: 'USDC',
+                  currentRange: stats.bot1OuterRange?.lower > 0 && stats.bot1OuterRange?.upper > 0 ? stats.bot1OuterRange : stats.currentRange,
+                  lpValue: stats.pnl?.bot1LpValue,
+                  isUnbalanced: stats.isUnbalanced
+                },
+                {
+                  name: 'Bot2',
+                  pair: bot2?.pool || 'DEEP/SUI',
+                  active: bot2?.active === true,
+                  phase: bot2?.phase,
+                  currentPrice: bot2?.currentPrice,
+                  priceSuffix: 'SUI',
+                  currentRange: bot2?.currentRange,
+                  lpValue: bot2?.pnl?.bot2LpValue,
+                  rebalances: bot2?.tracker?.rebalanceCount,
+                  isUnbalanced: bot2?.isUnbalanced
+                }
+              ]}
             />
           </div>
 
@@ -650,12 +587,34 @@ function App() {
         </aside>
       </div>
 
+      {chartMode === 'tradingview' && (
+        <div className="dashboard-bottom-log">
+          <ActivityLog logs={stats.activityLogs} />
+        </div>
+      )}
+
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         apiUrl={apiUrl}
         sessionId={sessionId}
         currentConfig={stats.config}
+        walletInfo={{
+          botAddress: botWalletAddress,
+          suiBalance: stats.pnl?.botWalletBalanceSui || 0,
+          usdcBalance: stats.pnl?.botWalletBalanceUsdc || 0,
+          bot1LpValue: stats.pnl?.bot1LpValue || 0,
+          bot2LpValue: stats.pnl?.bot2LpValue || 0,
+          userWalletBalanceSui: stats.pnl?.userWalletBalanceSui || 0,
+          userWalletBalanceUsdc: stats.pnl?.userWalletBalanceUsdc || 0,
+          connectedAddress: currentAccount?.address || '',
+          currentPrice: stats.currentPrice,
+          isBotActive,
+          isUnbalanced: stats.isUnbalanced
+        }}
+        onToggleBot={toggleBotState}
+        onRebuild={handleRebuild}
+        isActionPending={isActionPending}
       />
       <HelpModal
         isOpen={isHelpOpen}

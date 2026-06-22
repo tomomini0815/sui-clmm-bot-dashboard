@@ -55,9 +55,8 @@ const CustomTooltip = ({ active, payload }: any) => {
   return null;
 };
 
-const formatTime = (timestamp: number | undefined, index: number, total: number): string => {
+const formatTime = (timestamp: number | undefined): string => {
   if (!timestamp) return '';
-  if (index % Math.max(1, Math.floor(total / 8)) !== 0) return '';
   const d = new Date(timestamp);
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 };
@@ -79,7 +78,7 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
     return source.map((p, i) => ({
       price: p.price,
       timestamp: p.timestamp,
-      time: p.timestamp ? formatTime(p.timestamp, i, source.length) : '',
+      time: p.time || formatTime(p.timestamp),
       index: i,
     }));
   }, [priceHistory]);
@@ -98,7 +97,7 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
     return source.map((p, i) => ({
       price: p.price,
       timestamp: p.timestamp,
-      time: p.timestamp ? formatTime(p.timestamp, i, source.length) : '',
+      time: p.time || formatTime(p.timestamp),
       index: i,
     }));
   }, [bot2PriceHistory]);
@@ -298,11 +297,13 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
                       vertical={false}
                     />
                     <XAxis
-                      dataKey="time"
+                      dataKey="index"
+                      type="number"
+                      domain={[0, 'dataMax']}
                       tick={{ fill: '#8b949e', fontSize: 11 }}
                       axisLine={false}
                       tickLine={false}
-                      interval="preserveStartEnd"
+                      tickFormatter={(index) => chartData1[Math.round(index)]?.time || ''}
                     />
                     <YAxis
                       domain={yDomain1 as [number, number]}
@@ -394,11 +395,13 @@ export const PriceChartPanel: React.FC<PriceChartPanelProps> = ({
                       vertical={false}
                     />
                     <XAxis
-                      dataKey="time"
+                      dataKey="index"
+                      type="number"
+                      domain={[0, 'dataMax']}
                       tick={{ fill: '#8b949e', fontSize: 11 }}
                       axisLine={false}
                       tickLine={false}
-                      interval="preserveStartEnd"
+                      tickFormatter={(index) => chartData2[Math.round(index)]?.time || ''}
                     />
                     <YAxis
                       domain={yDomain2 as [number, number]}
