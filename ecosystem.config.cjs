@@ -1,35 +1,18 @@
 module.exports = {
   apps: [
     {
-      name: 'sui-bot-backend',
-      script: 'dist/index.js',
-      cwd: 'bot_v2',
-      watch: false,
+      name: "gridbot-server",
+      script: "npx",
+      args: "tsx server/index.ts",
+      cwd: "/Users/tomomi/Sui-LPBot",
+      env_file: ".env",
       autorestart: true,
-      max_memory_restart: '2G',
-      env: {
-        NODE_ENV: 'production',
-        PORT: 3002
-      },
-      error_file: 'logs/backend_error.log',
-      out_file: 'logs/backend_out.log',
-      merge_logs: true,
-      time: true
+      max_restarts: 10,
+      restart_delay: 5000,
+      watch: false,
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      error_file: "logs/server-error.log",
+      out_file: "logs/server-out.log",
     },
-    {
-      name: 'sui-bot-frontend',
-      script: 'node_modules/vite/bin/vite.js',
-      args: 'preview --host 127.0.0.1 --port 5174 --strictPort',
-      cwd: 'frontend',
-      watch: false,
-      autorestart: true,
-      env: {
-        NODE_ENV: 'production'
-      },
-      error_file: 'logs/frontend_error.log',
-      out_file: 'logs/frontend_out.log',
-      merge_logs: true,
-      time: true
-    }
-  ]
+  ],
 };

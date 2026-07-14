@@ -1,59 +1,8 @@
-# Dependency directories
 node_modules/
-jspm_packages/
-
-# Build outputs
-dist/
-dist-ssr/
-build/
-*.local
-
-# Environment variables
 .env
-.env.*
-!.env.example
-
-# Debug logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Editor directories and files
-.vscode/
-.idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# OS files
+.env.local
+data/state.json
+dist/
+dashboard/dist/
+*.log
 .DS_Store
-Thumbs.db
-
-# Bot specific
-bot/tracker_data.json
-bot/dist/
-frontend/dist/
-
-# Fly.io
-.fly/
-*.toml.local
-
-# Bot v2 data
-bot_v2/pnl_data.json
-bot_v2/tracker_data.json
-bot_v2/session_state_*.json
-bot_v2/tracker_*.json
-bot_v2/scratch/
-bot_v2/dist/
-bot_v2/logs/
-bot_v2/config/
-bot_v2/scripts/
-logs/
-bot_v2/backend.log
-bot_v2/backup_sessions/
-bot_v2/state/
-bot_v2/test_response*.json
-get_positions_cetus.ts

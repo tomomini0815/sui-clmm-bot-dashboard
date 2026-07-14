@@ -1,0 +1,31 @@
+{
+  "name": "gridbot-standalone",
+  "version": "1.0.0",
+  "description": "Sui LP Rebalancer — Grid BOT for CLMM DEXes (Cetus / Turbos)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "bot": "tsx src/main.ts",
+    "server": "tsx server/index.ts",
+    "dev": "concurrently \"npm run server\" \"npm run dev --prefix dashboard\"",
+    "build": "tsc && npm run build --prefix dashboard",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cetusprotocol/cetus-sui-clmm-sdk": "^5.4.0",
+    "@mysten/sui": "^1.0.0",
+    "concurrently": "^8.2.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.7",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.9.3",
+    "typescript": "^5.4.5"
+  }
+}
